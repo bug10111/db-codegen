@@ -128,6 +128,62 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
+    /// tool.type 应透传表所属数据库类型：MySQL 表命中 MySQL 专属条目，PG 表回落通用条目，互不串用。
+    /// </summary>
+    [Fact]
+    public void Render_ToolType_UsesTableDatabaseType()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "int", TargetType = "Long" },
+                    new() { DbType = "int", TargetType = "Integer", DatabaseType = DataSourceType.MySql }
+                }
+            }
+        };
+        var engine = new TemplateEngine(new TypeMappingService(config, NullLogger<TypeMappingService>.Instance));
+
+        TableInfo mySqlTable = CreateTable();
+        mySqlTable.DatabaseType = DataSourceType.MySql;
+        TableInfo postgreSqlTable = CreateTable();
+        postgreSqlTable.DatabaseType = DataSourceType.PostgreSql;
+
+        PreviewResult mySql = engine.Render("{{ tool.type('int') }}", mySqlTable, null, CreatePackageContext(), CancellationToken.None);
+        PreviewResult postgreSql = engine.Render("{{ tool.type('int') }}", postgreSqlTable, null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.Equal("Integer", mySql.Output);
+        Assert.Equal("Long", postgreSql.Output);
+    }
+
+    /// <summary>
+    /// 全局映射表应优先于内置包 typeMap：内置包声明 datetime→LocalDateTime，全局表声明 datetime→Date 时渲染结果为 Date。
+    /// </summary>
+    [Fact]
+    public void Render_ToolType_GlobalMappingBeatsPackageTypeMap()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "datetime", TargetType = "Date", Import = "java.util.Date" }
+                }
+            }
+        };
+        var engine = new TemplateEngine(new TypeMappingService(config, NullLogger<TypeMappingService>.Instance));
+
+        // CreatePackageContext 内置包 typeMap 含 datetime→LocalDateTime，全局表 datetime→Date 应优先命中
+        PreviewResult result = engine.Render("{{ tool.type('datetime') }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("Date", result.Output);
+    }
+
+    /// <summary>
     /// 传入 column 时模板内 column 变量应可用，未传入时应渲染为空。
     /// </summary>
     [Fact]
@@ -348,11 +404,15 @@ public sealed class TemplateEngineTests
         public string ConfigFilePath => "stub";
 
         /// <inheritdoc />
+        public event EventHandler? ConfigChanged;
+
+        /// <inheritdoc />
         public AppConfig Load() => Current;
 
         /// <inheritdoc />
         public void Save()
         {
+            ConfigChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <inheritdoc />

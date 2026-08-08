@@ -1,4 +1,5 @@
 using System.Text;
+using DbCodeGen.Core.Model;
 using Scriban;
 using Scriban.Runtime;
 using Scriban.Syntax;
@@ -13,13 +14,14 @@ public static class ToolFunctions
 {
     /// <summary>
     /// 构建 tool 脚本对象；type 函数按当前包 manifest 类型映射表实时计算映射结果，
-    /// 并提供可选全局映射服务下的导包能力。本工程 Scriban 不接受裸委托注册，函数全部经 IScriptCustomFunction 包装器暴露。
+    /// 并提供可选全局映射服务下的按数据库类型解析与导包能力。本工程 Scriban 不接受裸委托注册，函数全部经 IScriptCustomFunction 包装器暴露。
     /// </summary>
     /// <param name="packageContext">package 侧渲染上下文，提供当前包类型映射表。</param>
     /// <param name="typeMappingService">全局类型映射解析服务；为空时 type 退化为按包 typeMap 的旧行为，导包函数返回空串。</param>
+    /// <param name="databaseType">当前表所属数据库类型，供全局映射按库分桶匹配；为空时仅命中通用条目。</param>
     /// <returns>含 firstLowerCase/firstUpperCase/hump2Underline/hump3Underline/type/typeImport/imports 的 tool 脚本对象。</returns>
     /// <exception cref="ArgumentNullException">packageContext 为 null 时抛出。</exception>
-    public static ScriptObject Build(TemplatePackageContext packageContext, ITypeMappingService? typeMappingService = null)
+    public static ScriptObject Build(TemplatePackageContext packageContext, ITypeMappingService? typeMappingService = null, DataSourceType? databaseType = null)
     {
         ArgumentNullException.ThrowIfNull(packageContext);
 
@@ -29,14 +31,14 @@ public static class ToolFunctions
         tool.SetValue("hump2Underline", new ScriptToolFunction(args => Hump2Underline(args.FirstOrDefault()?.ToString())), true);
         tool.SetValue("hump3Underline", new ScriptToolFunction(args => Hump3Underline(args.FirstOrDefault()?.ToString())), true);
 
-        // 类型映射闭包当前包类型映射表与全局映射服务：有服务时走"全局表>包typeMap>兜底"解析链，否则按旧包行为
-        tool.SetValue("type", new ScriptToolFunction(args => ResolveType(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService)), true);
+        // 类型映射闭包当前包类型映射表、全局映射服务与数据库类型：有服务时走"库专属>通用>包typeMap>兜底"解析链，否则按旧包行为
+        tool.SetValue("type", new ScriptToolFunction(args => ResolveType(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService, databaseType)), true);
 
         // 单类型导包：返回映射条目声明的导包（如 java.math.BigDecimal），无导包需求时返回空串
-        tool.SetValue("typeImport", new ScriptToolFunction(args => ResolveImport(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService)), true);
+        tool.SetValue("typeImport", new ScriptToolFunction(args => ResolveImport(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService, databaseType)), true);
 
         // 列集合导包块：对传入的列集合/表去重后生成 import 语句块，供实体模板自动导包，无导包时返回空串
-        tool.SetValue("imports", new ScriptToolFunction(args => BuildImportsBlock(args, packageContext.TypeMap, typeMappingService)), true);
+        tool.SetValue("imports", new ScriptToolFunction(args => BuildImportsBlock(args, packageContext.TypeMap, typeMappingService, databaseType)), true);
         return tool;
     }
 
@@ -130,12 +132,13 @@ public static class ToolFunctions
     /// <param name="dbType">数据库原始类型，可为空。</param>
     /// <param name="packageTypeMap">当前包 manifest 类型映射表。</param>
     /// <param name="service">全局类型映射服务，可为空。</param>
+    /// <param name="databaseType">当前表所属数据库类型，可为空。</param>
     /// <returns>目标语言类型名。</returns>
-    private static string ResolveType(string? dbType, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service)
+    private static string ResolveType(string? dbType, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service, DataSourceType? databaseType)
     {
         return service is null
             ? TypeMapper.MapType(dbType, packageTypeMap)
-            : service.Resolve(dbType, packageTypeMap).TypeName;
+            : service.Resolve(dbType, databaseType, packageTypeMap).TypeName;
     }
 
     /// <summary>
@@ -144,15 +147,16 @@ public static class ToolFunctions
     /// <param name="dbType">数据库原始类型，可为空。</param>
     /// <param name="packageTypeMap">当前包 manifest 类型映射表。</param>
     /// <param name="service">全局类型映射服务，可为空。</param>
+    /// <param name="databaseType">当前表所属数据库类型，可为空。</param>
     /// <returns>映射条目声明的导包路径；无导包需求时为空串。</returns>
-    private static string ResolveImport(string? dbType, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service)
+    private static string ResolveImport(string? dbType, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service, DataSourceType? databaseType)
     {
         if (service is null || string.IsNullOrWhiteSpace(dbType))
         {
             return string.Empty;
         }
 
-        TypeMappingResult result = service.Resolve(dbType, packageTypeMap);
+        TypeMappingResult result = service.Resolve(dbType, databaseType, packageTypeMap);
         return result.Import ?? string.Empty;
     }
 
@@ -163,8 +167,9 @@ public static class ToolFunctions
     /// <param name="args">tool.imports 的调用参数数组。</param>
     /// <param name="packageTypeMap">当前包 manifest 类型映射表。</param>
     /// <param name="service">全局类型映射服务，可为空。</param>
+    /// <param name="databaseType">当前表所属数据库类型，可为空。</param>
     /// <returns>去重排序后的导包语句块，无导包时返回空串。</returns>
-    private static string BuildImportsBlock(object?[] args, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service)
+    private static string BuildImportsBlock(object?[] args, IReadOnlyDictionary<string, string> packageTypeMap, ITypeMappingService? service, DataSourceType? databaseType)
     {
         var dbTypes = new List<string>();
         foreach (object? arg in args)
@@ -175,7 +180,7 @@ public static class ToolFunctions
         var imports = new SortedSet<string>(StringComparer.Ordinal);
         foreach (string dbType in dbTypes)
         {
-            string import = ResolveImport(dbType, packageTypeMap, service);
+            string import = ResolveImport(dbType, packageTypeMap, service, databaseType);
             if (!string.IsNullOrWhiteSpace(import))
             {
                 imports.Add(import);

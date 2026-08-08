@@ -9,7 +9,8 @@ namespace DbCodeGen.Core.Config;
 public class AppConfig
 {
     /// <summary>
-    /// 配置结构版本号，当前版本 2；低于当前版本的文件加载时经 ConfigService 迁移补默认字段并升到 2。
+    /// 配置结构版本号，当前版本 3；低于当前版本的文件加载时经 ConfigService 迁移并按库重灌默认映射，同时升到 3。
+    /// 初始值 1 用于反序列化无版本字段的旧文件时触发迁移。
     /// </summary>
     public int Version { get; set; } = 1;
 

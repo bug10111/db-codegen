@@ -164,7 +164,7 @@ public sealed class TemplateEngine
         var root = new ScriptObject();
         root.SetValue("table", BuildTableObject(table), true);
         root.SetValue("package", BuildPackageObject(packageContext), true);
-        root.SetValue("tool", ToolFunctions.Build(packageContext, _typeMappingService), true);
+        root.SetValue("tool", ToolFunctions.Build(packageContext, _typeMappingService, table.DatabaseType), true);
 
         // 当前列上下文仅在调用方显式提供时注入，模板内按需使用
         if (column is not null)

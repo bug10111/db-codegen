@@ -556,6 +556,9 @@ public sealed class CodeGeneratorTests : IDisposable
         public string ConfigFilePath => Path.Combine(Path.GetTempPath(), "DbCodeGenTests", "config.json");
 
         /// <inheritdoc />
+        public event EventHandler? ConfigChanged;
+
+        /// <inheritdoc />
         public AppConfig Load()
         {
             return Current;
@@ -565,6 +568,7 @@ public sealed class CodeGeneratorTests : IDisposable
         public void Save()
         {
             SaveCount++;
+            ConfigChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <inheritdoc />

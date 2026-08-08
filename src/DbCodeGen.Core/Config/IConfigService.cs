@@ -19,6 +19,12 @@ public interface IConfigService
     void Save();
 
     /// <summary>
+    /// 配置保存完成事件，成功落盘后触发，供依赖配置的消费方（如预览区）感知配置变化并刷新。
+    /// 事件在锁外触发，回调内可安全再次读写配置。
+    /// </summary>
+    event EventHandler? ConfigChanged;
+
+    /// <summary>
     /// 内存中最新配置快照，首次访问时自动加载，可作为各功能的只读取值入口。
     /// </summary>
     AppConfig Current { get; }

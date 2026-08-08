@@ -6,16 +6,70 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace DbCodeGen.Core.Tests.Templates;
 
 /// <summary>
-/// 全局类型映射解析服务单元测试，覆盖"全局表>包typeMap>兜底"解析链、去修饰匹配、
-/// 多词类型保留与生成前未映射类型预检。
+/// 全局类型映射解析服务单元测试，覆盖"库专属>通用>包typeMap>兜底"解析链、
+/// 按数据库类型分桶、去修饰匹配、多词类型保留与生成前未映射类型预检。
 /// </summary>
 public sealed class TypeMappingServiceTests
 {
     /// <summary>
-    /// 全局映射表优先于包 typeMap：同名键两边都有时返回全局表的类型与导包。
+    /// 当前数据库专属条目应优先于通用条目：MySQL 的 int 命中 MySQL 专属，不命中通用同名条目。
     /// </summary>
     [Fact]
-    public void Resolve_GlobalMapping_BeatsPackageTypeMap()
+    public void Resolve_DatabaseSpecific_BeatsGeneric()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "int", TargetType = "Integer" },
+                    new() { DbType = "int", TargetType = "Long", DatabaseType = DataSourceType.MySql }
+                }
+            }
+        };
+        TypeMappingService service = CreateService(config);
+
+        TypeMappingResult mySql = service.Resolve("int", DataSourceType.MySql, null);
+        TypeMappingResult postgreSql = service.Resolve("int", DataSourceType.PostgreSql, null);
+
+        Assert.Equal("Long", mySql.TypeName);
+        Assert.Equal("Integer", postgreSql.TypeName);
+    }
+
+    /// <summary>
+    /// PostgreSQL 专属类型应仅在数据库类型为 PostgreSQL 时命中，其它数据库回落兜底。
+    /// </summary>
+    [Fact]
+    public void Resolve_PostgreSqlType_OnlyMatchesPostgreSql()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "integer", TargetType = "Integer", DatabaseType = DataSourceType.PostgreSql },
+                    new() { DbType = "timestamp without time zone", TargetType = "Date", Import = "java.util.Date", DatabaseType = DataSourceType.PostgreSql }
+                }
+            }
+        };
+        TypeMappingService service = CreateService(config);
+
+        TypeMappingResult pgInteger = service.Resolve("integer", DataSourceType.PostgreSql, null);
+        TypeMappingResult mySqlInteger = service.Resolve("integer", DataSourceType.MySql, null);
+
+        Assert.True(pgInteger.Found);
+        Assert.Equal("Integer", pgInteger.TypeName);
+        Assert.False(mySqlInteger.Found);
+        Assert.Equal("String", mySqlInteger.TypeName);
+    }
+
+    /// <summary>
+    /// 通用条目对所有数据库生效，全局通用映射优先于包 typeMap。
+    /// </summary>
+    [Fact]
+    public void Resolve_GenericMapping_BeatsPackageTypeMap()
     {
         var config = new StubConfigService
         {
@@ -30,7 +84,7 @@ public sealed class TypeMappingServiceTests
         TypeMappingService service = CreateService(config);
         var packageTypeMap = new Dictionary<string, string> { ["bigint"] = "Long" };
 
-        TypeMappingResult result = service.Resolve("bigint", packageTypeMap);
+        TypeMappingResult result = service.Resolve("bigint", DataSourceType.MySql, packageTypeMap);
 
         Assert.True(result.Found);
         Assert.Equal("BigInteger", result.TypeName);
@@ -46,7 +100,7 @@ public sealed class TypeMappingServiceTests
         var service = CreateService(new StubConfigService());
         var packageTypeMap = new Dictionary<string, string> { ["bigint"] = "java.lang.Long" };
 
-        TypeMappingResult result = service.Resolve("bigint", packageTypeMap);
+        TypeMappingResult result = service.Resolve("bigint", DataSourceType.MySql, packageTypeMap);
 
         Assert.True(result.Found);
         Assert.Equal("java.lang.Long", result.TypeName);
@@ -61,7 +115,7 @@ public sealed class TypeMappingServiceTests
     {
         var service = CreateService(new StubConfigService());
 
-        TypeMappingResult result = service.Resolve("jsonb", null);
+        TypeMappingResult result = service.Resolve("jsonb", DataSourceType.MySql, null);
 
         Assert.False(result.Found);
         Assert.Equal("String", result.TypeName);
@@ -91,7 +145,7 @@ public sealed class TypeMappingServiceTests
         };
         TypeMappingService service = CreateService(config);
 
-        TypeMappingResult result = service.Resolve(rawDbType, null);
+        TypeMappingResult result = service.Resolve(rawDbType, DataSourceType.MySql, null);
 
         Assert.True(result.Found);
         Assert.Equal(expected, result.TypeName);
@@ -116,8 +170,8 @@ public sealed class TypeMappingServiceTests
         };
         TypeMappingService service = CreateService(config);
 
-        TypeMappingResult tz = service.Resolve("timestamp with time zone", null);
-        TypeMappingResult plain = service.Resolve("timestamp", null);
+        TypeMappingResult tz = service.Resolve("timestamp with time zone", DataSourceType.PostgreSql, null);
+        TypeMappingResult plain = service.Resolve("timestamp", DataSourceType.PostgreSql, null);
 
         Assert.Equal("OffsetDateTime", tz.TypeName);
         Assert.Equal("LocalDateTime", plain.TypeName);
@@ -125,6 +179,7 @@ public sealed class TypeMappingServiceTests
 
     /// <summary>
     /// 未映射类型预检应归并同类型跨表跨列出现次数，记录首次出现位置，全部命中时为空。
+    /// 预检按表所属数据库类型解析，PG 表的 integer 命中 PG 条目。
     /// </summary>
     [Fact]
     public void FindUnmappedTypes_MergesOccurrences_AndSkipsMapped()
@@ -133,19 +188,23 @@ public sealed class TypeMappingServiceTests
         {
             Current = new AppConfig
             {
-                TypeMappings = new List<TypeMappingEntry> { new() { DbType = "bigint", TargetType = "Long" } }
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "integer", TargetType = "Integer", DatabaseType = DataSourceType.PostgreSql },
+                    new() { DbType = "bigint", TargetType = "Long" }
+                }
             }
         };
         TypeMappingService service = CreateService(config);
 
-        var table = new TableInfo { RawName = "sys_user" };
+        var table = new TableInfo { RawName = "sys_user", DatabaseType = DataSourceType.PostgreSql };
         table.SetColumns(new[]
         {
-            new ColumnInfo { RawName = "id", RawDbType = "bigint" },
+            new ColumnInfo { RawName = "id", RawDbType = "integer" },
             new ColumnInfo { RawName = "meta", RawDbType = "jsonb" },
             new ColumnInfo { RawName = "tags", RawDbType = "text[]" }
         });
-        var other = new TableInfo { RawName = "sys_role" };
+        var other = new TableInfo { RawName = "sys_role", DatabaseType = DataSourceType.PostgreSql };
         other.SetColumns(new[]
         {
             new ColumnInfo { RawName = "extra", RawDbType = "jsonb" }
@@ -177,13 +236,13 @@ public sealed class TypeMappingServiceTests
                 TypeMappings = new List<TypeMappingEntry>
                 {
                     new() { DbType = "bigint", TargetType = "Long" },
-                    new() { DbType = "varchar", TargetType = "String" }
+                    new() { DbType = "varchar", TargetType = "String", DatabaseType = DataSourceType.MySql }
                 }
             }
         };
         TypeMappingService service = CreateService(config);
 
-        var table = new TableInfo { RawName = "sys_user" };
+        var table = new TableInfo { RawName = "sys_user", DatabaseType = DataSourceType.MySql };
         table.SetColumns(new[]
         {
             new ColumnInfo { RawName = "id", RawDbType = "bigint" },
@@ -209,11 +268,15 @@ public sealed class TypeMappingServiceTests
         public string ConfigFilePath => "stub";
 
         /// <inheritdoc />
+        public event EventHandler? ConfigChanged;
+
+        /// <inheritdoc />
         public AppConfig Load() => Current;
 
         /// <inheritdoc />
         public void Save()
         {
+            ConfigChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <inheritdoc />

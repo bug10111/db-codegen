@@ -57,6 +57,13 @@ public sealed class TableCatalogService
         await using DbConnection connection = await _dataSourceService.OpenConnectionAsync(config, ct).ConfigureAwait(false);
         using ISchemaReader reader = _schemaReaderFactory.Create(config.Type, connection);
         IReadOnlyList<TableInfo> tables = await reader.GetTablesAsync(ct).ConfigureAwait(false);
+
+        // 按当前连接数据库类型打标，供类型映射按库分桶匹配
+        foreach (TableInfo table in tables)
+        {
+            table.DatabaseType = config.Type;
+        }
+
         _logger.LogInformation(
             "读取表清单完成，连接名 {ConnectionName}，表数量 {TableCount}。", config.Name, tables.Count);
         return tables;
@@ -85,6 +92,9 @@ public sealed class TableCatalogService
         await using DbConnection connection = await _dataSourceService.OpenConnectionAsync(config, ct).ConfigureAwait(false);
         using ISchemaReader reader = _schemaReaderFactory.Create(config.Type, connection);
         TableInfo detail = await reader.GetTableAsync(tableName, ct).ConfigureAwait(false);
+
+        // 按当前连接数据库类型打标，供类型映射按库分桶匹配
+        detail.DatabaseType = config.Type;
         _detailCache[cacheKey] = detail;
         _logger.LogInformation(
             "读取表详情完成，连接名 {ConnectionName}，表名 {TableName}，列数量 {ColumnCount}。",

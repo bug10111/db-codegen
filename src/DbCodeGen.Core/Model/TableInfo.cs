@@ -35,6 +35,12 @@ public class TableInfo
     public string? Comment { get; set; }
 
     /// <summary>
+    /// 所属数据库类型，由表元数据服务读取时打标；null 表示未知，类型映射解析时仅命中通用条目。
+    /// 供类型映射按数据库类型分桶匹配，保证 MySQL 与 PostgreSQL 各自的类型名互不串用。
+    /// </summary>
+    public DataSourceType? DatabaseType { get; set; }
+
+    /// <summary>
     /// 列集合，惰性填充，表清单阶段为空。
     /// </summary>
     public List<ColumnInfo> Columns { get; set; } = new();

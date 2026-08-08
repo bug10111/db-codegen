@@ -26,4 +26,10 @@ public sealed class TypeMappingEntry
     /// 可选备注，如"MySQL 大整数"，供映射窗口展示说明。
     /// </summary>
     public string? Remark { get; set; }
+
+    /// <summary>
+    /// 适用数据库类型，null 表示通用（对所有数据库生效）。
+    /// 匹配时优先命中当前数据库类型条目，未命中再回落通用条目，保证不同数据库各自的类型名互不串用。
+    /// </summary>
+    public DataSourceType? DatabaseType { get; set; }
 }

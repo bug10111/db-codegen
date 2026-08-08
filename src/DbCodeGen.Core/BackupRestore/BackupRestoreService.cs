@@ -245,7 +245,8 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
                 DbType = entry.DbType,
                 TargetType = entry.TargetType,
                 Import = entry.Import,
-                Remark = entry.Remark
+                Remark = entry.Remark,
+                DatabaseType = entry.DatabaseType
             });
         }
 
@@ -686,7 +687,8 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
                 DbType = entry.DbType.Trim(),
                 TargetType = entry.TargetType.Trim(),
                 Import = string.IsNullOrWhiteSpace(entry.Import) ? null : entry.Import.Trim(),
-                Remark = entry.Remark
+                Remark = entry.Remark,
+                DatabaseType = entry.DatabaseType
             });
         }
 

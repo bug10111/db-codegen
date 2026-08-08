@@ -77,7 +77,7 @@ public sealed class ConfigServiceTests : IDisposable
         AppConfig config = service.Load();
 
         Assert.True(File.Exists(configPath));
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
         Assert.Equal(string.Empty, config.WorkspaceRoot);
         Assert.Equal(string.Empty, config.LastRelativeOutputRoot);
         Assert.Equal("https://dashscope.aliyuncs.com/compatible-mode/v1", config.Llm.BaseUrl);
@@ -92,7 +92,7 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
-    /// 旧版配置（Version 1 且无类型映射字段）加载时应补内置默认映射并升级到 Version 2。
+    /// 旧版配置（Version 2 及以下）加载时应升级到 Version 3，并按数据库类型分桶重灌内置默认映射。
     /// </summary>
     [Fact]
     public void Load_VersionOneWithoutTypeMappings_MigratesToDefaults()
@@ -103,24 +103,25 @@ public sealed class ConfigServiceTests : IDisposable
 
         AppConfig config = service.Load();
 
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
         Assert.NotEmpty(config.TypeMappings);
-        Assert.Contains(config.TypeMappings, entry => entry.DbType == "bigint" && entry.TargetType == "Long");
+        Assert.Contains(config.TypeMappings, entry => entry.DbType == "bigint" && entry.TargetType == "Long" && entry.DatabaseType is null);
+        Assert.Contains(config.TypeMappings, entry => entry.DbType == "integer" && entry.TargetType == "Integer" && entry.DatabaseType == DataSourceType.PostgreSql);
     }
 
     /// <summary>
-    /// 已升级到 Version 2 后用户清空映射表，再次加载不应被回填默认映射。
+    /// 已升级到 Version 3 后用户清空映射表，再次加载不应被回填默认映射。
     /// </summary>
     [Fact]
-    public void Load_VersionTwoWithClearedMappings_DoesNotReseed()
+    public void Load_VersionThreeWithClearedMappings_DoesNotReseed()
     {
         ConfigService service = CreateServiceInNewDirectory(out string configPath);
         Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
-        File.WriteAllText(configPath, """{"version":2,"typeMappings":[]}""");
+        File.WriteAllText(configPath, """{"version":3,"typeMappings":[]}""");
 
         AppConfig config = service.Load();
 
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
         Assert.Empty(config.TypeMappings);
     }
 
@@ -139,6 +140,9 @@ public sealed class ConfigServiceTests : IDisposable
         config.Llm.Model = "qwen-max";
         config.TemplateSearchDirectories.Clear();
         config.TemplateSearchDirectories.Add(@"C:\templates\custom");
+        config.TypeMappings.Clear();
+        config.TypeMappings.Add(new TypeMappingEntry { DbType = "jsonb", TargetType = "String", DatabaseType = DataSourceType.PostgreSql });
+        config.TypeMappings.Add(new TypeMappingEntry { DbType = "varchar", TargetType = "String" });
         config.DataSources.Add(new DataSourceConfig
         {
             Name = "dev",
@@ -172,6 +176,13 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Equal("p@ss", _protector.Decrypt(dataSource.PasswordCipher));
         Assert.Equal(new DateTime(2026, 1, 1, 8, 0, 0), dataSource.CreatedAt);
         Assert.Equal(new DateTime(2026, 1, 1, 8, 0, 0), dataSource.UpdatedAt);
+
+        // 类型映射含数据库作用域字段应完整还原：PG 专属条目与通用条目均保留 DatabaseType 值
+        Assert.Equal(2, loaded.TypeMappings.Count);
+        TypeMappingEntry pgEntry = loaded.TypeMappings.Single(entry => entry.DbType == "jsonb");
+        Assert.Equal(DataSourceType.PostgreSql, pgEntry.DatabaseType);
+        TypeMappingEntry genericEntry = loaded.TypeMappings.Single(entry => entry.DbType == "varchar");
+        Assert.Null(genericEntry.DatabaseType);
     }
 
     /// <summary>
@@ -237,7 +248,7 @@ public sealed class ConfigServiceTests : IDisposable
 
         AppConfig config = service.Load();
 
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
         Assert.Equal(string.Empty, config.WorkspaceRoot);
         string configDirectory = Path.GetDirectoryName(configPath)!;
         string[] backups = Directory.GetFiles(configDirectory, "config.json.bak.*");
@@ -259,7 +270,7 @@ public sealed class ConfigServiceTests : IDisposable
 
         AppConfig config = service.Load();
 
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
         string configDirectory = Path.GetDirectoryName(configPath)!;
         Assert.NotEmpty(Directory.GetFiles(configDirectory, "config.json.bak.*"));
         Assert.True(File.Exists(configPath));
@@ -281,7 +292,7 @@ public sealed class ConfigServiceTests : IDisposable
         AppConfig config = service.Load();
 
         // 首启落盘失败时 Load 仍应返回内存默认配置，不崩溃
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
 
         config.WorkspaceRoot = @"C:\workspace\should-keep";
         ConfigSaveException exception = Assert.Throws<ConfigSaveException>(() => service.Save());
@@ -302,7 +313,7 @@ public sealed class ConfigServiceTests : IDisposable
 
         Assert.True(File.Exists(configPath));
         AppConfig config = service.Load();
-        Assert.Equal(2, config.Version);
+        Assert.Equal(3, config.Version);
     }
 
     /// <summary>

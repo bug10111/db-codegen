@@ -28,7 +28,7 @@ public sealed class TypeMappingService : ITypeMappingService
     }
 
     /// <inheritdoc />
-    public TypeMappingResult Resolve(string? rawDbType, IReadOnlyDictionary<string, string>? packageTypeMap, string fallback = "String")
+    public TypeMappingResult Resolve(string? rawDbType, DataSourceType? databaseType, IReadOnlyDictionary<string, string>? packageTypeMap, string fallback = "String")
     {
         if (string.IsNullOrWhiteSpace(rawDbType))
         {
@@ -37,11 +37,33 @@ public sealed class TypeMappingService : ITypeMappingService
 
         string normalized = TypeMapper.Normalize(rawDbType);
 
-        // 全局映射表优先：用户配置的映射对全部模板包生效
+        // 第一轮：命中当前数据库类型专属条目，同类型名在不同数据库可映射不同目标类型
+        if (databaseType is not null)
+        {
+            foreach (TypeMappingEntry entry in _configService.Current.TypeMappings)
+            {
+                // 跳过空条目、非当前库条目与缺键缺值的非法条目，避免配置异常时解析崩溃
+                if (entry is null
+                    || entry.DatabaseType != databaseType
+                    || string.IsNullOrWhiteSpace(entry.DbType)
+                    || string.IsNullOrWhiteSpace(entry.TargetType)
+                    || TypeMapper.Normalize(entry.DbType) != normalized)
+                {
+                    continue;
+                }
+
+                return new TypeMappingResult(
+                    true,
+                    entry.TargetType.Trim(),
+                    string.IsNullOrWhiteSpace(entry.Import) ? null : entry.Import.Trim());
+            }
+        }
+
+        // 第二轮：命中通用条目（对所有数据库生效），数据库专属条目优先于通用条目
         foreach (TypeMappingEntry entry in _configService.Current.TypeMappings)
         {
-            // 跳过空条目与缺键缺值的非法条目，避免配置异常时解析崩溃
             if (entry is null
+                || entry.DatabaseType is not null
                 || string.IsNullOrWhiteSpace(entry.DbType)
                 || string.IsNullOrWhiteSpace(entry.TargetType)
                 || TypeMapper.Normalize(entry.DbType) != normalized)
@@ -87,6 +109,8 @@ public sealed class TypeMappingService : ITypeMappingService
 
         foreach (TableInfo table in tables)
         {
+            // 按表所属数据库类型解析，各库类型名分桶互不串用
+            DataSourceType? databaseType = table.DatabaseType;
             foreach (ColumnInfo column in table.Columns)
             {
                 if (string.IsNullOrWhiteSpace(column.RawDbType))
@@ -94,7 +118,7 @@ public sealed class TypeMappingService : ITypeMappingService
                     continue;
                 }
 
-                TypeMappingResult resolved = Resolve(column.RawDbType, packageTypeMap);
+                TypeMappingResult resolved = Resolve(column.RawDbType, databaseType, packageTypeMap);
                 if (resolved.Found)
                 {
                     continue;

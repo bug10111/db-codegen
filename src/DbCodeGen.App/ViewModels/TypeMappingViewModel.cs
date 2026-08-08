@@ -42,6 +42,23 @@ public sealed partial class TypeMappingRowViewModel : ObservableObject
     private string _remark = string.Empty;
 
     /// <summary>
+    /// 适用数据库类型，null 表示通用（对所有数据库生效）。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DatabaseScopeName))]
+    private DataSourceType? _databaseType;
+
+    /// <summary>
+    /// 适用数据库展示名，供 DataGrid 单元格非编辑态展示。
+    /// </summary>
+    public string DatabaseScopeName => DatabaseType switch
+    {
+        DataSourceType.MySql => "MySQL",
+        DataSourceType.PostgreSql => "PostgreSQL",
+        _ => "通用"
+    };
+
+    /// <summary>
     /// 使用空值构造映射行，供新增操作使用。
     /// </summary>
     public TypeMappingRowViewModel()
@@ -60,6 +77,7 @@ public sealed partial class TypeMappingRowViewModel : ObservableObject
         TargetType = entry.TargetType ?? string.Empty;
         Import = entry.Import ?? string.Empty;
         Remark = entry.Remark ?? string.Empty;
+        DatabaseType = entry.DatabaseType;
     }
 
     /// <summary>
@@ -73,7 +91,8 @@ public sealed partial class TypeMappingRowViewModel : ObservableObject
             DbType = DbType.Trim(),
             TargetType = TargetType.Trim(),
             Import = string.IsNullOrWhiteSpace(Import) ? null : Import.Trim(),
-            Remark = string.IsNullOrWhiteSpace(Remark) ? null : Remark
+            Remark = string.IsNullOrWhiteSpace(Remark) ? null : Remark,
+            DatabaseType = DatabaseType
         };
     }
 }
@@ -94,6 +113,16 @@ public sealed partial class TypeMappingViewModel : ObservableObject
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
+    };
+
+    /// <summary>
+    /// "适用数据库"下拉候选集，通用条目对所有数据库生效。
+    /// </summary>
+    public static IReadOnlyList<DatabaseScopeItem> DatabaseScopes { get; } = new[]
+    {
+        new DatabaseScopeItem(null, "通用"),
+        new DatabaseScopeItem(DataSourceType.MySql, "MySQL"),
+        new DatabaseScopeItem(DataSourceType.PostgreSql, "PostgreSQL")
     };
 
     /// <summary>
@@ -327,11 +356,12 @@ public sealed partial class TypeMappingViewModel : ObservableObject
                 return false;
             }
 
-            // 与解析匹配同一规范化规则判重，保证 varchar 与 varchar(255) 等修饰差异也被视为重复
-            string key = TypeMapper.Normalize(row.DbType);
+            // 重复判定按"适用数据库 + 规范化数据库类型"复合键：不同数据库允许同名不同类型，
+            // 与解析匹配同一规范化规则，保证 varchar 与 varchar(255) 等修饰差异也被视为重复
+            string key = $"{row.DatabaseType}|{TypeMapper.Normalize(row.DbType)}";
             if (!seen.Add(key))
             {
-                errorMessage = $"存在重复的数据库类型：{row.DbType.Trim()}，请合并或删除重复行。";
+                errorMessage = $"{ScopeName(row.DatabaseType)}下已存在数据库类型 {row.DbType.Trim()}，请合并或删除重复行。";
                 return false;
             }
         }
@@ -339,4 +369,26 @@ public sealed partial class TypeMappingViewModel : ObservableObject
         errorMessage = null;
         return true;
     }
+
+    /// <summary>
+    /// 将数据库类型枚举转为界面展示名，通用条目返回"通用"。
+    /// </summary>
+    /// <param name="databaseType">适用数据库类型，可为空。</param>
+    /// <returns>展示名。</returns>
+    private static string ScopeName(DataSourceType? databaseType)
+    {
+        return databaseType switch
+        {
+            DataSourceType.MySql => "MySQL",
+            DataSourceType.PostgreSql => "PostgreSQL",
+            _ => "通用"
+        };
+    }
 }
+
+/// <summary>
+/// "适用数据库"下拉项，承载枚举值与展示名，供类型映射窗口选择映射适用的数据库。
+/// </summary>
+/// <param name="Value">数据库类型枚举值，null 表示通用。</param>
+/// <param name="Name">展示名。</param>
+public sealed record DatabaseScopeItem(DataSourceType? Value, string Name);

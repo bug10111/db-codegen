@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Windows;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using DbCodeGen.App.Services;
+using DbCodeGen.Core.Config;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
@@ -24,12 +26,14 @@ public sealed partial class PreviewViewModel : ObservableObject
     private static readonly TimeSpan DebounceInterval = TimeSpan.FromMilliseconds(300);
 
     private readonly TemplateEngine _templateEngine;
+    private readonly IConfigService _configService;
     private readonly TableListViewModel _tableListViewModel;
     private readonly TemplateViewModel _templateViewModel;
     private readonly TableCatalogService _tableCatalogService;
     private readonly ICurrentDataSourceService _currentDataSourceService;
     private readonly IDialogService _dialogService;
     private readonly ILogger<PreviewViewModel> _logger;
+    private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _debounceTimer;
 
     /// <summary>
@@ -107,6 +111,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     /// 并初始化防抖定时器与订阅编辑器文本、当前表变更。
     /// </summary>
     /// <param name="templateEngine">共享渲染引擎，内容渲染统一入口。</param>
+    /// <param name="configService">配置持久化服务，订阅配置保存事件以在类型映射变化后刷新预览。</param>
     /// <param name="tableListViewModel">①区表列表视图模型，提供当前表与表清单。</param>
     /// <param name="templateViewModel">模板编辑器视图模型，提供编辑文本与当前包上下文。</param>
     /// <param name="tableCatalogService">表元数据服务，预览表切换时惰性读取列详情。</param>
@@ -116,6 +121,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public PreviewViewModel(
         TemplateEngine templateEngine,
+        IConfigService configService,
         TableListViewModel tableListViewModel,
         TemplateViewModel templateViewModel,
         TableCatalogService tableCatalogService,
@@ -124,6 +130,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         ILogger<PreviewViewModel> logger)
     {
         ArgumentNullException.ThrowIfNull(templateEngine);
+        ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(tableListViewModel);
         ArgumentNullException.ThrowIfNull(templateViewModel);
         ArgumentNullException.ThrowIfNull(tableCatalogService);
@@ -132,18 +139,23 @@ public sealed partial class PreviewViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(logger);
 
         _templateEngine = templateEngine;
+        _configService = configService;
         _tableListViewModel = tableListViewModel;
         _templateViewModel = templateViewModel;
         _tableCatalogService = tableCatalogService;
         _currentDataSourceService = currentDataSourceService;
         _dialogService = dialogService;
         _logger = logger;
+        _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
 
         _debounceTimer = new DispatcherTimer { Interval = DebounceInterval };
         _debounceTimer.Tick += OnDebounceTick;
 
         _tableListViewModel.PropertyChanged += OnTableListPropertyChanged;
         _templateViewModel.EditorContentChanged += OnTemplateContentChanged;
+
+        // 类型映射等配置保存后重新渲染预览，保证映射改动即时反映到预览代码
+        _configService.ConfigChanged += OnConfigChanged;
 
         // 订阅后立即同步当前表，预览区打开即与①区选中表对齐
         SyncCurrentTable(_tableListViewModel.CurrentTable);
@@ -156,6 +168,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     {
         _tableListViewModel.PropertyChanged -= OnTableListPropertyChanged;
         _templateViewModel.EditorContentChanged -= OnTemplateContentChanged;
+        _configService.ConfigChanged -= OnConfigChanged;
         _debounceTimer.Stop();
         _renderCts?.Cancel();
         _renderCts?.Dispose();
@@ -173,6 +186,22 @@ public sealed partial class PreviewViewModel : ObservableObject
         if (e.PropertyName == nameof(TableListViewModel.CurrentTable))
         {
             SyncCurrentTable(_tableListViewModel.CurrentTable);
+        }
+    }
+
+    /// <summary>
+    /// 配置保存后重新触发预览渲染，保证类型映射等配置改动即时反映到预览代码。
+    /// 配置可能在非 UI 线程保存，统一切换到 UI 线程后经防抖渲染。
+    /// </summary>
+    private void OnConfigChanged(object? sender, EventArgs e)
+    {
+        if (_dispatcher.CheckAccess())
+        {
+            ScheduleRender();
+        }
+        else
+        {
+            _dispatcher.InvokeAsync(ScheduleRender);
         }
     }
 

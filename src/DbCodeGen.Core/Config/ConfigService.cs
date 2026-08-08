@@ -84,7 +84,13 @@ public sealed class ConfigService : IConfigService, IDisposable
         {
             _gate.Release();
         }
+
+        // 成功落盘后在锁外触发变化通知，回调内可安全再次读写配置
+        ConfigChanged?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <inheritdoc />
+    public event EventHandler? ConfigChanged;
 
     /// <inheritdoc />
     public AppConfig Current
@@ -333,7 +339,7 @@ public sealed class ConfigService : IConfigService, IDisposable
 
         return new AppConfig
         {
-            Version = 2,
+            Version = 3,
             WorkspaceRoot = string.Empty,
             LastRelativeOutputRoot = string.Empty,
             Llm = new LlmConfig
@@ -361,16 +367,13 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.DataSources.RemoveAll(item => item is null);
         config.TypeMappings.RemoveAll(item => item is null);
 
-        // 旧版本配置升级：Version 小于 2 时若缺少类型映射表则补内置默认映射，并升到当前版本。
-        // 仅在此升级节点补一次默认，后续用户清空映射不再被回填，保证用户编辑结果被尊重
-        if (config.Version < 2)
+        // 旧版本配置升级：映射模型 v3 引入按数据库类型分桶（通用/MySQL/PostgreSQL），
+        // 迁移时用新的按库默认集整体重灌映射表。该迁移为一次性的结构性升级，
+        // 覆盖旧的无库作用域映射，用户可在映射窗口继续自定义
+        if (config.Version < 3)
         {
-            if (config.TypeMappings.Count == 0)
-            {
-                config.TypeMappings = TypeMappingDefaults.BuildDefault().ToList();
-            }
-
-            config.Version = 2;
+            config.TypeMappings = TypeMappingDefaults.BuildDefault().ToList();
+            config.Version = 3;
         }
 
         // 嵌套子模型内为 null 的字符串字段兜底补默认值，防止下游读取空引用

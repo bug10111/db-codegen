@@ -349,7 +349,7 @@ public sealed class BackupRestoreServiceTests : IDisposable
             UpdatedAt = new DateTime(2026, 2, 1, 8, 0, 0)
         });
         sourceConfig.TypeMappings.Clear();
-        sourceConfig.TypeMappings.Add(new TypeMappingEntry { DbType = "jsonb", TargetType = "String", Remark = "自定义映射" });
+        sourceConfig.TypeMappings.Add(new TypeMappingEntry { DbType = "jsonb", TargetType = "String", Remark = "自定义映射", DatabaseType = DataSourceType.PostgreSql });
         source.ConfigService.Save();
 
         string backupZip = Path.Combine(_tempRoot, "migrate.dbcg");
@@ -388,11 +388,12 @@ public sealed class BackupRestoreServiceTests : IDisposable
         Assert.Equal("app", restoredDataSource.UserId);
         Assert.Equal(string.Empty, restoredDataSource.PasswordCipher);
 
-        // 类型映射表已随备份还原，用户自定义条目完整保留
+        // 类型映射表已随备份还原，用户自定义条目与数据库类型完整保留
         TypeMappingEntry restoredMapping = Assert.Single(restoredConfig.TypeMappings);
         Assert.Equal("jsonb", restoredMapping.DbType);
         Assert.Equal("String", restoredMapping.TargetType);
         Assert.Equal("自定义映射", restoredMapping.Remark);
+        Assert.Equal(DataSourceType.PostgreSql, restoredMapping.DatabaseType);
 
         // 落盘的配置文件文本不得出现任何明文密码或 apiKey
         string configText = await File.ReadAllTextAsync(target.ConfigService.ConfigFilePath);
