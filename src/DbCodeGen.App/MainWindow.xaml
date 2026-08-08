@@ -5,6 +5,7 @@
         Title="DbCodeGen 代码生成器"
         Height="880"
         Width="1440"
+        FontSize="14"
         MinHeight="700"
         MinWidth="1120"
         WindowState="Maximized"
@@ -48,7 +49,6 @@
                           SelectionChanged="OnDataSourceComboBoxSelectionChanged" />
                 <Button x:Name="ManageDataSourcesButton"
                         Content="管理…"
-                        Padding="12,4"
                         Margin="8,0,0,0"
                         VerticalContentAlignment="Center"
                         Click="OnManageDataSourcesClick" />
@@ -58,9 +58,9 @@
         <!-- 主区四区布局骨架：上区三栏为表列表区/模板区/预览区，下区为生成栏，两区之间可拖动调整高度比例 -->
         <Grid Margin="12">
             <Grid.RowDefinitions>
-                <RowDefinition Height="*" MinHeight="240" />
+                <RowDefinition Height="2*" MinHeight="300" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" MinHeight="320" />
+                <RowDefinition Height="*" MinHeight="280" />
             </Grid.RowDefinitions>
 
             <!-- 上下区拖拽分隔条：拖动调整上区与下区(生成栏)的高度比例 -->
@@ -80,9 +80,9 @@
             <!-- 上区三栏布局 -->
             <Grid Grid.Row="0">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="360" />
+                    <ColumnDefinition Width="300" />
                     <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="2*" />
                 </Grid.ColumnDefinitions>
 
                 <!-- 表列表区：数据源表清单、搜索过滤与多选勾选 -->
@@ -99,22 +99,18 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
                             <Button Content="全选"
                                     Command="{Binding SelectAllCommand}"
-                                    Padding="10,2"
                                     Margin="0,0,4,0"
                                     VerticalContentAlignment="Center" />
                             <Button Content="反选"
                                     Command="{Binding InvertSelectionCommand}"
-                                    Padding="10,2"
                                     Margin="0,0,4,0"
                                     VerticalContentAlignment="Center" />
                             <Button Content="清空"
                                     Command="{Binding ClearSelectionCommand}"
-                                    Padding="10,2"
                                     Margin="0,0,4,0"
                                     VerticalContentAlignment="Center" />
                             <Button Content="刷新表"
                                     Command="{Binding RefreshCommand}"
-                                    Padding="10,2"
                                     Margin="8,0,0,0"
                                     VerticalContentAlignment="Center" />
                         </StackPanel>
@@ -161,7 +157,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="190" />
+                            <RowDefinition Height="160" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
@@ -251,7 +247,7 @@
                         <ContentControl Grid.Row="4" Style="{StaticResource DashedGroupBox}">
                             <avalonedit:TextEditor x:Name="TemplateEditor"
                                                    FontFamily="Consolas"
-                                                   FontSize="13"
+                                                   FontSize="14"
                                                    ShowLineNumbers="True"
                                                    HorizontalScrollBarVisibility="Auto"
                                                    VerticalScrollBarVisibility="Auto"
@@ -330,17 +326,16 @@
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
                         <TextBlock Text="工作区根：" VerticalAlignment="Center" />
                         <TextBox Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
-                                 MinWidth="220"
+                                 MinWidth="260"
                                  VerticalContentAlignment="Center"
                                  ToolTip="项目根目录，代码落盘的绝对根前缀" />
                         <Button Content="浏览…"
                                 Command="{Binding PickWorkspaceRootCommand}"
-                                Padding="8,2"
                                 Margin="4,0,0,0"
                                 VerticalContentAlignment="Center" />
                         <TextBlock Text="代码目录：" VerticalAlignment="Center" Margin="12,0,0,0" />
                         <TextBox Text="{Binding CodeDirectory, UpdateSourceTrigger=PropertyChanged}"
-                                 MinWidth="220"
+                                 MinWidth="260"
                                  VerticalContentAlignment="Center"
                                  ToolTip="package（如 com.example.common），用于 package 声明与 import；代码实际落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…" />
                     </StackPanel>
@@ -349,11 +344,9 @@
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,4">
                         <Button Content="预览待写"
                                 Command="{Binding PreviewCommand}"
-                                Padding="12,2"
                                 VerticalContentAlignment="Center" />
                         <Button Content="生成"
                                 Command="{Binding GenerateCommand}"
-                                Padding="12,2"
                                 Margin="8,0,0,0"
                                 VerticalContentAlignment="Center" />
                         <TextBlock Text="{Binding PreviewSummaryText}"
@@ -417,7 +410,7 @@
                                  Text="{Binding LogText, Mode=OneWay}"
                                  IsReadOnly="True"
                                  FontFamily="Consolas"
-                                 FontSize="12"
+                                 FontSize="13"
                                  MinHeight="40"
                                  Background="#FAFAFA"
                                  VerticalScrollBarVisibility="Auto"
