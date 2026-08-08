@@ -137,7 +137,7 @@
                          Text="{Binding LastRelativeOutputRoot, UpdateSourceTrigger=PropertyChanged}"
                          VerticalContentAlignment="Center" />
                 <TextBlock Grid.Row="1"
-                           Text="相对路径（含包名），如 src/main/java/com/example/common；批量代码生成完成后会自动回写最新值。"
+                           Text="package，如 com.example.common；批量代码生成完成后会自动回写最新值，落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…"
                            FontSize="11"
                            Foreground="Gray"
                            Margin="0,4,0,0" />

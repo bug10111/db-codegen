@@ -326,32 +326,24 @@
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <!-- 路径配置行：工作区根与代码目录，均可本次修改 -->
-                    <Grid Grid.Row="0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="2*" />
-                            <ColumnDefinition Width="3*" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,16,0">
-                            <TextBlock Text="工作区根：" VerticalAlignment="Center" />
-                            <TextBox Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
-                                     MinWidth="200"
-                                     VerticalContentAlignment="Center"
-                                     ToolTip="项目根目录，绝对输出路径的根前缀" />
-                            <Button Content="浏览…"
-                                    Command="{Binding PickWorkspaceRootCommand}"
-                                    Padding="8,2"
-                                    Margin="4,0,0,0"
-                                    VerticalContentAlignment="Center" />
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal">
-                            <TextBlock Text="代码目录：" VerticalAlignment="Center" />
-                            <TextBox Text="{Binding CodeDirectory, UpdateSourceTrigger=PropertyChanged}"
-                                     MinWidth="260"
-                                     VerticalContentAlignment="Center"
-                                     ToolTip="项目内代码落盘完整相对路径（含包名），如 src/main/java/com/example/common；自动推导 package 声明与输出路径，生成后回写为默认值" />
-                        </StackPanel>
-                    </Grid>
+                    <!-- 路径配置行：工作区根与代码目录配套使用，紧挨一行横排 -->
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                        <TextBlock Text="工作区根：" VerticalAlignment="Center" />
+                        <TextBox Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
+                                 MinWidth="220"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="项目根目录，代码落盘的绝对根前缀" />
+                        <Button Content="浏览…"
+                                Command="{Binding PickWorkspaceRootCommand}"
+                                Padding="8,2"
+                                Margin="4,0,0,0"
+                                VerticalContentAlignment="Center" />
+                        <TextBlock Text="代码目录：" VerticalAlignment="Center" Margin="12,0,0,0" />
+                        <TextBox Text="{Binding CodeDirectory, UpdateSourceTrigger=PropertyChanged}"
+                                 MinWidth="220"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="package（如 com.example.common），用于 package 声明与 import；代码实际落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…" />
+                    </StackPanel>
 
                     <!-- 操作行：预览待写/生成按钮 + 待写清单摘要 -->
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,4">
