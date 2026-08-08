@@ -1,0 +1,33 @@
+package {{package.basePackage}}.common.entity.{{table.variableName}};
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
+import lombok.experimental.Accessors;
+{{ tool.imports(table.fullColumn) }}
+/**
+ * {{table.comment}}实体类
+ */
+@Data
+@Accessors(chain = true)
+@TableName(value = "{{table.rawName}}", autoResultMap = true)
+@Schema(title = "{{table.comment}}实体类")
+public class {{table.className}} {
+{{ for column in table.primaryKeys }}
+    /**
+     * {{ if column.comment }}{{ column.comment }}{{ else }}{{ column.rawName }}{{ end }}
+     */
+    @TableId(value = "{{ column.rawName }}", type = IdType.ASSIGN_ID)
+    private {{ tool.type(column.rawDbType) }} {{ column.propertyName }};
+{{ end }}
+{{ for column in table.otherColumn }}
+    /**
+     * {{ if column.comment }}{{ column.comment }}{{ else }}{{ column.rawName }}{{ end }}
+     */
+    @TableField(value = "{{ column.rawName }}")
+    private {{ tool.type(column.rawDbType) }} {{ column.propertyName }};
+{{ end }}
+}

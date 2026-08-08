@@ -1,0 +1,69 @@
+package {{package.basePackage}}.common.controller.{{table.variableName}};
+
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
+import {{package.basePackage}}.common.service.{{table.variableName}}.{{table.className}}Service;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * {{table.comment}}控制层
+ */
+@Tag(name = "{{table.comment}}")
+@RequestMapping("/{{table.rawName}}")
+@RestController
+public class {{table.className}}Controller {
+
+    @Autowired
+    private {{table.className}}Service {{table.variableName}}Service;
+
+    /**
+     * 分页查询{{table.comment}}
+     */
+    @GetMapping("page")
+    @Operation(summary = "分页查询{{table.comment}}")
+    public IPage<{{table.className}}> page(Page<{{table.className}}> page) {
+        return {{table.variableName}}Service.findPage(page);
+    }
+
+    /**
+     * 查询单个{{table.comment}}
+     */
+    @GetMapping("find/{id}")
+    @Operation(summary = "查询单个{{table.comment}}")
+    public {{table.className}} findOne(@PathVariable String id) {
+        return {{table.variableName}}Service.findById(id);
+    }
+
+    /**
+     * 创建{{table.comment}}
+     */
+    @PostMapping("create")
+    @Operation(summary = "创建{{table.comment}}")
+    public void create(@RequestBody {{table.className}} entity) {
+        {{table.variableName}}Service.save(entity);
+    }
+
+    /**
+     * 更新{{table.comment}}
+     */
+    @PutMapping("update")
+    @Operation(summary = "更新{{table.comment}}")
+    public void update(@RequestBody {{table.className}} entity) {
+        {{table.variableName}}Service.updateById(entity);
+    }
+
+    /**
+     * 删除{{table.comment}}
+     */
+    @DeleteMapping("deletes")
+    @Operation(summary = "删除{{table.comment}}")
+    public void deleteByIds(@RequestBody List<String> ids) {
+        {{table.variableName}}Service.deleteByIds(ids);
+    }
+}

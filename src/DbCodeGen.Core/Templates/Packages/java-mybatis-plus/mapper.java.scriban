@@ -1,0 +1,13 @@
+package {{package.basePackage}}.common.mapper.{{table.variableName}};
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
+import org.apache.ibatis.annotations.Mapper;
+
+/**
+ * {{table.comment}}数据访问层
+ */
+@Mapper
+public interface {{table.className}}Mapper extends BaseMapper<{{table.className}}> {
+
+}

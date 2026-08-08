@@ -1,0 +1,37 @@
+# ===== .NET 构建产物 =====
+bin/
+obj/
+*.user
+*.suo
+
+# ===== 发布与测试产物 =====
+publish/
+*.pdb
+TestResults/
+*.coverage
+*.coveragexml
+
+# ===== IDE / 编辑器 =====
+.vs/
+.vscode/
+.idea/
+
+# ===== 用户本地设置 =====
+*.rsuser
+*.local
+.claude/settings.local.json
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 本地文档（设计/计划文档不纳入版本库） =====
+docs/
+
+# ===== 版本库元数据（git 自身不跟踪，此处冗余防御） =====
+.git/
+
+# ===== 操作系统 =====
+Thumbs.db
+Desktop.ini
+.DS_Store

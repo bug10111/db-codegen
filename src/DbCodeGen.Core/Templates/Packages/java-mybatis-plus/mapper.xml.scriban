@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="{{package.basePackage}}.common.mapper.{{table.variableName}}.{{table.className}}Mapper">
+
+    <insert id="insertBatch"{{ if table.primaryKeys && table.primaryKeys.size > 0 }} keyProperty="{{ table.primaryKeys[0].propertyName }}"{{ end }} useGeneratedKeys="true">
+        insert into {{table.rawName}} ({{ for column in table.fullColumn }}{{ column.rawName }}{{ if for.last == false }}, {{ end }}{{ end }})
+        values
+        <foreach collection="entities" item="entity" separator=",">
+            ({{ for column in table.fullColumn }}#{entity.{{ column.propertyName }}}{{ if for.last == false }}, {{ end }}{{ end }})
+        </foreach>
+    </insert>
+
+</mapper>

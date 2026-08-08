@@ -1,0 +1,156 @@
+<Window x:Class="DbCodeGen.App.Views.DataSourceManagerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="数据源管理"
+        Width="1000"
+        Height="620"
+        MinWidth="880"
+        MinHeight="520"
+        WindowStartupLocation="CenterOwner">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Window.Resources>
+    <Grid Margin="16" IsEnabled="{Binding IsFormIdle}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="360" />
+        </Grid.ColumnDefinitions>
+
+        <!-- 左栏：已保存连接列表与行操作按钮 -->
+        <Grid Grid.Column="0" Margin="0,0,16,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- 连接列表：名称/类型/主机/数据库/用户/密码掩码/当前标记 -->
+            <ListView Grid.Row="0"
+                      ItemsSource="{Binding DataSources}"
+                      SelectedItem="{Binding SelectedDataSource}"
+                      ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="名称" Width="130" DisplayMemberBinding="{Binding Config.Name}" />
+                        <GridViewColumn Header="类型" Width="90" DisplayMemberBinding="{Binding Config.Type}" />
+                        <GridViewColumn Header="主机" Width="130" DisplayMemberBinding="{Binding Config.Host}" />
+                        <GridViewColumn Header="数据库" Width="110" DisplayMemberBinding="{Binding Config.Database}" />
+                        <GridViewColumn Header="用户" Width="80" DisplayMemberBinding="{Binding Config.UserId}" />
+                        <GridViewColumn Header="密码" Width="70" DisplayMemberBinding="{Binding MaskedPassword}" />
+                        <GridViewColumn Header="当前" Width="60">
+                            <GridViewColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="●"
+                                               Foreground="#2E7D32"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding IsCurrent, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                </DataTemplate>
+                            </GridViewColumn.CellTemplate>
+                        </GridViewColumn>
+                    </GridView>
+                </ListView.View>
+            </ListView>
+
+            <!-- 行操作按钮：新增/编辑/删除/设为当前连接 -->
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,0">
+                <Button Content="新增" Padding="16,5" Margin="0,0,8,0" Command="{Binding NewCommand}" />
+                <Button Content="编辑" Padding="16,5" Margin="0,0,8,0" Command="{Binding EditCommand}" />
+                <Button Content="删除" Padding="16,5" Margin="0,0,8,0" Command="{Binding DeleteCommand}" />
+                <Button Content="设为当前连接" Padding="16,5" Command="{Binding SetCurrentCommand}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- 右栏：连接表单，测试成功才允许保存 -->
+        <GroupBox Grid.Column="1" Header="连接信息" Padding="12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 连接名称，列表内唯一 -->
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="名称" VerticalAlignment="Center" />
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,0,0,8"
+                         VerticalContentAlignment="Center" />
+
+                <!-- 数据库类型，切换时端口默认值联动 -->
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="类型" VerticalAlignment="Center" />
+                <ComboBox Grid.Row="1" Grid.Column="1"
+                          ItemsSource="{Binding AvailableTypes}"
+                          SelectedItem="{Binding SelectedType}"
+                          Margin="0,0,0,8" />
+
+                <!-- 主机名或 IP 地址 -->
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="主机" VerticalAlignment="Center" />
+                <TextBox Grid.Row="2" Grid.Column="1"
+                         Text="{Binding Host, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,0,0,8"
+                         VerticalContentAlignment="Center" />
+
+                <!-- 端口，1-65535 整数 -->
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="端口" VerticalAlignment="Center" />
+                <TextBox Grid.Row="3" Grid.Column="1"
+                         Text="{Binding PortText, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,0,0,8"
+                         VerticalContentAlignment="Center" />
+
+                <!-- 数据库名 -->
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="数据库" VerticalAlignment="Center" />
+                <TextBox Grid.Row="4" Grid.Column="1"
+                         Text="{Binding Database, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,0,0,8"
+                         VerticalContentAlignment="Center" />
+
+                <!-- 用户名 -->
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="用户" VerticalAlignment="Center" />
+                <TextBox Grid.Row="5" Grid.Column="1"
+                         Text="{Binding UserId, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,0,0,8"
+                         VerticalContentAlignment="Center" />
+
+                <!-- 密码输入框，明文仅存在于输入与加密/测试的瞬态 -->
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="密码" VerticalAlignment="Center" />
+                <PasswordBox x:Name="PasswordBox"
+                             Grid.Row="6" Grid.Column="1"
+                             Margin="0,0,0,4"
+                             VerticalContentAlignment="Center" />
+                <TextBlock Grid.Row="7" Grid.Column="1"
+                           Text="新增时密码必填；编辑时留空表示保持原密码。"
+                           FontSize="11"
+                           Foreground="Gray"
+                           Margin="0,0,0,8" />
+
+                <!-- 测试连接状态反馈 -->
+                <TextBlock Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+                           Text="{Binding TestStatusText}"
+                           FontSize="11"
+                           Foreground="Gray"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
+
+                <!-- 底部操作按钮：测试连接成功后保存 -->
+                <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right">
+                    <Button Content="测试连接" Padding="18,5" Margin="0,0,8,0" Command="{Binding TestConnectionCommand}" />
+                    <Button Content="保存" Padding="24,5" Margin="0,0,8,0" IsDefault="True" Command="{Binding SaveCommand}" />
+                    <Button Content="取消" Padding="24,5" IsCancel="True" Command="{Binding CancelCommand}" />
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+    </Grid>
+</Window>

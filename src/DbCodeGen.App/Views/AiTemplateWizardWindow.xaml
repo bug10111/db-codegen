@@ -1,0 +1,167 @@
+<Window x:Class="DbCodeGen.App.Views.AiTemplateWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AI 模板生成向导"
+        Width="760"
+        Height="640"
+        MinWidth="680"
+        MinHeight="560"
+        WindowStartupLocation="CenterOwner">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" MinHeight="120" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 标题与说明 -->
+        <TextBlock Grid.Row="0"
+                   Text="AI 模板生成向导"
+                   FontSize="18"
+                   FontWeight="Bold"
+                   Margin="0,0,0,4" />
+        <TextBlock Grid.Row="1"
+                   Text="填写技术栈描述并选择样例表，AI 将基于样例表真实元数据生成一套可直接加载的 Scriban 模板包并落库。"
+                   Foreground="Gray"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,14" />
+
+        <!-- 输入面板：技术栈描述 + 样例表选择 + 参考素材开关 -->
+        <StackPanel Grid.Row="2" Visibility="{Binding IsInputPanelVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <TextBlock Text="技术栈描述（必填）" VerticalAlignment="Center" />
+            <TextBox Text="{Binding TechStackDescription, UpdateSourceTrigger=PropertyChanged}"
+                     Height="76"
+                     TextWrapping="Wrap"
+                     AcceptsReturn="True"
+                     VerticalScrollBarVisibility="Auto"
+                     Margin="0,4,0,0"
+                     ToolTip="如：Java + MyBatis-Plus，三层分层（entity / mapper / service）" />
+
+            <TextBlock Text="样例表（必选，来自当前连接的真实元数据）"
+                       Margin="0,12,0,2" />
+            <StackPanel Orientation="Horizontal">
+                <ComboBox ItemsSource="{Binding AvailableTables}"
+                          SelectedItem="{Binding SelectedSampleRow}"
+                          DisplayMemberPath="RawName"
+                          MinWidth="300"
+                          VerticalContentAlignment="Center" />
+                <Button Content="刷新样例表"
+                        Command="{Binding RefreshSampleTablesCommand}"
+                        Padding="10,3"
+                        Margin="8,0,0,0"
+                        VerticalContentAlignment="Center" />
+            </StackPanel>
+            <TextBlock Text="{Binding SampleTableStatusText}"
+                       FontSize="11"
+                       Foreground="Gray"
+                       TextWrapping="Wrap"
+                       Margin="0,4,0,0" />
+
+            <CheckBox Content="注入 easycode 参考素材作为转写参照（可选）"
+                      IsChecked="{Binding IncludeEasyCodeReference}"
+                      Margin="0,12,0,0" />
+        </StackPanel>
+
+        <!-- 进度面板：生成中展示状态文本与不确定进度条 -->
+        <StackPanel Grid.Row="3"
+                    Margin="0,12,0,0"
+                    Visibility="{Binding IsProgressVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <TextBlock Text="{Binding StatusText}"
+                       Foreground="#1565C0"
+                       TextWrapping="Wrap" />
+            <ProgressBar IsIndeterminate="True"
+                         Height="6"
+                         Margin="0,8,0,0" />
+        </StackPanel>
+
+        <!-- 成功面板：展示包名与落库目录，提供跳转模板包管理入口 -->
+        <StackPanel Grid.Row="4"
+                    Margin="0,12,0,0"
+                    Visibility="{Binding IsSuccessVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <TextBlock Text="模板包生成成功"
+                       FontSize="15"
+                       FontWeight="Bold"
+                       Foreground="#2E7D32" />
+            <TextBlock Margin="0,10,0,0" TextWrapping="Wrap">
+                包名：<Run Text="{Binding GeneratedPackageName}" FontWeight="Bold" />
+            </TextBlock>
+            <TextBlock Margin="0,4,0,0" TextWrapping="Wrap">
+                目录：<Run Text="{Binding GeneratedTemplateDir}" />
+            </TextBlock>
+            <TextBlock Margin="0,10,0,0"
+                       Text="新模板包已落库，可在模板包管理中勾选使用；也可直接在主窗口②模板区选择该包继续编辑或生成。"
+                       Foreground="Gray"
+                       TextWrapping="Wrap" />
+            <Button Content="打开模板包管理"
+                    Command="{Binding OpenTemplateManagerCommand}"
+                    Padding="16,6"
+                    Margin="0,14,0,0"
+                    HorizontalAlignment="Left" />
+        </StackPanel>
+
+        <!-- 失败面板：错误清单 + 保留原文 + 复制与重试 -->
+        <StackPanel Grid.Row="4"
+                    Margin="0,12,0,0"
+                    Visibility="{Binding IsFailureVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <TextBlock Text="模板包生成失败"
+                       FontSize="15"
+                       FontWeight="Bold"
+                       Foreground="#C62828" />
+            <TextBlock Text="{Binding StatusText}"
+                       Margin="0,6,0,0"
+                       Foreground="Gray"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="错误清单：" Margin="0,10,0,2" FontWeight="SemiBold" />
+            <ListBox ItemsSource="{Binding Errors}"
+                     MaxHeight="96"
+                     Margin="0,0,0,0" />
+            <Expander Header="原始 LLM 输出（保留供人工修复，不落日志）"
+                      Margin="0,10,0,0">
+                <TextBox Text="{Binding RawLlmOutput, Mode=OneWay}"
+                         Height="120"
+                         FontFamily="Consolas"
+                         FontSize="11"
+                         IsReadOnly="True"
+                         TextWrapping="NoWrap"
+                         HorizontalScrollBarVisibility="Auto"
+                         VerticalScrollBarVisibility="Auto" />
+            </Expander>
+            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <Button Content="复制原文"
+                        Command="{Binding CopyRawOutputCommand}"
+                        Padding="14,5"
+                        Margin="0,0,8,0" />
+                <Button Content="重试"
+                        Command="{Binding GenerateCommand}"
+                        Padding="14,5" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- 底部按钮：生成 / 停止（生成中） / 取消 -->
+        <StackPanel Grid.Row="5"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,14,0,0">
+            <Button Content="生成"
+                    IsDefault="True"
+                    Command="{Binding GenerateCommand}"
+                    Padding="24,6"
+                    Margin="0,0,8,0" />
+            <Button Content="停止"
+                    Command="{Binding CancelCommand}"
+                    Padding="24,6"
+                    Margin="0,0,8,0"
+                    Visibility="{Binding IsProgressVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
+            <Button Content="取消"
+                    IsCancel="True"
+                    Click="OnCancelClick"
+                    Padding="24,6" />
+        </StackPanel>
+    </Grid>
+</Window>

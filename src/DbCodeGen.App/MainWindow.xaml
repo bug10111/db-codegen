@@ -1,0 +1,366 @@
+<Window x:Class="DbCodeGen.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:avalonedit="http://icsharpcode.net/sharpdevelop/avalonedit"
+        Title="DbCodeGen 代码生成器"
+        Height="880"
+        Width="1440"
+        MinHeight="700"
+        MinWidth="1120"
+        WindowStartupLocation="CenterScreen">
+    <DockPanel>
+
+        <!-- 顶部菜单：文件承载设置与退出，工具承载数据源管理/刷新表/SQL 面板/AI 向导，帮助承载关于 -->
+        <Menu DockPanel.Dock="Top">
+            <MenuItem Header="文件">
+                <MenuItem Header="设置…" Click="OnOpenSettingsClick" />
+                <Separator />
+                <MenuItem Header="退出" Click="OnExitClick" />
+            </MenuItem>
+            <MenuItem Header="工具">
+                <MenuItem Header="数据源管理…" Click="OnManageDataSourcesClick" />
+                <MenuItem Header="刷新表" Click="OnRefreshTablesClick" />
+                <Separator />
+                <MenuItem Header="SQL 执行面板…" Click="OnOpenSqlPanelClick" />
+                <MenuItem Header="AI 生成模板…" Click="OnOpenAiWizardClick" />
+                <MenuItem Header="类型映射…" Click="OnOpenTypeMappingClick" />
+                <MenuItem Header="备份/恢复…" Click="OnOpenMigrationClick" />
+            </MenuItem>
+            <MenuItem Header="帮助">
+                <MenuItem Header="关于 DbCodeGen…" Click="OnAboutClick" />
+            </MenuItem>
+        </Menu>
+
+        <!-- 工具栏：数据源下拉切换当前连接 + 数据源管理入口 -->
+        <Border DockPanel.Dock="Top"
+                Background="#F5F5F5"
+                BorderBrush="#DDDDDD"
+                BorderThickness="0,0,0,1"
+                Padding="8,4">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="数据源：" VerticalAlignment="Center" />
+                <ComboBox x:Name="DataSourceComboBox"
+                          MinWidth="220"
+                          DisplayMemberPath="Name"
+                          VerticalContentAlignment="Center"
+                          SelectionChanged="OnDataSourceComboBoxSelectionChanged" />
+                <Button x:Name="ManageDataSourcesButton"
+                        Content="管理…"
+                        Padding="12,4"
+                        Margin="8,0,0,0"
+                        VerticalContentAlignment="Center"
+                        Click="OnManageDataSourcesClick" />
+            </StackPanel>
+        </Border>
+
+        <!-- 主区四区布局骨架：上区三栏为表列表区/模板区/预览区，下区为生成栏 -->
+        <Grid Margin="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="320" />
+            </Grid.RowDefinitions>
+
+            <!-- 上区三栏布局 -->
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="360" />
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="3*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 表列表区：数据源表清单、搜索过滤与多选勾选 -->
+                <GroupBox Grid.Column="0" x:Name="TableListPanel" Header="① 表列表区" Margin="0,0,4,0">
+                    <Grid Margin="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 表区工具条：全选/反选/清空/刷新表 -->
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                            <Button Content="全选"
+                                    Command="{Binding SelectAllCommand}"
+                                    Padding="10,2"
+                                    Margin="0,0,4,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="反选"
+                                    Command="{Binding InvertSelectionCommand}"
+                                    Padding="10,2"
+                                    Margin="0,0,4,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="清空"
+                                    Command="{Binding ClearSelectionCommand}"
+                                    Padding="10,2"
+                                    Margin="0,0,4,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="刷新表"
+                                    Command="{Binding RefreshCommand}"
+                                    Padding="10,2"
+                                    Margin="8,0,0,0"
+                                    VerticalContentAlignment="Center" />
+                        </StackPanel>
+
+                        <!-- 搜索框：按表名或注释实时过滤可见行 -->
+                        <TextBox Grid.Row="1"
+                                 Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="按表名或注释搜索，实时过滤，不影响勾选集合" />
+
+                        <!-- 表清单 DataGrid：勾选列 + 表名列 + 注释列，默认按表名排序 -->
+                        <DataGrid Grid.Row="2"
+                                  ItemsSource="{Binding TableView}"
+                                  SelectedItem="{Binding SelectedRow}"
+                                  AutoGenerateColumns="False"
+                                  CanUserAddRows="False"
+                                  CanUserDeleteRows="False"
+                                  HeadersVisibility="Column"
+                                  GridLinesVisibility="Horizontal"
+                                  SelectionMode="Single">
+                            <DataGrid.Columns>
+                                <DataGridCheckBoxColumn Header="选择" Binding="{Binding IsSelected}" Width="50" />
+                                <DataGridTextColumn Header="表名" Binding="{Binding RawName}" Width="*" SortMemberPath="RawName" IsReadOnly="True" />
+                                <DataGridTextColumn Header="注释" Binding="{Binding Comment}" Width="*" IsReadOnly="True" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <!-- 状态栏：连接状态与表数量、勾选数量 -->
+                        <TextBlock Grid.Row="3"
+                                   Text="{Binding StatusText}"
+                                   Margin="0,4,0,0"
+                                   Foreground="Gray"
+                                   TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                </GroupBox>
+
+                <!-- 模板区：模板包与文件树 + AvalonEdit 编辑器 + 变量面板入口 -->
+                <GroupBox Grid.Column="1" x:Name="TemplatePanel" Header="② 模板区" Margin="0,0,4,0">
+                    <Grid Margin="4" IsEnabled="{Binding IsIdle}">
+                        <Grid.InputBindings>
+                            <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveCommand}" />
+                        </Grid.InputBindings>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="190" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 模板区工具条：包下拉 / 刷新 / 变量面板 / 保存 -->
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                            <ComboBox ItemsSource="{Binding Packages}"
+                                      SelectedItem="{Binding SelectedPackage}"
+                                      DisplayMemberPath="Name"
+                                      MinWidth="150"
+                                      VerticalContentAlignment="Center" />
+                            <Button Content="刷新"
+                                    Command="{Binding RefreshCommand}"
+                                    Padding="10,2"
+                                    Margin="6,0,0,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="变量面板"
+                                    Command="{Binding OpenVariablePanelCommand}"
+                                    Padding="10,2"
+                                    Margin="6,0,0,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="保存"
+                                    Command="{Binding SaveCommand}"
+                                    Padding="10,2"
+                                    Margin="6,0,0,0"
+                                    VerticalContentAlignment="Center" />
+                        </StackPanel>
+
+                        <!-- 包内模板文件树：checkbox 表达“勾选到层”运行时勾选态，选中文件后加载编辑器 -->
+                        <ListView Grid.Row="1"
+                                  ItemsSource="{Binding Files}"
+                                  SelectedItem="{Binding SelectedFile}"
+                                  Margin="0,0,0,4"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal">
+                                        <CheckBox IsChecked="{Binding IsEnabled}"
+                                                  VerticalAlignment="Center"
+                                                  Click="OnTemplateFileCheckBoxClick"
+                                                  ToolTip="勾选到层：勾选后该文件参与批量生成" />
+                                        <TextBlock Text="{Binding RelativeTemplatePath}"
+                                                   ToolTip="{Binding OutputPath}"
+                                                   Margin="4,0,0,0" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+
+                        <!-- Scriban 模板编辑器，高亮语言由文件名推导 -->
+                        <avalonedit:TextEditor x:Name="TemplateEditor"
+                                               Grid.Row="2"
+                                               FontFamily="Consolas"
+                                               FontSize="13"
+                                               ShowLineNumbers="True"
+                                               HorizontalScrollBarVisibility="Auto"
+                                               VerticalScrollBarVisibility="Auto"
+                                               TextChanged="OnTemplateEditorTextChanged" />
+
+                        <!-- 状态栏：加载/保存结果与脏标记 -->
+                        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="{Binding StatusText}"
+                                       Foreground="Gray"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding DirtyMark}"
+                                       Margin="8,0,0,0"
+                                       Foreground="Gray"
+                                       FontWeight="Bold" />
+                        </StackPanel>
+                    </Grid>
+                </GroupBox>
+
+                <!-- 预览区：预览表下拉 + 渲染代码展示 -->
+                <GroupBox Grid.Column="2" x:Name="PreviewPanel" Header="③ 预览区">
+                    <Grid Margin="4">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 预览表选择，与变量面板共用同一当前表 -->
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Text="预览表：" VerticalAlignment="Center" />
+                            <ComboBox ItemsSource="{Binding AvailableTables}"
+                                      SelectedItem="{Binding SelectedTableRow}"
+                                      DisplayMemberPath="RawName"
+                                      MinWidth="170"
+                                      VerticalContentAlignment="Center" />
+                            <TextBlock Text="（未选择时跟随①区当前表）"
+                                       Margin="6,0,0,0"
+                                       FontSize="11"
+                                       Foreground="Gray"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+
+                        <!-- 渲染真实代码展示，只读 -->
+                        <avalonedit:TextEditor x:Name="PreviewEditor"
+                                               Grid.Row="1"
+                                               FontFamily="Consolas"
+                                               FontSize="13"
+                                               IsReadOnly="True"
+                                               ShowLineNumbers="True"
+                                               HorizontalScrollBarVisibility="Auto"
+                                               VerticalScrollBarVisibility="Auto" />
+
+                        <!-- 预览状态：渲染耗时或结构化错误定位 -->
+                        <TextBlock Grid.Row="2"
+                                   Text="{Binding StatusText}"
+                                   Margin="0,4,0,0"
+                                   Foreground="Gray"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </GroupBox>
+            </Grid>
+
+            <!-- 生成栏：输出根配置、预览待写/生成、待写清单、结果统计与生成日志 -->
+            <GroupBox Grid.Row="1" x:Name="GenerationPanel" Header="④ 生成栏" Margin="0,8,0,0">
+                <Grid Margin="4" IsEnabled="{Binding IsIdle}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!-- 路径配置行：工作区根与相对输出根，可本次修改 -->
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="3*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,16,0">
+                            <TextBlock Text="工作区根：" VerticalAlignment="Center" />
+                            <TextBox Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
+                                     MinWidth="220"
+                                     VerticalContentAlignment="Center"
+                                     ToolTip="工作区根目录，绝对输出路径的根前缀" />
+                            <Button Content="浏览…"
+                                    Command="{Binding PickWorkspaceRootCommand}"
+                                    Padding="8,2"
+                                    Margin="4,0,0,0"
+                                    VerticalContentAlignment="Center" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <TextBlock Text="相对输出根：" VerticalAlignment="Center" />
+                            <TextBox Text="{Binding RelativeOutputRoot, UpdateSourceTrigger=PropertyChanged}"
+                                     MinWidth="240"
+                                     VerticalContentAlignment="Center"
+                                     ToolTip="相对输出根，与工作区根拼接作为本次输出根；生成完成后自动回写最近值" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- 操作行：预览待写/生成按钮 + 待写清单摘要 -->
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,4">
+                        <Button Content="预览待写"
+                                Command="{Binding PreviewCommand}"
+                                Padding="12,2"
+                                VerticalContentAlignment="Center" />
+                        <Button Content="生成"
+                                Command="{Binding GenerateCommand}"
+                                Padding="12,2"
+                                Margin="8,0,0,0"
+                                VerticalContentAlignment="Center" />
+                        <TextBlock Text="{Binding PreviewSummaryText}"
+                                   Margin="12,0,0,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="#1565C0" />
+                    </StackPanel>
+
+                    <!-- 待写清单：表名/分类/相对路径，dry-run 新增·覆盖·跳过分类展示 -->
+                    <DataGrid Grid.Row="2"
+                              ItemsSource="{Binding PreviewEntries}"
+                              AutoGenerateColumns="False"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              IsReadOnly="True"
+                              SelectionMode="Extended">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="表名" Binding="{Binding TableName}" Width="120" />
+                            <DataGridTextColumn Header="分类" Binding="{Binding ActionText}" Width="56" />
+                            <DataGridTextColumn Header="相对路径" Binding="{Binding RelativePath}" Width="*" />
+                            <DataGridTextColumn Header="错误" Binding="{Binding Error}" Width="140" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- 操作状态：进行中进度与阶段结果 -->
+                    <TextBlock Grid.Row="3"
+                               Text="{Binding StatusText}"
+                               Margin="0,4,0,2"
+                               Foreground="Gray"
+                               TextTrimming="CharacterEllipsis" />
+
+                    <!-- 结果统计：生成/覆盖/跳过/失败四计数 -->
+                    <TextBlock Grid.Row="4"
+                               Text="{Binding ResultSummaryText}"
+                               Margin="0,0,0,2"
+                               Foreground="#2E7D32"
+                               FontWeight="SemiBold" />
+
+                    <!-- 生成日志：只读多行展示，纵向滚动 -->
+                    <TextBox Grid.Row="5"
+                             Text="{Binding LogText, Mode=OneWay}"
+                             IsReadOnly="True"
+                             FontFamily="Consolas"
+                             FontSize="12"
+                             Height="56"
+                             Background="#FAFAFA"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto"
+                             TextWrapping="NoWrap" />
+                </Grid>
+            </GroupBox>
+        </Grid>
+    </DockPanel>
+</Window>

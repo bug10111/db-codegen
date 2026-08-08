@@ -1,0 +1,36 @@
+package {{package.basePackage}}.common.service.{{table.variableName}};
+
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
+
+/**
+ * {{table.comment}}服务接口
+ */
+public interface {{table.className}}Service {
+
+    /**
+     * 分页查询{{table.comment}}
+     */
+    IPage<{{table.className}}> findPage(Page<{{table.className}}> page);
+
+    /**
+     * 查询单条{{table.comment}}数据
+     */
+    {{table.className}} findById(String id);
+
+    /**
+     * 新增{{table.comment}}
+     */
+    void save({{table.className}} entity);
+
+    /**
+     * 根据主键修改{{table.comment}}
+     */
+    void updateById({{table.className}} entity);
+
+    /**
+     * 删除{{table.comment}}
+     */
+    void deleteByIds(java.util.List<String> ids);
+}

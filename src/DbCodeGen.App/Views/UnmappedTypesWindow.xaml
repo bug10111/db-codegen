@@ -1,0 +1,62 @@
+<Window x:Class="DbCodeGen.App.Views.UnmappedTypesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="缺少类型映射"
+        Width="640"
+        Height="420"
+        MinWidth="560"
+        MinHeight="340"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 提示文案：告知哪些类型缺少映射，生成的代码将回退为默认 String -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock x:Name="CountText"
+                       Text="以下数据库类型缺少映射。"
+                       FontWeight="SemiBold"
+                       Margin="0,0,0,4" />
+            <TextBlock Text="未映射的类型在生成代码时将使用默认 String，可能导致类型不准确。可点击“去配置映射”补全后重新生成。"
+                       TextWrapping="Wrap"
+                       Foreground="Gray" />
+        </StackPanel>
+
+        <!-- 未映射类型清单：类型/首次出现的表/列/次数 -->
+        <DataGrid x:Name="TypesDataGrid"
+                  Grid.Row="1"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  HeadersVisibility="Column"
+                  RowHeaderWidth="0">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="数据库类型" Binding="{Binding DbType}" Width="1.2*" />
+                <DataGridTextColumn Header="首次出现表" Binding="{Binding TableName}" Width="*" />
+                <DataGridTextColumn Header="列" Binding="{Binding ColumnName}" Width="*" />
+                <DataGridTextColumn Header="出现次数" Binding="{Binding Occurrences}" Width="Auto" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- 操作：去配置映射 / 使用默认继续 / 取消 -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="使用默认继续"
+                    Padding="14,6"
+                    Margin="0,0,8,0"
+                    Click="OnContinueClick" />
+            <Button Content="去配置映射"
+                    Padding="14,6"
+                    Margin="0,0,8,0"
+                    IsDefault="True"
+                    Click="OnConfigureClick" />
+            <Button Content="取消"
+                    Padding="14,6"
+                    IsCancel="True"
+                    Click="OnCancelClick" />
+        </StackPanel>
+    </Grid>
+</Window>

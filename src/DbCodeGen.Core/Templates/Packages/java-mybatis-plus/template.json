@@ -1,0 +1,30 @@
+{
+  "name": "java-mybatis-plus",
+  "description": "Java SpringBoot + MyBatis-Plus 模板包",
+  "engine": "scriban",
+  "basePackage": "com.example",
+  "typeMap": {
+    "bigint": "Long",
+    "int": "Integer",
+    "tinyint": "Integer",
+    "smallint": "Integer",
+    "varchar": "String",
+    "char": "String",
+    "text": "String",
+    "datetime": "LocalDateTime",
+    "timestamp": "LocalDateTime",
+    "date": "LocalDate",
+    "decimal": "BigDecimal",
+    "double": "Double",
+    "float": "Float",
+    "boolean": "Boolean"
+  },
+  "files": [
+    { "template": "entity.java.scriban",        "output": "{{package.dir}}/entity/{{table.className}}.java",                 "enabled": true },
+    { "template": "mapper.java.scriban",        "output": "{{package.dir}}/mapper/{{table.className}}Mapper.java",           "enabled": true },
+    { "template": "mapper.xml.scriban",         "output": "{{package.dir}}/mapper/xml/{{table.className}}Mapper.xml",        "enabled": true },
+    { "template": "service.java.scriban",       "output": "{{package.dir}}/service/{{table.className}}Service.java",         "enabled": true },
+    { "template": "serviceImpl.java.scriban",   "output": "{{package.dir}}/service/impl/{{table.className}}ServiceImpl.java", "enabled": true },
+    { "template": "controller.java.scriban",    "output": "{{package.dir}}/controller/{{table.className}}Controller.java",   "enabled": false }
+  ]
+}
