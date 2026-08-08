@@ -539,7 +539,7 @@ public sealed partial class SqlExecutorViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 依据配置快照重建数据源下拉列表，并按名称默认选中当前连接。
+    /// 依据配置快照重建数据源下拉列表；默认选中当前连接，当前连接未设置但列表有数据源时默认选第一项。
     /// </summary>
     private void ReloadDataSources()
     {
@@ -550,8 +550,9 @@ public sealed partial class SqlExecutorViewModel : ObservableObject
             DataSources.Add(source);
         }
 
-        // 默认选中当前连接，当前连接已删除或未设置时下拉回到空选
-        SelectedDataSource = FindDataSource(_currentDataSourceService.Current);
+        // 默认选中当前连接；当前连接未设置且列表有数据源时默认选第一项，让面板打开即具备可执行数据源
+        SelectedDataSource = FindDataSource(_currentDataSourceService.Current)
+            ?? (DataSources.Count > 0 ? DataSources[0] : null);
     }
 
     /// <summary>

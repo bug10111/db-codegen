@@ -215,7 +215,25 @@ public sealed class ConfigService : IConfigService, IDisposable
             return await RebuildFromCorruptAsync().ConfigureAwait(false);
         }
 
-        return Normalize(loaded);
+        int diskVersion = loaded.Version;
+        AppConfig normalized = Normalize(loaded);
+
+        // 结构迁移后立即原子落盘：磁盘配置始终与生效配置一致，旧版本文件被原子替换，
+        // 避免"打开即关不落盘"时磁盘残留旧版本、下次再次触发迁移
+        if (normalized.Version != diskVersion)
+        {
+            try
+            {
+                await SaveToDiskAsync(normalized).ConfigureAwait(false);
+            }
+            catch (ConfigSaveException exception)
+            {
+                // 迁移落盘失败仅记警告，本次仍以内存迁移结果生效，不阻断启动
+                _logger.LogWarning(exception, "配置结构迁移后落盘失败，本次仅保留内存迁移结果。");
+            }
+        }
+
+        return normalized;
     }
 
     /// <summary>
@@ -368,11 +386,10 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.TypeMappings.RemoveAll(item => item is null);
 
         // 旧版本配置升级：映射模型 v3 引入按数据库类型分桶（通用/MySQL/PostgreSQL），
-        // 迁移时用新的按库默认集整体重灌映射表。该迁移为一次性的结构性升级，
-        // 覆盖旧的无库作用域映射，用户可在映射窗口继续自定义
+        // 迁移时保留用户已有条目，仅追加按库默认集中尚未覆盖的条目，避免覆盖用户自定义映射
         if (config.Version < 3)
         {
-            config.TypeMappings = TypeMappingDefaults.BuildDefault().ToList();
+            config.TypeMappings = MergeWithTypeMappingDefaults(config.TypeMappings);
             config.Version = 3;
         }
 
@@ -383,5 +400,50 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.Llm.ApiKeyEncrypted ??= string.Empty;
         config.Llm.Model ??= LlmConfig.DefaultModel;
         return config;
+    }
+
+    /// <summary>
+    /// 将旧版扁平映射与新版按库默认集合并：保留用户已有合法条目（旧条目无库作用域视为通用），
+    /// 仅追加默认集中未被现有条目覆盖的条目，按"适用数据库 + 规范化数据库类型"判碰撞。
+    /// 迁移不覆盖用户自定义，避免升级丢失自定义映射。
+    /// </summary>
+    /// <param name="existing">配置中已有的映射条目，可为空。</param>
+    /// <returns>合并后的映射条目列表。</returns>
+    private static List<TypeMappingEntry> MergeWithTypeMappingDefaults(IEnumerable<TypeMappingEntry>? existing)
+    {
+        List<TypeMappingEntry> merged = new();
+        var covered = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (TypeMappingEntry entry in existing ?? new List<TypeMappingEntry>())
+        {
+            // 跳过空条目与缺键缺值的非法条目，保证合并结果干净可用
+            if (entry is null || string.IsNullOrWhiteSpace(entry.DbType) || string.IsNullOrWhiteSpace(entry.TargetType))
+            {
+                continue;
+            }
+
+            merged.Add(entry);
+            covered.Add(BuildTypeMappingKey(entry));
+        }
+
+        foreach (TypeMappingEntry def in TypeMappingDefaults.BuildDefault())
+        {
+            if (covered.Add(BuildTypeMappingKey(def)))
+            {
+                merged.Add(def);
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// 构建映射条目碰撞键：适用数据库类型 + 规范化数据库类型，用于合并去重。
+    /// </summary>
+    /// <param name="entry">映射条目。</param>
+    /// <returns>碰撞键文本。</returns>
+    private static string BuildTypeMappingKey(TypeMappingEntry entry)
+    {
+        return $"{entry.DatabaseType}|{TypeMapper.Normalize(entry.DbType)}";
     }
 }

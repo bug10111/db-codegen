@@ -110,6 +110,42 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 旧配置迁移后应立即原子落盘：仅 Load 不调用 Save，磁盘文件也应已升级为 Version 3，
+    /// 保证磁盘配置始终是生效配置，避免"打开即关不落盘"残留旧版本。
+    /// </summary>
+    [Fact]
+    public void Load_VersionOne_MigratesAndPersistsImmediately()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":1,"workspaceRoot":"","lastRelativeOutputRoot":""}""");
+
+        service.Load();
+
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(configPath));
+        Assert.Equal(3, document.RootElement.GetProperty("version").GetInt32());
+        Assert.True(document.RootElement.GetProperty("typeMappings").GetArrayLength() > 0);
+    }
+
+    /// <summary>
+    /// 旧版配置含自定义映射时，迁移应保留用户条目并补齐按库默认条目，不覆盖自定义。
+    /// </summary>
+    [Fact]
+    public void Load_VersionTwo_WithCustomMappings_PreservesAndAddsDefaults()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        // 旧配置含一条自定义映射 varchar→MyString（通用），且无 PG 专属 integer 条目
+        File.WriteAllText(configPath, """{"version":2,"typeMappings":[{"dbType":"varchar","targetType":"MyString","import":null,"remark":null}]}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(3, config.Version);
+        Assert.Contains(config.TypeMappings, entry => entry.DbType == "varchar" && entry.TargetType == "MyString");
+        Assert.Contains(config.TypeMappings, entry => entry.DbType == "integer" && entry.DatabaseType == DataSourceType.PostgreSql);
+    }
+
+    /// <summary>
     /// 已升级到 Version 3 后用户清空映射表，再次加载不应被回填默认映射。
     /// </summary>
     [Fact]

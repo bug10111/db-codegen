@@ -256,6 +256,12 @@ public sealed partial class AiTemplateWizardViewModel : ObservableObject
 
         OnPropertyChanged(nameof(SampleTableStatusText));
 
+        // 候选集非空且尚无选中样例表时默认选第一行，自动读取真实列元数据
+        if (SelectedSampleRow is null && AvailableTables.Count > 0)
+        {
+            SelectedSampleRow = AvailableTables[0];
+        }
+
         await EnsureLlmConfiguredAsync();
     }
 
@@ -419,6 +425,12 @@ public sealed partial class AiTemplateWizardViewModel : ObservableObject
                 SampleTable = null;
                 OnPropertyChanged(nameof(SampleTableStatusText));
                 StatusText = $"样例表候选集已刷新，共 {AvailableTables.Count} 张表。";
+
+                // 候选集非空时默认选第一行，让刷新后样例表自动就绪
+                if (SelectedSampleRow is null && AvailableTables.Count > 0)
+                {
+                    SelectedSampleRow = AvailableTables[0];
+                }
             });
         }
         catch (OperationCanceledException)

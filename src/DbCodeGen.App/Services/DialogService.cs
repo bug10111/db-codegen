@@ -1,15 +1,16 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace DbCodeGen.App.Services;
 
 /// <summary>
-/// 跨窗口对话框服务实现，统一承载消息提示、二次确认、目录选择与文件选择四类对话框能力，供全项目各窗口复用。
-/// 所有对话框均保证在 UI 线程展示，非 UI 线程调用时经 Dispatcher 切换到 UI 线程执行。
+/// 跨窗口对话框服务实现，统一承载消息提示、二次确认、目录选择、文件选择与文本输入五类对话框能力，
+/// 供全项目各窗口复用。所有对话框均保证在 UI 线程展示，非 UI 线程调用时经 Dispatcher 切换到 UI 线程执行。
 /// </summary>
-public sealed class DialogService : IDialogService, IConfirmDialogService, IFolderPickerService, IFilePickerService
+public sealed class DialogService : IDialogService, IConfirmDialogService, IFolderPickerService, IFilePickerService, IPromptDialogService
 {
     /// <inheritdoc />
     public void ShowInfo(string message, string title = "提示")
@@ -273,6 +274,89 @@ public sealed class DialogService : IDialogService, IConfirmDialogService, IFold
 
             bool? accepted = dialog.ShowDialog(GetOwner());
             completion.SetResult(accepted == true ? dialog.FileName : null);
+        });
+        return completion.Task;
+    }
+
+    /// <inheritdoc />
+    public Task<string?> PromptAsync(string title, string prompt, string defaultValue = "")
+    {
+        TaskCompletionSource<string?> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        RunOnUiThread(() =>
+        {
+            Window? owner = GetOwner();
+
+            // 构建轻量输入对话框：引导文案 + 输入框 + 确定/取消，回车默认确定、Esc 默认取消
+            var dialog = new Window
+            {
+                Title = title,
+                Width = 440,
+                SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize,
+                ShowInTaskbar = false,
+                Owner = owner
+            };
+
+            var panel = new StackPanel { Margin = new Thickness(16) };
+            panel.Children.Add(new TextBlock
+            {
+                Text = prompt,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 10)
+            });
+
+            TextBox inputBox = new()
+            {
+                Text = defaultValue ?? string.Empty,
+                MinWidth = 380,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+            panel.Children.Add(inputBox);
+
+            var buttonRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 14, 0, 0)
+            };
+            var okButton = new Button
+            {
+                Content = "确定",
+                IsDefault = true,
+                Width = 76,
+                Padding = new Thickness(8, 3, 8, 3),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            var cancelButton = new Button
+            {
+                Content = "取消",
+                IsCancel = true,
+                Width = 76,
+                Padding = new Thickness(8, 3, 8, 3)
+            };
+            buttonRow.Children.Add(okButton);
+            buttonRow.Children.Add(cancelButton);
+            panel.Children.Add(buttonRow);
+            dialog.Content = panel;
+
+            string? input = null;
+            okButton.Click += (_, _) =>
+            {
+                input = inputBox.Text;
+                dialog.DialogResult = true;
+            };
+            cancelButton.Click += (_, _) => dialog.DialogResult = false;
+
+            // 打开后聚焦输入框并全选预填值，便于直接键入覆盖
+            dialog.Loaded += (_, _) =>
+            {
+                inputBox.Focus();
+                inputBox.SelectAll();
+            };
+            dialog.Closed += (_, _) => completion.TrySetResult(input);
+
+            dialog.ShowDialog();
         });
         return completion.Task;
     }

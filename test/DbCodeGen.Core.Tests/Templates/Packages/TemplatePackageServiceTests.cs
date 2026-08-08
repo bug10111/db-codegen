@@ -701,4 +701,302 @@ public sealed class TemplatePackageServiceTests : IDisposable
         await Assert.ThrowsAsync<TemplatePackageException>(
             () => service.LoadPackageAsync("missing", CancellationToken.None));
     }
+
+    /// <summary>
+    /// 新建包合法输入应创建包目录、清单与首模板空文件，并可由服务重新加载。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_ValidInput_CreatesLoadablePackage()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "new-pkg", "新包说明", "entity/main.tpl", "out/{{table.className}}.java", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Equal("new-pkg", result.Package.Name);
+        Assert.False(result.Package.IsBuiltin);
+        TemplateFileInfo file = Assert.Single(result.Package.Files);
+        Assert.Equal("entity/main.tpl", file.RelativeTemplatePath);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "new-pkg", TemplatePackageLoader.ManifestFileName)));
+        Assert.True(File.Exists(Path.Combine(userLibrary, "new-pkg", "entity", "main.tpl")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("new-pkg", CancellationToken.None);
+        Assert.Equal("scriban", reloaded.Engine);
+        Assert.Equal("新包说明", reloaded.Description);
+    }
+
+    /// <summary>
+    /// 新建包名与内置包同名应只读拒绝，且不在用户库创建任何内容。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_BuiltinName_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "java-mybatis-plus");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "java-mybatis-plus", "说明", "main.tpl", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.Empty(Directory.EnumerateDirectories(userLibrary));
+    }
+
+    /// <summary>
+    /// 新建包名与用户包同名应返回 NameConflict，新建不走覆盖，用户库内容保持不变。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_UserConflict_ReturnsNameConflict()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(userLibrary, "same-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "same-pkg", "说明", "main.tpl", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.NameConflict, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "same-pkg", "entity.java.scriban")));
+    }
+
+    /// <summary>
+    /// 新建包名非法应返回 Invalid。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil")]
+    [InlineData("a/b")]
+    [InlineData("a b")]
+    [InlineData("")]
+    public async Task CreatePackageAsync_InvalidName_ReturnsInvalid(string packageName)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            packageName, "说明", "main.tpl", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+    }
+
+    /// <summary>
+    /// 新建包首模板路径含目录穿越或绝对路径应返回 Invalid，且不创建包目录。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.tpl")]
+    [InlineData("a/../../evil.tpl")]
+    [InlineData("C:\\windows\\main.tpl")]
+    [InlineData("\\server\\share\\main.tpl")]
+    public async Task CreatePackageAsync_PathTraversal_ReturnsInvalid(string templatePath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "safe-pkg", "说明", templatePath, "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "safe-pkg")));
+    }
+
+    /// <summary>
+    /// 新建包首模板路径含 Windows 非法文件名字符应返回 Invalid，且不创建包目录、不落盘脏数据。
+    /// </summary>
+    [Theory]
+    [InlineData("main|bad.tpl")]
+    [InlineData("main*bad.tpl")]
+    [InlineData("main?bad.tpl")]
+    [InlineData("bad\"name.tpl")]
+    public async Task CreatePackageAsync_InvalidFileNameChars_ReturnsInvalid(string templatePath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "safe-pkg", "说明", templatePath, "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "safe-pkg")));
+    }
+
+    /// <summary>
+    /// 新增文件路径含 Windows 非法文件名字符应返回 Invalid，且不创建任何文件。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_InvalidFileNameChars_ReturnsInvalid()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AddTemplateFileAsync(
+            "pkg", "group/pojo|bad.tpl", "out.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "pojo|bad.tpl")));
+    }
+
+    /// <summary>
+    /// 新增文件（含分组目录）应创建文件并同步追加 manifest 条目，重新加载后清单与磁盘一致。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_WithGroupDirectory_SyncsManifestAndCreatesFile()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("multi", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult added = await service.AddTemplateFileAsync(
+            "multi", "entity/pojo.tpl", "entity/{{table.className}}.java", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, added.Status);
+        Assert.Equal(2, added.Package!.Files.Count);
+        Assert.Contains(added.Package.Files, file => file.RelativeTemplatePath == "entity/pojo.tpl");
+        Assert.True(File.Exists(Path.Combine(userLibrary, "multi", "entity", "pojo.tpl")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("multi", CancellationToken.None);
+        Assert.Equal(2, reloaded.Files.Count);
+        Assert.Contains(reloaded.Files, file => file.RelativeTemplatePath == "entity/pojo.tpl");
+    }
+
+    /// <summary>
+    /// 新增文件目标已存在应返回失败，且 manifest 不追加重复条目。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_ExistingFile_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("ex", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AddTemplateFileAsync(
+            "ex", "main.tpl", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("ex", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 新增文件路径含目录穿越应返回 Invalid，且不创建任何文件。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_PathTraversal_ReturnsInvalid()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AddTemplateFileAsync(
+            "pkg", "../evil.tpl", "out.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "evil.tpl")));
+    }
+
+    /// <summary>
+    /// 删除文件应删除磁盘文件并同步移除 manifest 条目，重新加载后清单与磁盘一致。
+    /// </summary>
+    [Fact]
+    public async Task DeleteTemplateFileAsync_RemovesFileAndManifestEntry()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("del", "", "main.tpl", "main.tpl", CancellationToken.None);
+        await service.AddTemplateFileAsync("del", "second.tpl", "second.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.DeleteTemplateFileAsync("del", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        TemplateFileInfo remaining = Assert.Single(result.Package!.Files);
+        Assert.Equal("second.tpl", remaining.RelativeTemplatePath);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "del", "main.tpl")));
+        Assert.True(File.Exists(Path.Combine(userLibrary, "del", "second.tpl")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("del", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+        Assert.Equal("second.tpl", reloaded.Files[0].RelativeTemplatePath);
+    }
+
+    /// <summary>
+    /// 删除包内最后一个文件应返回失败，文件与清单保持不变，防清单 files 为空校验失败。
+    /// </summary>
+    [Fact]
+    public async Task DeleteTemplateFileAsync_LastFile_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("single", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.DeleteTemplateFileAsync("single", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "single", "main.tpl")));
+    }
+
+    /// <summary>
+    /// 删除不存在的文件应返回失败。
+    /// </summary>
+    [Fact]
+    public async Task DeleteTemplateFileAsync_NotExist_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.DeleteTemplateFileAsync("pkg", "missing.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+    }
+
+    /// <summary>
+    /// 内置包新增文件应只读拒绝。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.AddTemplateFileAsync(
+            "builtin-pkg", "new.tpl", "new.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.False(File.Exists(Path.Combine(builtinRoot, "builtin-pkg", "new.tpl")));
+    }
+
+    /// <summary>
+    /// 内置包删除文件应只读拒绝。
+    /// </summary>
+    [Fact]
+    public async Task DeleteTemplateFileAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.DeleteTemplateFileAsync(
+            "builtin-pkg", "entity.java.scriban", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.True(File.Exists(Path.Combine(builtinRoot, "builtin-pkg", "entity.java.scriban")));
+    }
 }

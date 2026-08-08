@@ -1,8 +1,9 @@
 namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
-/// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、导出与删除。
-/// 变更操作（导入/复制/删除）在实现内部经串行门互斥，读操作不加锁。
+/// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、导出、删除，
+/// 以及新建包、新增模板文件与删除模板文件。
+/// 变更操作（导入/复制/删除/新建/增删文件）在实现内部经串行门互斥，读操作不加锁。
 /// </summary>
 public interface ITemplatePackageService
 {
@@ -70,4 +71,40 @@ public interface ITemplatePackageService
     /// <param name="cancellationToken">取消标记。</param>
     /// <exception cref="TemplatePackageException">内置包只读或包不存在时抛出。</exception>
     Task DeletePackageAsync(string packageName, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 新建用户模板包：校验包名与首文件路径后创建包目录、写入 template.json 清单并顺带创建首个空模板文件。
+    /// 与内置包同名一律只读拒绝；与用户包同名返回 NameConflict（新建不走覆盖，由调用方提示改名）。
+    /// </summary>
+    /// <param name="packageName">新模板包包名，须符合目录名规则。</param>
+    /// <param name="description">包说明，可为空。</param>
+    /// <param name="firstTemplatePath">首模板文件相对包根路径，可含分组目录，须非空且防目录穿越安全。</param>
+    /// <param name="firstOutputPath">首模板文件输出相对路径，同样防目录穿越校验。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>创建操作结果，成功时 Package 携带新包信息。</returns>
+    Task<TemplatePackageOperationResult> CreatePackageAsync(
+        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 向用户模板包新增一个空模板文件：建空文件并同步追加 manifest files 条目（enabled=true）后重写清单。
+    /// 内置包只读拒绝；目标文件已存在返回失败。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="templateRelativePath">新增模板文件相对包根路径，可含分组目录，须防目录穿越安全。</param>
+    /// <param name="outputPath">新增模板文件的输出相对路径，同样防目录穿越校验。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>新增操作结果，成功时 Package 携带更新后的包信息。</returns>
+    Task<TemplatePackageOperationResult> AddTemplateFileAsync(
+        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 从用户模板包删除一个模板文件：删除文件并同步移除 manifest files 对应条目后重写清单。
+    /// 内置包只读拒绝；文件不存在返回失败；包内仅剩一个文件时拒绝删除（防清单 files 为空校验失败）。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="templateRelativePath">待删除模板文件相对包根路径。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>删除操作结果，成功时 Package 携带更新后的包信息。</returns>
+    Task<TemplatePackageOperationResult> DeleteTemplateFileAsync(
+        string packageName, string templateRelativePath, CancellationToken cancellationToken);
 }

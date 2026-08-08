@@ -7,6 +7,7 @@
         Width="1440"
         MinHeight="700"
         MinWidth="1120"
+        WindowState="Maximized"
         WindowStartupLocation="CenterScreen">
     <DockPanel>
 
@@ -23,6 +24,7 @@
                 <Separator />
                 <MenuItem Header="SQL 执行面板…" Click="OnOpenSqlPanelClick" />
                 <MenuItem Header="AI 生成模板…" Click="OnOpenAiWizardClick" />
+                <MenuItem Header="模板包管理…" Click="OnOpenTemplateManagerClick" />
                 <MenuItem Header="类型映射…" Click="OnOpenTypeMappingClick" />
                 <MenuItem Header="备份/恢复…" Click="OnOpenMigrationClick" />
             </MenuItem>
@@ -143,18 +145,24 @@
                         </Grid.InputBindings>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="190" />
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
-                        <!-- 模板区工具条：包下拉 / 刷新 / 变量面板 / 保存 -->
+                        <!-- 模板区工具条：包下拉 / 新建包 / 刷新 / 变量面板 / 保存 -->
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
                             <ComboBox ItemsSource="{Binding Packages}"
                                       SelectedItem="{Binding SelectedPackage}"
                                       DisplayMemberPath="Name"
                                       MinWidth="150"
                                       VerticalContentAlignment="Center" />
+                            <Button Content="新建包"
+                                    Command="{Binding CreatePackageCommand}"
+                                    Padding="10,2"
+                                    Margin="6,0,0,0"
+                                    VerticalContentAlignment="Center" />
                             <Button Content="刷新"
                                     Command="{Binding RefreshCommand}"
                                     Padding="10,2"
@@ -172,12 +180,36 @@
                                     VerticalContentAlignment="Center" />
                         </StackPanel>
 
+                        <!-- 文件工具条：新建/删除模板文件，仅用户包可用 -->
+                        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+                            <Button Content="新建文件"
+                                    Command="{Binding AddTemplateFileCommand}"
+                                    Padding="10,2"
+                                    Margin="0,0,4,0"
+                                    VerticalContentAlignment="Center" />
+                            <Button Content="删除文件"
+                                    Command="{Binding DeleteTemplateFileCommand}"
+                                    Padding="10,2"
+                                    VerticalContentAlignment="Center" />
+                        </StackPanel>
+
                         <!-- 包内模板文件树：checkbox 表达“勾选到层”运行时勾选态，选中文件后加载编辑器 -->
-                        <ListView Grid.Row="1"
+                        <ListView Grid.Row="2"
                                   ItemsSource="{Binding Files}"
                                   SelectedItem="{Binding SelectedFile}"
                                   Margin="0,0,0,4"
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <EventSetter Event="PreviewMouseRightButtonDown" Handler="OnTemplateFileListItemPreviewMouseRightButtonDown" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="新建模板文件" Command="{Binding AddTemplateFileCommand}" />
+                                    <MenuItem Header="删除模板文件" Command="{Binding DeleteTemplateFileCommand}" />
+                                </ContextMenu>
+                            </ListView.ContextMenu>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
                                     <StackPanel Orientation="Horizontal">
@@ -195,7 +227,7 @@
 
                         <!-- Scriban 模板编辑器，高亮语言由文件名推导 -->
                         <avalonedit:TextEditor x:Name="TemplateEditor"
-                                               Grid.Row="2"
+                                               Grid.Row="3"
                                                FontFamily="Consolas"
                                                FontSize="13"
                                                ShowLineNumbers="True"
@@ -204,7 +236,7 @@
                                                TextChanged="OnTemplateEditorTextChanged" />
 
                         <!-- 状态栏：加载/保存结果与脏标记 -->
-                        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,4,0,0">
+                        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,4,0,0">
                             <TextBlock Text="{Binding StatusText}"
                                        Foreground="Gray"
                                        TextTrimming="CharacterEllipsis" />

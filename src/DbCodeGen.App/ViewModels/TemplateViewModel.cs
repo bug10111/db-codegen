@@ -22,6 +22,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     private readonly TemplateFileWriter _templateFileWriter;
     private readonly IDialogService _dialogService;
     private readonly IConfirmDialogService _confirmDialogService;
+    private readonly IPromptDialogService _promptDialogService;
     private readonly Func<VariablePanelWindow> _variablePanelWindowFactory;
     private readonly ILogger<TemplateViewModel> _logger;
 
@@ -85,6 +86,8 @@ public sealed partial class TemplateViewModel : ObservableObject
     /// 模板包下拉选中项，切换时加载对应包的文件树。
     /// </summary>
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(AddTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
     private TemplatePackageListItemViewModel? _selectedPackage;
 
     /// <summary>
@@ -97,6 +100,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     /// 文件树选中项，切换时经脏文档确认后加载文件内容。
     /// </summary>
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
     private TemplateFileInfo? _selectedFile;
 
     /// <summary>
@@ -131,6 +135,9 @@ public sealed partial class TemplateViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsIdle))]
     [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CreatePackageCommand))]
+    [NotifyCanExecuteChangedFor(nameof(AddTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -185,12 +192,13 @@ public sealed partial class TemplateViewModel : ObservableObject
     public event Action<string>? EditorContentChanged;
 
     /// <summary>
-    /// 使用模板包服务、模板文件读写服务、对话框服务、变量面板窗口工厂与日志器构造视图模型。
+    /// 使用模板包服务、模板文件读写服务、对话框服务、输入提示服务、变量面板窗口工厂与日志器构造视图模型。
     /// </summary>
-    /// <param name="packageService">模板包管理服务，承载包列表与复制能力。</param>
+    /// <param name="packageService">模板包管理服务，承载包列表、复制与新建/增删文件能力。</param>
     /// <param name="templateFileWriter">模板文件读写服务，承载读取与保存写回。</param>
     /// <param name="dialogService">消息提示服务，用于加载与保存失败反馈。</param>
     /// <param name="confirmDialogService">二次确认服务，用于脏文档与内置包复制引导确认。</param>
+    /// <param name="promptDialogService">文本输入提示服务，用于新建包与新建文件的参数收集。</param>
     /// <param name="variablePanelWindowFactory">变量面板窗口工厂，供变量面板入口按需创建。</param>
     /// <param name="logger">视图模型日志器，日志不记录模板正文与敏感信息。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
@@ -199,6 +207,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         TemplateFileWriter templateFileWriter,
         IDialogService dialogService,
         IConfirmDialogService confirmDialogService,
+        IPromptDialogService promptDialogService,
         Func<VariablePanelWindow> variablePanelWindowFactory,
         ILogger<TemplateViewModel> logger)
     {
@@ -206,6 +215,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(templateFileWriter);
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(confirmDialogService);
+        ArgumentNullException.ThrowIfNull(promptDialogService);
         ArgumentNullException.ThrowIfNull(variablePanelWindowFactory);
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -213,6 +223,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         _templateFileWriter = templateFileWriter;
         _dialogService = dialogService;
         _confirmDialogService = confirmDialogService;
+        _promptDialogService = promptDialogService;
         _variablePanelWindowFactory = variablePanelWindowFactory;
         _logger = logger;
     }
@@ -311,6 +322,274 @@ public sealed partial class TemplateViewModel : ObservableObject
     }
 
     /// <summary>
+    /// 新建模板包：依次询问包名、说明与首模板文件相对路径（默认 main.tpl，输出路径与首文件路径一致），
+    /// 创建成功后刷新包列表并选中新包，自动进入文件树并载入首文件。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanCreatePackage))]
+    private async Task CreatePackageAsync()
+    {
+        // 依次收集新建包输入：包名必填，说明可空，首模板文件默认 main.tpl
+        string? packageName = await _promptDialogService.PromptAsync(
+            "新建模板包", "请输入新包名（字母/数字/中划线/下划线）：");
+        if (string.IsNullOrWhiteSpace(packageName))
+        {
+            return;
+        }
+
+        string name = packageName.Trim();
+        string? description = await _promptDialogService.PromptAsync("新建模板包", "请输入包说明（可留空）：", "");
+        if (description is null)
+        {
+            return;
+        }
+
+        string? templatePath = await _promptDialogService.PromptAsync(
+            "新建模板包", "请输入首模板文件相对路径（可含分组目录）：", "main.tpl");
+        if (string.IsNullOrWhiteSpace(templatePath))
+        {
+            return;
+        }
+
+        string firstTemplate = templatePath.Trim();
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.CreatePackageAsync(
+                name, description.Trim(), firstTemplate, firstTemplate, CancellationToken.None);
+
+            if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
+            {
+                _dialogService.ShowError(result.Message ?? "新建模板包失败。");
+                return;
+            }
+
+            await ReloadPackagesAsync(defaultSelectFirstPackage: false);
+            SelectPackageAndLoad(result.Package.Name);
+            _dialogService.ShowInfo($"已新建模板包“{result.Package.Name}”，首模板文件“{firstTemplate}”已创建。");
+            _logger.LogInformation("新建模板包成功，包名 {PackageName}。", result.Package.Name);
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+        {
+            _dialogService.ShowError($"新建模板包失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定新建包命令是否可执行：非繁忙即可创建。
+    /// </summary>
+    private bool CanCreatePackage() => !IsBusy;
+
+    /// <summary>
+    /// 向当前用户包新增模板文件：询问相对路径（可含分组目录）与输出路径，创建成功后刷新文件树并选中新文件载入编辑器。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanAddTemplateFile))]
+    private async Task AddTemplateFileAsync()
+    {
+        if (SelectedPackage is null || SelectedPackage.IsBuiltin)
+        {
+            return;
+        }
+
+        string packageName = SelectedPackage.Name;
+        string? templatePath = await _promptDialogService.PromptAsync(
+            "新建模板文件", $"为模板包“{packageName}”输入新文件相对路径（可含分组目录）：");
+        if (string.IsNullOrWhiteSpace(templatePath))
+        {
+            return;
+        }
+
+        string relativePath = templatePath.Trim();
+        string? outputPath = await _promptDialogService.PromptAsync(
+            "新建模板文件", "输入该文件的输出相对路径：", relativePath);
+        if (outputPath is null)
+        {
+            return;
+        }
+
+        // 新建文件会重建文件树并切换当前文件，脏文档先经二次确认，取消则终止本次新建
+        if (IsDirty)
+        {
+            bool canLeave = await ConfirmSaveBeforeSwitchAsync("新建模板文件");
+            if (!canLeave)
+            {
+                return;
+            }
+        }
+
+        string normalizedOutput = outputPath.Trim();
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.AddTemplateFileAsync(
+                packageName, relativePath, normalizedOutput, CancellationToken.None);
+
+            if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
+            {
+                _dialogService.ShowError(result.Message ?? "新增模板文件失败。");
+                return;
+            }
+
+            _currentPackage = result.Package;
+
+            // 重建文件树期间抑制选中项变更，避免旧的选中文件被移出集合时触发空选中确认
+            _isApplyingRollback = true;
+            try
+            {
+                ReloadFiles();
+            }
+            finally
+            {
+                _isApplyingRollback = false;
+            }
+
+            SelectFileAndLoad(relativePath);
+            _dialogService.ShowInfo($"已新建模板文件“{relativePath}”。");
+            _logger.LogInformation("新增模板文件成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+        {
+            _dialogService.ShowError($"新增模板文件失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定新建文件命令是否可执行：选中用户包（非内置）且非繁忙。
+    /// </summary>
+    private bool CanAddTemplateFile() => SelectedPackage is not null && !SelectedPackage.IsBuiltin && !IsBusy;
+
+    /// <summary>
+    /// 删除当前用户包选中的模板文件：二次确认后删除并同步清单，删除的正是当前编辑文件时关闭文档。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanDeleteTemplateFile))]
+    private async Task DeleteTemplateFileAsync()
+    {
+        if (SelectedPackage is null || SelectedFile is null)
+        {
+            return;
+        }
+
+        string packageName = SelectedPackage.Name;
+        string relativePath = SelectedFile.RelativeTemplatePath;
+        bool isCurrentFile = _currentFile is not null
+            && string.Equals(_currentFile.RelativeTemplatePath, relativePath, StringComparison.OrdinalIgnoreCase);
+
+        bool confirmed = await _confirmDialogService.ConfirmAsync(
+            "删除模板文件", $"确定要删除模板文件“{relativePath}”吗？删除后不可恢复。");
+        if (!confirmed)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.DeleteTemplateFileAsync(
+                packageName, relativePath, CancellationToken.None);
+
+            if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
+            {
+                _dialogService.ShowError(result.Message ?? "删除模板文件失败。");
+                return;
+            }
+
+            _currentPackage = result.Package;
+
+            // 删除的正是当前编辑文件时先关闭文档，随后重建文件树并复位选中项，防悬空选中引用
+            if (isCurrentFile)
+            {
+                CloseCurrentDocument();
+            }
+
+            _isApplyingRollback = true;
+            try
+            {
+                ReloadFiles();
+                if (isCurrentFile)
+                {
+                    SelectedFile = null;
+                    _lastSelectedFile = null;
+                    _fileBeforeSwitch = null;
+                }
+                else
+                {
+                    // 删除的是非当前编辑文件时，把选中与切换基线复位到当前编辑文件，防回退指向已删除实例
+                    TemplateFileInfo? target = _currentFile is null
+                        ? null
+                        : Files.FirstOrDefault(file =>
+                            string.Equals(file.RelativeTemplatePath, _currentFile.RelativeTemplatePath, StringComparison.OrdinalIgnoreCase));
+                    SelectedFile = target;
+                    _lastSelectedFile = target;
+                    _fileBeforeSwitch = target;
+                }
+            }
+            finally
+            {
+                _isApplyingRollback = false;
+            }
+
+            _dialogService.ShowInfo($"已删除模板文件“{relativePath}”。");
+            _logger.LogInformation("删除模板文件成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+        {
+            _dialogService.ShowError($"删除模板文件失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定删除文件命令是否可执行：选中用户包文件且非繁忙，内置包只读禁止删除。
+    /// </summary>
+    private bool CanDeleteTemplateFile() => SelectedPackage is not null && !SelectedPackage.IsBuiltin && SelectedFile is not null && !IsBusy;
+
+    /// <summary>
+    /// 按包名定位列表项并走正常选中流程加载该包，触发文件树重建与首文件自动载入。
+    /// </summary>
+    /// <param name="packageName">目标包名。</param>
+    private void SelectPackageAndLoad(string packageName)
+    {
+        TemplatePackageListItemViewModel? match = Packages.FirstOrDefault(item =>
+            string.Equals(item.Name, packageName, StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+        {
+            return;
+        }
+
+        _lastSelectedPackage = match;
+        SelectedPackage = match;
+    }
+
+    /// <summary>
+    /// 按相对路径定位文件树项并走正常选中流程载入编辑器，含脏文档二次确认。
+    /// 用户输入可能使用反斜杠，先经包加载器规范化到树中展示的正斜杠形式再匹配。
+    /// </summary>
+    /// <param name="relativePath">目标文件相对路径。</param>
+    private void SelectFileAndLoad(string relativePath)
+    {
+        string normalizedPath = TemplatePackageLoader.NormalizeRelativePath(relativePath);
+        TemplateFileInfo? match = Files.FirstOrDefault(file =>
+            string.Equals(file.RelativeTemplatePath, normalizedPath, StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+        {
+            return;
+        }
+
+        _lastSelectedFile = match;
+        SelectedFile = match;
+    }
+
+    /// <summary>
     /// 保存当前模板文件：内置包先引导复制到用户库再保存，用户包直接写盘。
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanSave))]
@@ -356,7 +635,9 @@ public sealed partial class TemplateViewModel : ObservableObject
     /// <summary>
     /// 重新加载模板包列表，单个包加载异常由服务内部跳过。
     /// </summary>
-    private async Task ReloadPackagesAsync()
+    /// <param name="defaultSelectFirstPackage">无历史选中（或历史选中已失效）时是否默认选中第一包；
+    /// 调用方随后要按名精确选中新包时传 false，避免默认选中与后续选中竞态。</param>
+    private async Task ReloadPackagesAsync(bool defaultSelectFirstPackage = true)
     {
         try
         {
@@ -382,6 +663,13 @@ public sealed partial class TemplateViewModel : ObservableObject
             finally
             {
                 _isApplyingRollback = false;
+            }
+
+            // 无历史选中或历史选中已失效但列表非空时，默认选中第一包并走真实选中事件触发包加载与首文件载入
+            if (defaultSelectFirstPackage && SelectedPackage is null && Packages.Count > 0)
+            {
+                _lastSelectedPackage = Packages[0];
+                SelectedPackage = Packages[0];
             }
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
@@ -457,6 +745,13 @@ public sealed partial class TemplateViewModel : ObservableObject
 
             CloseCurrentDocument();
             StatusText = $"已加载模板包：{package.Name}（{package.Files.Count} 个模板文件）";
+
+            // 文件树非空时默认选中第一个文件并载入编辑器，让模板包加载即进入可编辑状态
+            if (Files.Count > 0)
+            {
+                _lastSelectedFile = Files[0];
+                SelectedFile = Files[0];
+            }
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
         {
@@ -626,7 +921,18 @@ public sealed partial class TemplateViewModel : ObservableObject
 
         // 复制成功：刷新包列表纳入副本包并切换到副本包，更新当前文件实例，随后以当前文本写盘
         _currentPackage = copyResult.Package;
-        ReloadFiles();
+
+        // 重建文件树期间抑制选中项变更，避免旧选中文件被移出集合时触发空选中确认，打断复制保存流程
+        _isApplyingRollback = true;
+        try
+        {
+            ReloadFiles();
+        }
+        finally
+        {
+            _isApplyingRollback = false;
+        }
+
         SyncCurrentFileInNewPackage();
         await ReloadPackagesAsync();
         SelectPackageSilently(copyResult.Package.Name);

@@ -173,10 +173,11 @@ public static class TemplatePackageLoader
 
     /// <summary>
     /// 将相对路径规范化：统一正斜杠、去除重复分隔符与首部斜杠，并折叠当前目录段与空段。
+    /// 供包内路径匹配与安全校验复用，UI 层按用户输入定位文件树项时同样使用该规范化结果。
     /// </summary>
     /// <param name="relativePath">原始相对路径。</param>
     /// <returns>规范化后的相对路径（正斜杠分隔）。</returns>
-    internal static string NormalizeRelativePath(string relativePath)
+    public static string NormalizeRelativePath(string relativePath)
     {
         string path = (relativePath ?? string.Empty).Trim().Replace('\\', '/');
         while (path.Contains("//", StringComparison.Ordinal))
@@ -231,8 +232,19 @@ public static class TemplatePackageLoader
             }
         }
 
-        string rootFull = Path.GetFullPath(rootDirectory);
-        string candidate = Path.GetFullPath(Path.Combine(rootFull, normalized.Replace('/', Path.DirectorySeparatorChar)));
+        string rootFull;
+        string candidate;
+        try
+        {
+            rootFull = Path.GetFullPath(rootDirectory);
+            candidate = Path.GetFullPath(Path.Combine(rootFull, normalized.Replace('/', Path.DirectorySeparatorChar)));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        {
+            // 非法路径字符等异常统一转换为模板包异常，保证防穿越契约对外一致
+            throw new TemplatePackageException($"相对路径含非法字符，已拒绝：{relativePath}", exception);
+        }
+
         if (!IsPathWithinRoot(rootFull, candidate))
         {
             throw new TemplatePackageException($"相对路径越出包根目录，已拒绝：{relativePath}");

@@ -2,6 +2,7 @@ using System.Collections;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using DbCodeGen.App.Services;
 using DbCodeGen.App.ViewModels;
 using DbCodeGen.App.Views;
@@ -27,6 +28,7 @@ public partial class MainWindow : Window
     private readonly Func<SqlExecutorWindow> _sqlExecutorWindowFactory;
     private readonly Func<MigrationWindow> _migrationWindowFactory;
     private readonly Func<TypeMappingWindow> _typeMappingWindowFactory;
+    private readonly Func<TemplatePackageManagerWindow> _templateManagerWindowFactory;
     private readonly TableListViewModel _tableListViewModel;
     private readonly TemplateViewModel _templateViewModel;
     private readonly PreviewViewModel _previewViewModel;
@@ -45,7 +47,8 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 使用配置服务、当前连接服务、对话框服务、数据源管理窗口工厂、设置窗口工厂、AI 向导窗口工厂、
-    /// SQL 执行面板窗口工厂、迁移窗口工厂、表列表视图模型、模板编辑器视图模型、预览视图模型与高亮服务构造主窗口。
+    /// SQL 执行面板窗口工厂、迁移窗口工厂、类型映射窗口工厂、模板包管理窗口工厂、表列表视图模型、
+    /// 模板编辑器视图模型、预览视图模型与高亮服务构造主窗口。
     /// </summary>
     /// <param name="configService">配置持久化服务，用于读取已保存数据源列表。</param>
     /// <param name="currentDataSourceService">当前连接共享状态服务，用于切换当前连接与接收变更通知。</param>
@@ -55,6 +58,8 @@ public partial class MainWindow : Window
     /// <param name="aiWizardWindowFactory">AI 生成模板向导窗口工厂，供“工具”菜单入口按需创建。</param>
     /// <param name="sqlExecutorWindowFactory">SQL 执行面板窗口工厂，供“工具”菜单入口按需创建。</param>
     /// <param name="migrationWindowFactory">迁移窗口工厂，供“工具”菜单“备份/恢复…”入口按需创建。</param>
+    /// <param name="typeMappingWindowFactory">类型映射窗口工厂，供“工具”菜单“类型映射…”入口按需创建。</param>
+    /// <param name="templateManagerWindowFactory">模板包管理窗口工厂，供“工具”菜单“模板包管理…”入口按需创建。</param>
     /// <param name="tableListViewModel">表列表区视图模型，承载表清单加载与多选勾选。</param>
     /// <param name="templateViewModel">模板编辑器视图模型，承载②模板区文件树、编辑器与保存。</param>
     /// <param name="previewViewModel">预览视图模型，承载③预览区选表渲染与错误定位。</param>
@@ -71,6 +76,7 @@ public partial class MainWindow : Window
         Func<SqlExecutorWindow> sqlExecutorWindowFactory,
         Func<MigrationWindow> migrationWindowFactory,
         Func<TypeMappingWindow> typeMappingWindowFactory,
+        Func<TemplatePackageManagerWindow> templateManagerWindowFactory,
         TableListViewModel tableListViewModel,
         TemplateViewModel templateViewModel,
         PreviewViewModel previewViewModel,
@@ -86,6 +92,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(sqlExecutorWindowFactory);
         ArgumentNullException.ThrowIfNull(migrationWindowFactory);
         ArgumentNullException.ThrowIfNull(typeMappingWindowFactory);
+        ArgumentNullException.ThrowIfNull(templateManagerWindowFactory);
         ArgumentNullException.ThrowIfNull(tableListViewModel);
         ArgumentNullException.ThrowIfNull(templateViewModel);
         ArgumentNullException.ThrowIfNull(previewViewModel);
@@ -102,6 +109,7 @@ public partial class MainWindow : Window
         _sqlExecutorWindowFactory = sqlExecutorWindowFactory;
         _migrationWindowFactory = migrationWindowFactory;
         _typeMappingWindowFactory = typeMappingWindowFactory;
+        _templateManagerWindowFactory = templateManagerWindowFactory;
         _tableListViewModel = tableListViewModel;
         _templateViewModel = templateViewModel;
         _previewViewModel = previewViewModel;
@@ -305,22 +313,66 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 依据配置快照重建工具栏数据源下拉项，并选中当前连接。
+    /// 点击菜单“模板包管理…”打开模板包管理窗口，完成导入/复制/导出/删除整包操作；
+    /// 窗口关闭后刷新②区包列表，同步导入或删除的包。
+    /// </summary>
+    private void OnOpenTemplateManagerClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            TemplatePackageManagerWindow window = _templateManagerWindowFactory();
+            window.Owner = this;
+            window.ShowDialog();
+        }
+        catch (Exception exception)
+        {
+            // 窗口创建或展示失败时给用户可读提示，不中断主窗口运行
+            _dialogService.ShowError($"打开模板包管理窗口失败：{exception.Message}");
+            return;
+        }
+
+        // 管理窗口可能导入/复制/删除包，关闭后刷新②区包列表与当前选中保持最新
+        _templateViewModel.RefreshCommand.Execute(null);
+    }
+
+    /// <summary>
+    /// 依据配置快照重建工具栏数据源下拉项；当前连接为空但存在数据源时默认选中第一项，
+    /// 经真实选中事件触发 SetCurrent 联动①表列表区自动刷新。
     /// </summary>
     private void ReloadDataSourceComboBox()
     {
+        AppConfig config = _configService.Current;
+
+        // 每次重建为独立集合副本，保证连接增删后下拉即时刷新
+        List<DataSourceConfig> sources = config.DataSources.ToList();
+
         _isSyncingSelection = true;
         try
         {
-            AppConfig config = _configService.Current;
-
-            // 每次重建为独立集合副本，保证连接增删后下拉即时刷新
-            DataSourceComboBox.ItemsSource = config.DataSources.ToList();
-            DataSourceComboBox.SelectedItem = FindComboBoxItem(_currentDataSourceService.Current);
+            DataSourceComboBox.ItemsSource = sources;
         }
         finally
         {
             _isSyncingSelection = false;
+        }
+
+        if (_currentDataSourceService.Current is null && sources.Count > 0)
+        {
+            // 当前连接为空但列表有数据源时默认选中第一项（守卫外触发真实切换），联动①区自动刷表
+            DataSourceComboBox.SelectedItem = sources[0];
+        }
+        else
+        {
+            // 有当前连接或列表为空时经守卫同步选中，避免重复触发切换通知
+            _isSyncingSelection = true;
+            try
+            {
+                DataSourceComboBox.SelectedItem = FindComboBoxItem(_currentDataSourceService.Current);
+            }
+            finally
+            {
+                _isSyncingSelection = false;
+            }
         }
     }
 
@@ -355,6 +407,17 @@ public partial class MainWindow : Window
     {
         _templateViewModel.NotifyFileSelectionChanged();
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// 文件树行右键按下时选中该行，保证上下文菜单“删除模板文件”作用于右键目标而非上次左键选中项。
+    /// </summary>
+    private void OnTemplateFileListItemPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is ListViewItem item)
+        {
+            item.IsSelected = true;
+        }
     }
 
     /// <summary>

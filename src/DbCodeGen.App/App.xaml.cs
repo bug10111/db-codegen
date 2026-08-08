@@ -81,6 +81,7 @@ public partial class App : Application
         services.AddSingleton<IConfirmDialogService>(provider => provider.GetRequiredService<DialogService>());
         services.AddSingleton<IFolderPickerService>(provider => provider.GetRequiredService<DialogService>());
         services.AddSingleton<IFilePickerService>(provider => provider.GetRequiredService<DialogService>());
+        services.AddSingleton<IPromptDialogService>(provider => provider.GetRequiredService<DialogService>());
 
         // 当前连接共享状态服务，供主窗口工具栏与各消费方联动
         services.AddSingleton<ICurrentDataSourceService, CurrentDataSourceService>();

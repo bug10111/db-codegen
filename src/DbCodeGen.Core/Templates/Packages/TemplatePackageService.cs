@@ -7,7 +7,8 @@ using Microsoft.Extensions.Logging;
 namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
-/// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、导出与删除，
+/// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、导出、删除，
+/// 以及新建包、新增模板文件与删除模板文件，
 /// 内置包只读边界、zip 防穿越与解压上限、变更操作串行化均在此实现。
 /// </summary>
 public sealed class TemplatePackageService : ITemplatePackageService, IDisposable
@@ -192,6 +193,366 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         await _gate.ExecuteExclusiveAsync(
             token => DeletePackageCoreAsync(packageName, token),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> CreatePackageAsync(
+        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => CreatePackageCoreAsync(packageName, description, firstTemplatePath, firstOutputPath, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> AddTemplateFileAsync(
+        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => AddTemplateFileCoreAsync(packageName, templateRelativePath, outputPath, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> DeleteTemplateFileAsync(
+        string packageName, string templateRelativePath, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => DeleteTemplateFileCoreAsync(packageName, templateRelativePath, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 新建包核心流程：校验包名与首文件路径 → 内置包同名只读拒绝 → 用户包同名冲突拒绝 →
+    /// 建目录写清单并创建首模板空文件 → 重新校验返回。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> CreatePackageCoreAsync(
+        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken)
+    {
+        if (!TemplatePackageLoader.IsValidPackageName(packageName))
+        {
+            return TemplatePackageOperationResult.Invalid($"包名不合法（须为字母/数字/中划线/下划线且不含路径分隔符或 ..）：{packageName}");
+        }
+
+        string? normalizedTemplate = NormalizeSafeRelativePath(firstTemplatePath);
+        string? normalizedOutput = NormalizeSafeRelativePath(firstOutputPath);
+        if (normalizedTemplate is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"首模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstTemplatePath}");
+        }
+
+        if (normalizedOutput is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstOutputPath}");
+        }
+
+        // 与内置包同名：内置包只读，新建直接拒绝，不进入覆盖流程
+        if (PackageNameExists(_builtinRootPath, packageName))
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可覆盖或新建同名包。");
+        }
+
+        string? userLibraryRoot = GetUserLibraryRoot();
+        if (userLibraryRoot is null)
+        {
+            return TemplatePackageOperationResult.Failure("未配置可用的用户模板搜索目录，无法创建模板包。");
+        }
+
+        string targetDirectory = Path.Combine(userLibraryRoot, packageName);
+        if (Directory.Exists(targetDirectory))
+        {
+            return TemplatePackageOperationResult.NameConflict($"同名用户包 {packageName} 已存在，新建不走覆盖，请更换包名。");
+        }
+
+        try
+        {
+            Directory.CreateDirectory(targetDirectory);
+
+            // 写入 template.json 清单：固定 scriban 引擎并声明首模板文件条目
+            var manifest = new TemplateManifest
+            {
+                Name = packageName,
+                Description = description?.Trim() ?? string.Empty,
+                Engine = TemplatePackageLoader.SupportedEngine,
+                Files = new List<TemplateFileEntry>
+                {
+                    new()
+                    {
+                        Template = normalizedTemplate,
+                        Output = normalizedOutput,
+                        Enabled = true
+                    }
+                }
+            };
+
+            string manifestPath = Path.Combine(targetDirectory, TemplatePackageLoader.ManifestFileName);
+            string json = JsonSerializer.Serialize(manifest, TemplatePackageLoader.JsonOptions);
+            await File.WriteAllTextAsync(manifestPath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+
+            // 创建首模板空文件并自动建父目录（分组目录），保证清单 files 引用的文件真实存在
+            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(targetDirectory, normalizedTemplate);
+            string? parentDirectory = Path.GetDirectoryName(templateFullPath);
+            if (!string.IsNullOrEmpty(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            await File.WriteAllTextAsync(templateFullPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+
+            TemplatePackageInfo created = await TemplatePackageLoader.LoadFromDirectoryAsync(targetDirectory, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已创建用户模板包：{PackageName}，目录：{Directory}。", packageName, targetDirectory);
+            return TemplatePackageOperationResult.Success(created);
+        }
+        catch (OperationCanceledException)
+        {
+            // 创建中途被取消时清理已建目录与文件，避免留下半成品模板包
+            TryDeleteDirectory(targetDirectory);
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            TryDeleteDirectory(targetDirectory);
+            _logger.LogError(exception, "创建模板包失败，目标目录：{TargetDirectory}。", targetDirectory);
+            return TemplatePackageOperationResult.Failure($"创建模板包失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 新增文件核心流程：加载包并校验内置只读 → 路径校验 → 目标已存在拒绝 →
+    /// 建空文件并追加 manifest 条目重写 → 重新校验返回。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> AddTemplateFileCoreAsync(
+        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可新增模板文件。");
+        }
+
+        string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
+        string? normalizedOutput = NormalizeSafeRelativePath(outputPath);
+        if (normalizedTemplate is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
+        }
+
+        if (normalizedOutput is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{outputPath}");
+        }
+
+        try
+        {
+            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedTemplate);
+            if (File.Exists(templateFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"模板文件已存在：{normalizedTemplate}");
+            }
+
+            // 建空模板文件并自动建父目录（分组目录）
+            string? parentDirectory = Path.GetDirectoryName(templateFullPath);
+            if (!string.IsNullOrEmpty(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            await File.WriteAllTextAsync(templateFullPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                // 追加 manifest 条目并重写清单，保证清单与磁盘文件一致
+                await AppendManifestFileEntryAsync(package, normalizedTemplate, normalizedOutput, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 清单追加失败时回滚已建文件，避免孤儿文件残留；异常经外层 catch 统一收敛为失败结果
+                TryDeleteFile(templateFullPath);
+                throw;
+            }
+
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已新增模板文件，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(exception, "新增模板文件失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Failure($"新增模板文件失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 删除文件核心流程：加载包并校验内置只读 → 文件不存在拒绝 → 仅剩一个文件拒绝 →
+    /// 删除文件并移除 manifest 条目重写 → 重新校验返回。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> DeleteTemplateFileCoreAsync(
+        string packageName, string templateRelativePath, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可删除模板文件。");
+        }
+
+        string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
+        if (normalizedTemplate is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
+        }
+
+        try
+        {
+            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedTemplate);
+            if (!File.Exists(templateFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedTemplate}");
+            }
+
+            // 至少保留一个文件，防止清单 files 为空导致重新校验失败；按"仍有其他条目存续"判断，
+            // 避免清单存在同一模板路径多条重复条目时按计数放行却把条目全部移除的清空
+            bool hasSurvivingEntry = package.Files.Any(file =>
+                !string.Equals(
+                    TemplatePackageLoader.NormalizeRelativePath(file.RelativeTemplatePath),
+                    normalizedTemplate,
+                    StringComparison.OrdinalIgnoreCase));
+            if (!hasSurvivingEntry)
+            {
+                return TemplatePackageOperationResult.Failure("模板包至少保留一个模板文件，删除最后一个文件被拒绝。");
+            }
+
+            // 先移除 manifest 对应条目并写回，成功后再删文件，避免清单写失败留下损坏包
+            await RemoveManifestFileEntryAsync(package, normalizedTemplate, cancellationToken).ConfigureAwait(false);
+            File.Delete(templateFullPath);
+
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已删除模板文件，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(exception, "删除模板文件失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Failure($"删除模板文件失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 规范化并校验模板/输出相对路径骨架安全，返回规范化路径；不合法返回 null。
+    /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移；
+    /// 规范化后逐段校验非法文件名字符，避免 Path.GetFullPath 抛出未处理异常并落盘脏数据。
+    /// </summary>
+    /// <param name="relativePath">待校验的相对路径。</param>
+    /// <returns>规范化后的安全相对路径；为空或含绝对路径、盘符前缀、.. 段、非法字符时返回 null。</returns>
+    private static string? NormalizeSafeRelativePath(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath) || relativePath.Contains(':'))
+        {
+            return null;
+        }
+
+        string normalized = TemplatePackageLoader.NormalizeRelativePath(relativePath);
+        if (normalized.Length == 0 || !TemplatePackageLoader.IsSafeRelativeSkeleton(normalized))
+        {
+            return null;
+        }
+
+        // 逐段校验非法文件名字符（含 | * ? < > 等与控制字符），防 Windows 路径解析抛未处理异常
+        char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
+        foreach (string segment in normalized.Split('/'))
+        {
+            if (segment.IndexOfAny(invalidFileNameChars) >= 0)
+            {
+                return null;
+            }
+        }
+
+        return normalized;
+    }
+
+    /// <summary>
+    /// 向包清单追加一个模板文件条目并重写 template.json，保持清单与磁盘文件一致。
+    /// </summary>
+    /// <param name="package">目标模板包运行时信息。</param>
+    /// <param name="normalizedTemplate">规范化后的模板相对路径。</param>
+    /// <param name="normalizedOutput">规范化后的输出相对路径。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    private static async Task AppendManifestFileEntryAsync(
+        TemplatePackageInfo package, string normalizedTemplate, string normalizedOutput, CancellationToken cancellationToken)
+    {
+        TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
+        manifest.Files.Add(new TemplateFileEntry
+        {
+            Template = normalizedTemplate,
+            Output = normalizedOutput,
+            Enabled = true
+        });
+
+        await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 从包清单移除指定模板文件条目并重写 template.json，保持清单与磁盘文件一致。
+    /// </summary>
+    /// <param name="package">目标模板包运行时信息。</param>
+    /// <param name="normalizedTemplate">规范化后的待移除模板相对路径。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    private static async Task RemoveManifestFileEntryAsync(
+        TemplatePackageInfo package, string normalizedTemplate, CancellationToken cancellationToken)
+    {
+        TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
+        manifest.Files.RemoveAll(entry =>
+            string.Equals(TemplatePackageLoader.NormalizeRelativePath(entry.Template), normalizedTemplate, StringComparison.OrdinalIgnoreCase));
+
+        await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 读取包清单用于更新，解析失败时抛模板包异常，不改变磁盘内容。
+    /// </summary>
+    /// <param name="manifestPath">template.json 清单路径。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>可更新的清单模型。</returns>
+    private static async Task<TemplateManifest> ReadManifestForUpdateAsync(string manifestPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            string json = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+            return JsonSerializer.Deserialize<TemplateManifest>(json, TemplatePackageLoader.JsonOptions) ?? new TemplateManifest();
+        }
+        catch (JsonException exception)
+        {
+            throw new TemplatePackageException("更新模板包清单失败：清单解析异常。", exception);
+        }
+    }
+
+    /// <summary>
+    /// 以 UTF-8 无 BOM 编码写回模板包清单。
+    /// </summary>
+    /// <param name="manifestPath">template.json 清单路径。</param>
+    /// <param name="manifest">待写回的清单模型。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    private static async Task WriteManifestAsync(string manifestPath, TemplateManifest manifest, CancellationToken cancellationToken)
+    {
+        string updated = JsonSerializer.Serialize(manifest, TemplatePackageLoader.JsonOptions);
+        await File.WriteAllTextAsync(manifestPath, updated, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -687,6 +1048,25 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     {
         string packageDirectory = Path.Combine(rootDirectory, packageName);
         return Directory.Exists(packageDirectory);
+    }
+
+    /// <summary>
+    /// 尽力删除单个文件，失败仅记录日志不阻断主流程。
+    /// </summary>
+    /// <param name="filePath">待删除文件路径。</param>
+    private void TryDeleteFile(string filePath)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(exception, "删除文件失败：{FilePath}。", filePath);
+        }
     }
 
     /// <summary>

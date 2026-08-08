@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Threading;
@@ -152,6 +153,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         _debounceTimer.Tick += OnDebounceTick;
 
         _tableListViewModel.PropertyChanged += OnTableListPropertyChanged;
+        _tableListViewModel.TableRows.CollectionChanged += OnTableRowsCollectionChanged;
         _templateViewModel.EditorContentChanged += OnTemplateContentChanged;
 
         // 类型映射等配置保存后重新渲染预览，保证映射改动即时反映到预览代码
@@ -167,6 +169,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     public void Detach()
     {
         _tableListViewModel.PropertyChanged -= OnTableListPropertyChanged;
+        _tableListViewModel.TableRows.CollectionChanged -= OnTableRowsCollectionChanged;
         _templateViewModel.EditorContentChanged -= OnTemplateContentChanged;
         _configService.ConfigChanged -= OnConfigChanged;
         _debounceTimer.Stop();
@@ -186,6 +189,24 @@ public sealed partial class PreviewViewModel : ObservableObject
         if (e.PropertyName == nameof(TableListViewModel.CurrentTable))
         {
             SyncCurrentTable(_tableListViewModel.CurrentTable);
+        }
+    }
+
+    /// <summary>
+    /// 表清单集合新增行时，若预览表尚无选中项则默认选中第一行，让预览区自动呈现首表内容。
+    /// </summary>
+    /// <param name="sender">集合变更发送方。</param>
+    /// <param name="e">集合变化参数。</param>
+    private void OnTableRowsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action != NotifyCollectionChangedAction.Add)
+        {
+            return;
+        }
+
+        if (SelectedTableRow is null && AvailableTables.Count > 0)
+        {
+            SelectedTableRow = AvailableTables[0];
         }
     }
 
