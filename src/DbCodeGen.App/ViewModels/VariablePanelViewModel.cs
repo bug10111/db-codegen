@@ -241,7 +241,7 @@ public sealed partial class VariablePanelViewModel : ObservableObject
             "package", "包变量", "模板包上下文，manifest 注入",
             null, VariableNodeKind.Package, new VariableTreeNode[]
             {
-                new("basePackage", "基础包名", "manifest basePackage", "{{ package.basePackage }}", VariableNodeKind.Package),
+                new("basePackage", "基础包名", "manifest basePackage（可含完整包路径，如 com.example.common）", "{{ package.basePackage }}", VariableNodeKind.Package),
                 new("name", "包名", "manifest name", "{{ package.name }}", VariableNodeKind.Package)
             });
     }

@@ -1,16 +1,11 @@
 namespace DbCodeGen.Core.Ai;
 
 /// <summary>
-/// OpenAI 兼容对话请求，承载模型、消息列表、采样温度与最大输出 token 数。
-/// 整套模板包 JSON 体量大，MaxTokens 默认 16000 防止输出截断产生非法 JSON。
+/// OpenAI 兼容对话请求，承载模型、消息列表、采样温度与可选的最大输出 token 数。
+/// MaxTokens 不设置时请求体不含 max_tokens 字段，由服务端按其默认输出上限处理，避免模型输出被截断或超限被拒。
 /// </summary>
 public sealed class LlmChatRequest
 {
-    /// <summary>
-    /// 默认最大输出 token 数。
-    /// </summary>
-    public const int DefaultMaxTokens = 16000;
-
     /// <summary>
     /// 默认采样温度，模板生成建议值。
     /// </summary>
@@ -32,7 +27,7 @@ public sealed class LlmChatRequest
     public double? Temperature { get; set; }
 
     /// <summary>
-    /// 最大输出 token 数，为空时使用默认值 16000。
+    /// 最大输出 token 数，可空；不设置时请求体不含 max_tokens 字段，由服务端按默认输出上限处理。
     /// </summary>
     public int? MaxTokens { get; set; }
 }

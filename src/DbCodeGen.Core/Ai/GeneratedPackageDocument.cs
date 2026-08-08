@@ -19,7 +19,7 @@ public sealed class GeneratedPackageDocument
     public string Description { get; set; } = string.Empty;
 
     /// <summary>
-    /// 基础包名，如 com.example，可为空，生成时注入渲染上下文 package 侧。
+    /// 基础包名，可填完整包名（含模块段，如 com.example.common），可为空，生成时注入渲染上下文 package 侧。
     /// </summary>
     public string? BasePackage { get; set; }
 

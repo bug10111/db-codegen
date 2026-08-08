@@ -1,11 +1,11 @@
-package {{package.basePackage}}.common.service.impl.{{table.variableName}};
+package {{package.basePackage}}.service.impl.{{table.variableName}};
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
-import {{package.basePackage}}.common.mapper.{{table.variableName}}.{{table.className}}Mapper;
-import {{package.basePackage}}.common.service.{{table.variableName}}.{{table.className}}Service;
+import {{package.basePackage}}.entity.{{table.variableName}}.{{table.className}};
+import {{package.basePackage}}.mapper.{{table.variableName}}.{{table.className}}Mapper;
+import {{package.basePackage}}.service.{{table.variableName}}.{{table.className}}Service;
 import org.springframework.stereotype.Service;
 
 /**

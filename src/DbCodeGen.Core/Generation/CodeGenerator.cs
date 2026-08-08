@@ -1,5 +1,6 @@
 using System.Text;
 using DbCodeGen.Core.Config;
+using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
@@ -18,6 +19,7 @@ public sealed class CodeGenerator : ICodeGenerator
     private readonly IFileWriter _fileWriter;
     private readonly IConfigService _configService;
     private readonly ITypeMappingService? _typeMappingService;
+    private readonly TableCatalogService? _tableCatalogService;
     private readonly ILogger<CodeGenerator> _logger;
 
     /// <summary>
@@ -30,6 +32,7 @@ public sealed class CodeGenerator : ICodeGenerator
     /// <param name="configService">配置服务，生成完成后回写最近相对输出根。</param>
     /// <param name="logger">生成服务日志器，日志不得输出模板正文或敏感信息。</param>
     /// <param name="typeMappingService">全局类型映射服务，用于生成前未映射类型预检，可为空。</param>
+    /// <param name="tableCatalogService">表元数据编排服务，用于生成前补全表列元数据，可为空。</param>
     /// <exception cref="ArgumentNullException">engine、templateFileWriter、fileWriter、configService 或 logger 为 null 时抛出。</exception>
     public CodeGenerator(
         TemplateEngine engine,
@@ -37,7 +40,8 @@ public sealed class CodeGenerator : ICodeGenerator
         IFileWriter fileWriter,
         IConfigService configService,
         ILogger<CodeGenerator> logger,
-        ITypeMappingService? typeMappingService = null)
+        ITypeMappingService? typeMappingService = null,
+        TableCatalogService? tableCatalogService = null)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(templateFileWriter);
@@ -49,6 +53,7 @@ public sealed class CodeGenerator : ICodeGenerator
         _fileWriter = fileWriter;
         _configService = configService;
         _typeMappingService = typeMappingService;
+        _tableCatalogService = tableCatalogService;
         _logger = logger;
     }
 
@@ -136,7 +141,7 @@ public sealed class CodeGenerator : ICodeGenerator
 
         if (!writeResult.IsCancelled)
         {
-            WriteBackOutputRoot(request.RelativeOutputRoot, mergedLogs);
+            WriteBackOutputRoot(request.CodeDirectory ?? request.RelativeOutputRoot, mergedLogs);
         }
 
         return new GenerationResult(
@@ -176,7 +181,11 @@ public sealed class CodeGenerator : ICodeGenerator
             return new GenerationPreview(Array.Empty<GenerationFileEntry>(), 0, 0, 0);
         }
 
-        TemplatePackageContext packageContext = TemplatePackageContext.From(request.Package);
+        // 生成前补全表列元数据：表清单阶段不含列，实体与 mapper.xml 模板按列循环渲染，
+        // 必须经表详情读取补全列集合，否则实体只剩类壳、insert 语句列清单为空
+        tables = await EnrichTableColumnsAsync(request, tables, cancellationToken).ConfigureAwait(false);
+
+        TemplatePackageContext packageContext = TemplatePackageContext.From(request.Package, request.BasePackageOverride);
         var entries = new List<GenerationFileEntry>();
         int total = tables.Count * selectedFiles.Count;
         int completed = 0;
@@ -219,6 +228,42 @@ public sealed class CodeGenerator : ICodeGenerator
         int overwriteCount = entries.Count(entry => entry.Action == GenerationAction.Overwrite);
         int skipCount = entries.Count(entry => entry.Action == GenerationAction.Skip);
         return new GenerationPreview(entries, newCount, overwriteCount, skipCount, unmappedTypes);
+    }
+
+    /// <summary>
+    /// 补全生成请求中各表的列元数据：表清单阶段返回的表不含列，实体与 mapper.xml 模板依赖列集合渲染，
+    /// 经表详情服务按表补全列集合；未提供表详情服务或数据源、表已含列时原样返回，兼容无连接直构请求的调用场景。
+    /// </summary>
+    /// <param name="request">生成请求，提供当前数据源配置。</param>
+    /// <param name="tables">生成请求中的表集合，可能缺列。</param>
+    /// <param name="ct">取消标记。</param>
+    /// <returns>补全列元数据后的表集合，元素与入参顺序一致。</returns>
+    private async Task<List<TableInfo>> EnrichTableColumnsAsync(
+        GenerationRequest request,
+        List<TableInfo> tables,
+        CancellationToken ct)
+    {
+        // 未提供表详情服务或当前数据源时无法读取表详情，保持原表不补全
+        if (_tableCatalogService is null || request.DataSource is null)
+        {
+            return tables;
+        }
+
+        var enriched = new List<TableInfo>(tables.Count);
+        foreach (TableInfo table in tables)
+        {
+            // 表已含列元数据时直接复用，避免重复读库；否则按表名读取完整列详情
+            if (table.Columns.Count > 0)
+            {
+                enriched.Add(table);
+                continue;
+            }
+
+            TableInfo detail = await _tableCatalogService.GetTableDetailAsync(request.DataSource, table.RawName, ct).ConfigureAwait(false);
+            enriched.Add(detail);
+        }
+
+        return enriched;
     }
 
     /// <summary>
@@ -386,22 +431,22 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 生成完成后回写最近相对输出根并保存，回写失败仅记录警告日志，不阻断结果返回。
+    /// 生成完成后回写最近代码目录并保存，回写失败仅记录警告日志，不阻断结果返回。
     /// </summary>
-    /// <param name="relativeOutputRoot">本次生成的相对输出根。</param>
+    /// <param name="codeDirectory">本次生成的代码目录，作为下次生成的默认值。</param>
     /// <param name="logs">最终日志列表，回写失败时追加警告条目。</param>
-    private void WriteBackOutputRoot(string relativeOutputRoot, List<GenerationLogEntry> logs)
+    private void WriteBackOutputRoot(string codeDirectory, List<GenerationLogEntry> logs)
     {
         try
         {
-            // 回写最近相对输出根，供下次生成作为默认值
-            _configService.Current.LastRelativeOutputRoot = relativeOutputRoot;
+            // 回写最近代码目录，供下次生成作为默认值
+            _configService.Current.LastRelativeOutputRoot = codeDirectory;
             _configService.Save();
         }
         catch (ConfigSaveException exception)
         {
-            logs.Add(GenerationLogEntry.Warning($"最近相对输出根回写失败：{exception.Message}"));
-            _logger.LogWarning(exception, "最近相对输出根回写失败。");
+            logs.Add(GenerationLogEntry.Warning($"最近代码目录回写失败：{exception.Message}"));
+            _logger.LogWarning(exception, "最近代码目录回写失败。");
         }
     }
 }

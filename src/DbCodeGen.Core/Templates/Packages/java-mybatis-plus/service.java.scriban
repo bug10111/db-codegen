@@ -1,8 +1,8 @@
-package {{package.basePackage}}.common.service.{{table.variableName}};
+package {{package.basePackage}}.service.{{table.variableName}};
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
+import {{package.basePackage}}.entity.{{table.variableName}}.{{table.className}};
 
 /**
  * {{table.comment}}服务接口

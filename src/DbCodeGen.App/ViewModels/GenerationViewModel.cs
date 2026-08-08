@@ -100,12 +100,18 @@ public sealed partial class GenerationViewModel : ObservableObject
     private string _workspaceRoot = string.Empty;
 
     /// <summary>
-    /// 相对输出根，与工作区根拼接作为本次输出根，生成完成后回写最近值。
+    /// 代码目录：项目内代码落盘完整相对路径（含包名），如 src/main/java/com/example/common，
+    /// 与工作区根拼接作为本次输出根，生成完成后回写最近值；由它推导基础包名与相对输出根。
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(PreviewCommand))]
     [NotifyCanExecuteChangedFor(nameof(GenerateCommand))]
-    private string _relativeOutputRoot = string.Empty;
+    private string _codeDirectory = string.Empty;
+
+    /// <summary>
+    /// 由代码目录推导的基础包名，供预览渲染与生成保持一致；无包名部分时为空串（回落模板包 manifest 包名）。
+    /// </summary>
+    public string EffectiveBasePackage => CodeDirectoryParser.DeriveBasePackage(CodeDirectory);
 
     /// <summary>
     /// 是否处于预览或生成操作繁忙状态，繁忙时禁用两个操作按钮防重复提交。
@@ -214,8 +220,8 @@ public sealed partial class GenerationViewModel : ObservableObject
         // 路径默认值取自设置与配置，本次生成可临时修改
         GenerationDefaults defaults = _configService.GetGenerationDefaults();
         WorkspaceRoot = defaults.WorkspaceRoot;
-        RelativeOutputRoot = defaults.LastRelativeOutputRoot;
-        StatusText = "设置工作区根与相对输出根后，点击预览待写查看待写清单。";
+        CodeDirectory = defaults.LastRelativeOutputRoot;
+        StatusText = "设置代码目录与工作区根后，点击预览待写查看待写清单。";
     }
 
     /// <summary>
@@ -467,7 +473,15 @@ public sealed partial class GenerationViewModel : ObservableObject
             return null;
         }
 
-        return new GenerationRequest(package, tables, selectedFiles, WorkspaceRoot.Trim(), RelativeOutputRoot.Trim());
+        // 由代码目录推导相对输出根与基础包名，与预览渲染保持一致
+        (string basePackage, string relativeOutputRoot) = CodeDirectoryParser.Split(CodeDirectory);
+        return new GenerationRequest(
+            package, tables, selectedFiles,
+            WorkspaceRoot.Trim(),
+            relativeOutputRoot,
+            basePackage,
+            _tableListViewModel.CurrentConnection,
+            CodeDirectory.Trim());
     }
 
     /// <summary>
@@ -675,12 +689,13 @@ public sealed partial class GenerationViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 相对输出根变更后失效旧预览，保证路径变化后待写清单与生成结果一致。
+    /// 代码目录变更后失效旧预览并刷新派生基础包名，保证输出路径与预览渲染一致。
     /// </summary>
-    /// <param name="value">变更后的相对输出根文本。</param>
-    partial void OnRelativeOutputRootChanged(string value)
+    /// <param name="value">变更后的代码目录文本。</param>
+    partial void OnCodeDirectoryChanged(string value)
     {
         InvalidatePreview();
+        OnPropertyChanged(nameof(EffectiveBasePackage));
     }
 
     /// <summary>

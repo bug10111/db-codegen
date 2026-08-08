@@ -284,6 +284,51 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
+    /// 生成栏基础包名覆盖应取代 manifest 包名，package.dir 与 package.basePackage 同步变化。
+    /// </summary>
+    [Fact]
+    public void RenderPathTemplate_BasePackageOverride_ReplacesManifest()
+    {
+        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        TemplatePackageContext context = TemplatePackageContext.From(package, "com.example.common");
+
+        string dir = _engine.RenderPathTemplate("{{package.dir}}", new TemplateRenderContext(CreateTable(), context));
+        string basePackage = _engine.RenderPathTemplate("{{package.basePackage}}", new TemplateRenderContext(CreateTable(), context));
+
+        Assert.Equal("com/example/common", dir);
+        Assert.Equal("com.example.common", basePackage);
+    }
+
+    /// <summary>
+    /// 基础包名覆盖为空或空白时回退使用 manifest 包名，保持原有生成行为。
+    /// </summary>
+    [Fact]
+    public void RenderPathTemplate_BasePackageOverrideEmpty_FallsBackToManifest()
+    {
+        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        TemplatePackageContext context = TemplatePackageContext.From(package, "  ");
+
+        string dir = _engine.RenderPathTemplate("{{package.dir}}", new TemplateRenderContext(CreateTable(), context));
+
+        Assert.Equal("com/example", dir);
+    }
+
+    /// <summary>
+    /// 内容渲染中 package.basePackage 应反映生成栏覆盖值。
+    /// </summary>
+    [Fact]
+    public void Render_BasePackageOverride_AppliesToPackageVariable()
+    {
+        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        TemplatePackageContext context = TemplatePackageContext.From(package, "cn.foo.bar");
+
+        PreviewResult result = _engine.Render("package {{package.basePackage}};", CreateTable(), null, context, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("package cn.foo.bar;", result.Output);
+    }
+
+    /// <summary>
     /// 路径模板语法错误应抛结构化渲染异常，携带行列定位。
     /// </summary>
     [Fact]

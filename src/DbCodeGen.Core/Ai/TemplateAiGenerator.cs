@@ -208,7 +208,7 @@ public sealed class TemplateAiGenerator : ITemplateAiGenerator
         builder.AppendLine("{");
         builder.AppendLine("  \"packageName\": \"包名，仅字母/数字/中划线/下划线\",");
         builder.AppendLine("  \"description\": \"包说明\",");
-        builder.AppendLine("  \"basePackage\": \"基础包名，如 com.example\",");
+        builder.AppendLine("  \"basePackage\": \"基础包名，可填完整包名（含模块段），如 com.example.common\",");
         builder.AppendLine("  \"typeMap\": { \"数据库原始类型\": \"目标语言类型\" },");
         builder.AppendLine("  \"files\": [");
         builder.AppendLine("    {");

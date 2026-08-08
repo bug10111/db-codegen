@@ -30,6 +30,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     private readonly IConfigService _configService;
     private readonly TableListViewModel _tableListViewModel;
     private readonly TemplateViewModel _templateViewModel;
+    private readonly GenerationViewModel _generationViewModel;
     private readonly TableCatalogService _tableCatalogService;
     private readonly ICurrentDataSourceService _currentDataSourceService;
     private readonly IDialogService _dialogService;
@@ -115,6 +116,7 @@ public sealed partial class PreviewViewModel : ObservableObject
     /// <param name="configService">配置持久化服务，订阅配置保存事件以在类型映射变化后刷新预览。</param>
     /// <param name="tableListViewModel">①区表列表视图模型，提供当前表与表清单。</param>
     /// <param name="templateViewModel">模板编辑器视图模型，提供编辑文本与当前包上下文。</param>
+    /// <param name="generationViewModel">④生成栏视图模型，提供本次生成的包名覆盖值，预览渲染与其保持一致。</param>
     /// <param name="tableCatalogService">表元数据服务，预览表切换时惰性读取列详情。</param>
     /// <param name="currentDataSourceService">当前连接服务，预览表详情读取依赖当前连接。</param>
     /// <param name="dialogService">消息提示服务，用于预览表详情读取失败反馈。</param>
@@ -125,6 +127,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         IConfigService configService,
         TableListViewModel tableListViewModel,
         TemplateViewModel templateViewModel,
+        GenerationViewModel generationViewModel,
         TableCatalogService tableCatalogService,
         ICurrentDataSourceService currentDataSourceService,
         IDialogService dialogService,
@@ -134,6 +137,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(tableListViewModel);
         ArgumentNullException.ThrowIfNull(templateViewModel);
+        ArgumentNullException.ThrowIfNull(generationViewModel);
         ArgumentNullException.ThrowIfNull(tableCatalogService);
         ArgumentNullException.ThrowIfNull(currentDataSourceService);
         ArgumentNullException.ThrowIfNull(dialogService);
@@ -143,6 +147,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         _configService = configService;
         _tableListViewModel = tableListViewModel;
         _templateViewModel = templateViewModel;
+        _generationViewModel = generationViewModel;
         _tableCatalogService = tableCatalogService;
         _currentDataSourceService = currentDataSourceService;
         _dialogService = dialogService;
@@ -155,6 +160,9 @@ public sealed partial class PreviewViewModel : ObservableObject
         _tableListViewModel.PropertyChanged += OnTableListPropertyChanged;
         _tableListViewModel.TableRows.CollectionChanged += OnTableRowsCollectionChanged;
         _templateViewModel.EditorContentChanged += OnTemplateContentChanged;
+
+        // 生成栏基础包名变化后刷新预览，保证预览反映本次生成的包名覆盖值
+        _generationViewModel.PropertyChanged += OnGenerationPropertyChanged;
 
         // 类型映射等配置保存后重新渲染预览，保证映射改动即时反映到预览代码
         _configService.ConfigChanged += OnConfigChanged;
@@ -171,6 +179,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         _tableListViewModel.PropertyChanged -= OnTableListPropertyChanged;
         _tableListViewModel.TableRows.CollectionChanged -= OnTableRowsCollectionChanged;
         _templateViewModel.EditorContentChanged -= OnTemplateContentChanged;
+        _generationViewModel.PropertyChanged -= OnGenerationPropertyChanged;
         _configService.ConfigChanged -= OnConfigChanged;
         _debounceTimer.Stop();
         _renderCts?.Cancel();
@@ -241,6 +250,19 @@ public sealed partial class PreviewViewModel : ObservableObject
         }
 
         ScheduleRender();
+    }
+
+    /// <summary>
+    /// 生成栏代码目录变化（派生基础包名变化）后重新触发预览渲染，保证预览反映本次生成的包名覆盖值。
+    /// </summary>
+    /// <param name="sender">属性变化事件发送方。</param>
+    /// <param name="e">属性名变化参数。</param>
+    private void OnGenerationPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(GenerationViewModel.EffectiveBasePackage))
+        {
+            ScheduleRender();
+        }
     }
 
     /// <summary>
@@ -390,7 +412,7 @@ public sealed partial class PreviewViewModel : ObservableObject
         IsRendering = true;
         try
         {
-            TemplatePackageContext packageContext = TemplatePackageContext.From(package);
+            TemplatePackageContext packageContext = TemplatePackageContext.From(package, _generationViewModel.EffectiveBasePackage);
 
             // Scriban 解析与渲染为 CPU 密集操作，在后台任务执行避免阻塞 UI 线程
             PreviewResult result = await Task.Run(

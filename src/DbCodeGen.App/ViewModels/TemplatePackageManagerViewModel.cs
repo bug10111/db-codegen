@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
@@ -76,6 +77,7 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     private readonly IConfirmDialogService _confirmDialogService;
     private readonly IFolderPickerService _folderPickerService;
     private readonly IFilePickerService _filePickerService;
+    private readonly IPromptDialogService _promptDialogService;
 
     /// <summary>
     /// 复制模式下被复制的源包名，复制确认时据此定位，避免期间列表选中项变化影响操作目标。
@@ -123,6 +125,7 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsIdle))]
+    [NotifyCanExecuteChangedFor(nameof(CreatePackageCommand))]
     [NotifyCanExecuteChangedFor(nameof(ImportZipCommand))]
     [NotifyCanExecuteChangedFor(nameof(ImportFolderCommand))]
     [NotifyCanExecuteChangedFor(nameof(BeginCopyCommand))]
@@ -151,25 +154,29 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     /// <param name="confirmDialogService">二次确认服务，用于同名覆盖与删除前的确认。</param>
     /// <param name="folderPickerService">目录选择服务，用于选择待导入的模板包文件夹。</param>
     /// <param name="filePickerService">文件选择服务，用于选择待导入与导出的 zip 文件。</param>
+    /// <param name="promptDialogService">文本输入提示服务，用于新增模板包时收集包名/说明/首文件路径。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public TemplatePackageManagerViewModel(
         ITemplatePackageService packageService,
         IDialogService dialogService,
         IConfirmDialogService confirmDialogService,
         IFolderPickerService folderPickerService,
-        IFilePickerService filePickerService)
+        IFilePickerService filePickerService,
+        IPromptDialogService promptDialogService)
     {
         ArgumentNullException.ThrowIfNull(packageService);
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(confirmDialogService);
         ArgumentNullException.ThrowIfNull(folderPickerService);
         ArgumentNullException.ThrowIfNull(filePickerService);
+        ArgumentNullException.ThrowIfNull(promptDialogService);
 
         _packageService = packageService;
         _dialogService = dialogService;
         _confirmDialogService = confirmDialogService;
         _folderPickerService = folderPickerService;
         _filePickerService = filePickerService;
+        _promptDialogService = promptDialogService;
     }
 
     /// <summary>
@@ -198,6 +205,61 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         try
         {
             await ReloadPackagesAsync();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 新增模板包：依次收集包名/说明/首模板文件路径，经服务创建成功后刷新列表并选中新包。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanOperateWhenIdle))]
+    private async Task CreatePackageAsync()
+    {
+        // 依次收集新建包输入：包名必填，说明可空，首模板文件默认 main.tpl
+        string? packageName = await _promptDialogService.PromptAsync(
+            "新增模板包", "请输入新包名（字母/数字/中划线/下划线）：");
+        if (string.IsNullOrWhiteSpace(packageName))
+        {
+            return;
+        }
+
+        string name = packageName.Trim();
+        string? description = await _promptDialogService.PromptAsync("新增模板包", "请输入包说明（可留空）：", "");
+        if (description is null)
+        {
+            return;
+        }
+
+        string? templatePath = await _promptDialogService.PromptAsync(
+            "新增模板包", "请输入首模板文件相对路径（可含分组目录）：", "main.tpl");
+        if (string.IsNullOrWhiteSpace(templatePath))
+        {
+            return;
+        }
+
+        string firstTemplate = templatePath.Trim();
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.CreatePackageAsync(
+                name, description.Trim(), firstTemplate, firstTemplate, CancellationToken.None);
+            if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
+            {
+                _dialogService.ShowError(result.Message ?? "新增模板包失败。");
+                return;
+            }
+
+            await ReloadPackagesAsync();
+            SelectedPackage = Packages.FirstOrDefault(package =>
+                string.Equals(package.Name, result.Package.Name, StringComparison.OrdinalIgnoreCase));
+            _dialogService.ShowInfo($"已新增模板包“{result.Package.Name}”，首模板文件“{firstTemplate}”已创建。");
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            _dialogService.ShowError($"新增模板包失败：{exception.Message}");
         }
         finally
         {

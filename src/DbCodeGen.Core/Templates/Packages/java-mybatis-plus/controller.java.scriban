@@ -1,9 +1,9 @@
-package {{package.basePackage}}.common.controller.{{table.variableName}};
+package {{package.basePackage}}.controller.{{table.variableName}};
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import {{package.basePackage}}.common.entity.{{table.variableName}}.{{table.className}};
-import {{package.basePackage}}.common.service.{{table.variableName}}.{{table.className}}Service;
+import {{package.basePackage}}.entity.{{table.variableName}}.{{table.className}};
+import {{package.basePackage}}.service.{{table.variableName}}.{{table.className}}Service;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.beans.factory.annotation.Autowired;

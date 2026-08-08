@@ -1,4 +1,4 @@
-package {{package.basePackage}}.common.entity.{{table.variableName}};
+package {{package.basePackage}}.entity.{{table.variableName}};
 
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;

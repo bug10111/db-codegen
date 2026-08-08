@@ -2,7 +2,7 @@
   "name": "java-mybatis-plus",
   "description": "Java SpringBoot + MyBatis-Plus 模板包",
   "engine": "scriban",
-  "basePackage": "com.example",
+  "basePackage": "com.example.common",
   "typeMap": {
     "bigint": "Long",
     "int": "Integer",

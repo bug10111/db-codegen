@@ -557,10 +557,10 @@ public sealed class TemplateAiGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 请求体应使用默认 max_tokens 16000 与配置模型名。
+    /// 模板生成请求不应携带 max_tokens 限制，由服务端按其默认输出上限处理，防止模型输出被截断。
     /// </summary>
     [Fact]
-    public async Task GenerateAsync_RequestBody_UsesDefaultMaxTokens()
+    public async Task GenerateAsync_RequestBody_DoesNotSetMaxTokens()
     {
         ConfigService config = CreateConfigService();
         TemplatePackageService service = CreatePackageService();
@@ -575,7 +575,7 @@ public sealed class TemplateAiGeneratorTests : IDisposable
         Assert.True(result.IsSuccess);
         string body = Assert.Single(handler.RequestBodies);
         using JsonDocument document = JsonDocument.Parse(body);
-        Assert.Equal(16000, document.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.False(document.RootElement.TryGetProperty("max_tokens", out _));
         Assert.Equal(TestModel, document.RootElement.GetProperty("model").GetString());
     }
 

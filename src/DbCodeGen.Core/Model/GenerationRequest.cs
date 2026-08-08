@@ -16,13 +16,19 @@ public sealed class GenerationRequest
     /// <param name="selectedFiles">勾选模板文件集合，来源模板包管理勾选到层。</param>
     /// <param name="workspaceRoot">工作区根，绝对输出路径的根前缀，可本次修改。</param>
     /// <param name="relativeOutputRoot">相对输出根，可本次修改。</param>
+    /// <param name="basePackageOverride">本次生成的基础包名覆盖值（如 com.example.common），可为空；为空时使用模板包 manifest 基础包名。</param>
+    /// <param name="dataSource">当前数据源配置，用于生成前补全表列元数据；可为空，为空时表按传入元数据原样使用。</param>
+    /// <param name="codeDirectory">本次生成的代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common），生成完成后写回为最近记忆；可为空。</param>
     /// <exception cref="ArgumentNullException">package、tables 或 selectedFiles 为 null 时抛出。</exception>
     public GenerationRequest(
         TemplatePackageInfo package,
         IReadOnlyList<TableInfo> tables,
         IReadOnlyList<TemplateFileSelection> selectedFiles,
         string workspaceRoot,
-        string relativeOutputRoot)
+        string relativeOutputRoot,
+        string? basePackageOverride = null,
+        DataSourceConfig? dataSource = null,
+        string? codeDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentNullException.ThrowIfNull(tables);
@@ -32,6 +38,9 @@ public sealed class GenerationRequest
         SelectedFiles = selectedFiles;
         WorkspaceRoot = workspaceRoot;
         RelativeOutputRoot = relativeOutputRoot;
+        BasePackageOverride = basePackageOverride;
+        DataSource = dataSource;
+        CodeDirectory = codeDirectory;
     }
 
     /// <summary>
@@ -58,4 +67,19 @@ public sealed class GenerationRequest
     /// 相对输出根，与工作区根拼接后作为本次输出的根目录。
     /// </summary>
     public string RelativeOutputRoot { get; }
+
+    /// <summary>
+    /// 本次生成的基础包名覆盖值，可为空；为空时使用模板包 manifest 基础包名，供渲染上下文派生 package.dir。
+    /// </summary>
+    public string? BasePackageOverride { get; }
+
+    /// <summary>
+    /// 当前数据源配置，供生成服务补全表列元数据；可为空，为空时表按传入元数据原样使用。
+    /// </summary>
+    public DataSourceConfig? DataSource { get; }
+
+    /// <summary>
+    /// 本次生成的代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common），生成完成后写回为最近记忆；可为空。
+    /// </summary>
+    public string? CodeDirectory { get; }
 }

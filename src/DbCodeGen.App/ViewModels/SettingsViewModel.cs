@@ -1,10 +1,13 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Linq;
 using System.Security;
+using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
+using DbCodeGen.Core.Ai;
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Security;
 
@@ -19,6 +22,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IDialogService _dialogService;
     private readonly IFolderPickerService _folderPickerService;
     private readonly CredentialProtector _credentialProtector;
+    private readonly ILlmClient _llmClient;
 
     /// <summary>
     /// 配置加载时检测到的“曾损坏恢复”标记，窗口内容呈现后据此提示用户。
@@ -47,6 +51,30 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     private string _llmModel = string.Empty;
+
+    /// <summary>
+    /// 模型下拉候选项，初始为常用模型清单与已保存模型，测试连接成功后按端点实际支持刷新。
+    /// </summary>
+    public ObservableCollection<string> ModelOptions { get; } = new();
+
+    /// <summary>
+    /// 是否正在测试 LLM 连接，期间禁用测试按钮防重复提交。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(TestLlmConnectionCommand))]
+    private bool _isTestingLlm;
+
+    /// <summary>
+    /// 测试连接结果状态文本，供界面内联展示。
+    /// </summary>
+    [ObservableProperty]
+    private string _llmTestStatusText = string.Empty;
+
+    /// <summary>
+    /// 测试连接结果状态颜色，成功绿色、失败红色、进行中灰色。
+    /// </summary>
+    [ObservableProperty]
+    private Brush _llmTestStatusColor = Brushes.Gray;
 
     /// <summary>
     /// 最近相对输出根，单值记忆上次语义。
@@ -79,22 +107,26 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <param name="dialogService">消息提示服务，用于校验失败与保存结果反馈。</param>
     /// <param name="folderPickerService">目录选择服务，用于工作区根与模板搜索目录的路径输入。</param>
     /// <param name="credentialProtector">Windows DPAPI 凭据保护器，用于 apiKey 新值的加密落盘。</param>
+    /// <param name="llmClient">LLM 对话客户端，用于测试连接与拉取模型列表。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public SettingsViewModel(
         IConfigService configService,
         IDialogService dialogService,
         IFolderPickerService folderPickerService,
-        CredentialProtector credentialProtector)
+        CredentialProtector credentialProtector,
+        ILlmClient llmClient)
     {
         ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(folderPickerService);
         ArgumentNullException.ThrowIfNull(credentialProtector);
+        ArgumentNullException.ThrowIfNull(llmClient);
 
         _configService = configService;
         _dialogService = dialogService;
         _folderPickerService = folderPickerService;
         _credentialProtector = credentialProtector;
+        _llmClient = llmClient;
 
         LoadFromConfig();
     }
@@ -180,6 +212,151 @@ public sealed partial class SettingsViewModel : ObservableObject
     private bool CanRemoveTemplateDirectory() => SelectedTemplateDirectory is not null;
 
     /// <summary>
+    /// 测试 LLM 连接：校验接口地址与 API Key 后发起最小对话请求，成功后按端点实际支持刷新模型下拉候选并展示结果。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanTestLlmConnection))]
+    private async Task TestLlmConnectionAsync()
+    {
+        // 前置校验：接口地址必须为合法 http/https 绝对地址，与保存校验规则一致
+        if (string.IsNullOrWhiteSpace(LlmBaseUrl) ||
+            !Uri.TryCreate(LlmBaseUrl.Trim(), UriKind.Absolute, out Uri? baseUri) ||
+            (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+        {
+            LlmTestStatusColor = Brushes.Red;
+            LlmTestStatusText = "接口地址不合法，请先填写正确的 http/https 地址。";
+            return;
+        }
+
+        // apiKey 优先取密码框新输入，未输入时取已保存的加密密钥解密明文
+        string apiKey = string.IsNullOrWhiteSpace(ApiKeyInput)
+            ? (_configService.GetLlmApiKey() ?? string.Empty)
+            : ApiKeyInput.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            LlmTestStatusColor = Brushes.Red;
+            LlmTestStatusText = "API Key 未填写，无法测试连接。";
+            return;
+        }
+
+        var options = new LlmClientOptions
+        {
+            BaseUrl = LlmBaseUrl.Trim(),
+            Model = LlmModel.Trim(),
+            ApiKey = apiKey
+        };
+
+        IsTestingLlm = true;
+        LlmTestStatusColor = Brushes.Gray;
+        LlmTestStatusText = "正在测试连接…";
+        try
+        {
+            LlmChatResponse response = await _llmClient.TestConnectionAsync(options, CancellationToken.None);
+            if (response.IsSuccess)
+            {
+                LlmTestStatusColor = Brushes.Green;
+                LlmTestStatusText = "连接成功。";
+                await RefreshModelOptionsAsync(options);
+            }
+            else
+            {
+                LlmTestStatusColor = Brushes.Red;
+                LlmTestStatusText = $"连接失败：{response.ErrorMessage}";
+            }
+        }
+        catch (Exception exception)
+        {
+            LlmTestStatusColor = Brushes.Red;
+            LlmTestStatusText = $"连接失败：{exception.Message}";
+        }
+        finally
+        {
+            IsTestingLlm = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定测试连接命令是否可执行：未在测试中时可触发，防重复提交。
+    /// </summary>
+    private bool CanTestLlmConnection() => !IsTestingLlm;
+
+    /// <summary>
+    /// 按端点实际支持刷新模型下拉候选，拉取失败时保留初始候选，为尽力而为不阻断测试结果。
+    /// </summary>
+    /// <param name="options">瞬态调用配置，含端点与明文 apiKey。</param>
+    private async Task RefreshModelOptionsAsync(LlmClientOptions options)
+    {
+        try
+        {
+            IReadOnlyList<string> models = await _llmClient.ListModelsAsync(options, CancellationToken.None);
+            if (models.Count == 0)
+            {
+                return;
+            }
+
+            ModelOptions.Clear();
+            foreach (string model in models)
+            {
+                ModelOptions.Add(model);
+            }
+
+            // 当前填写模型不在端点支持列表时保留原值，保证下拉不丢当前选择
+            string current = LlmModel.Trim();
+            if (!string.IsNullOrEmpty(current)
+                && !ModelOptions.Any(model => string.Equals(model, current, StringComparison.OrdinalIgnoreCase)))
+            {
+                ModelOptions.Add(current);
+            }
+        }
+        catch (Exception)
+        {
+            // 模型列表刷新失败保留初始候选，不改变连接测试结果
+        }
+    }
+
+    /// <summary>
+    /// 仅保存 LLM 配置（接口地址/模型/API Key），只校验 LLM 相关字段，不被工作区根、模板搜索目录等其它设置项卡住，保存后窗口不关闭。
+    /// </summary>
+    [RelayCommand]
+    private void SaveLlmConfig()
+    {
+        // 仅校验 LLM 相关字段，其它设置项不参与本次保存，避免无关校验阻断 LLM 配置落盘
+        if (string.IsNullOrWhiteSpace(LlmBaseUrl) ||
+            !Uri.TryCreate(LlmBaseUrl.Trim(), UriKind.Absolute, out Uri? baseUri) ||
+            (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+        {
+            _dialogService.ShowError("LLM 接口地址必须为合法的 http/https 地址。");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(LlmModel))
+        {
+            _dialogService.ShowError("LLM 模型名不能为空。");
+            return;
+        }
+
+        // 将 LLM 表单值写入配置快照；apiKey 输入新值则重新加密覆盖，留空保持原密文
+        AppConfig config = _configService.Current;
+        config.Llm.BaseUrl = LlmBaseUrl.Trim();
+        config.Llm.Model = LlmModel.Trim();
+        if (!string.IsNullOrWhiteSpace(ApiKeyInput))
+        {
+            config.Llm.ApiKeyEncrypted = _credentialProtector.Encrypt(ApiKeyInput);
+        }
+
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _dialogService.ShowError($"LLM 配置保存失败：{exception.Message}");
+            return;
+        }
+
+        _dialogService.ShowInfo("LLM 配置已保存，将在下次使用相关功能时生效。");
+    }
+
+    /// <summary>
     /// 校验表单并保存配置：写入配置快照后落盘，成功后提示并触发窗口关闭。
     /// </summary>
     [RelayCommand]
@@ -243,6 +420,20 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         // apiKey 密码框始终留空，原密文保留在 Current.Llm.ApiKeyEncrypted，输入新值才重加密覆盖
         ApiKeyInput = string.Empty;
+
+        // 模型下拉初始候选：常用模型清单 + 已保存模型（不在候选时补充），保证下拉展示当前生效值
+        ModelOptions.Clear();
+        foreach (string model in LlmConfig.CommonModels)
+        {
+            ModelOptions.Add(model);
+        }
+
+        string savedModel = config.Llm.Model?.Trim() ?? string.Empty;
+        if (!string.IsNullOrEmpty(savedModel)
+            && !ModelOptions.Any(model => string.Equals(model, savedModel, StringComparison.OrdinalIgnoreCase)))
+        {
+            ModelOptions.Add(savedModel);
+        }
 
         // 存在备份文件说明配置曾损坏并已重建，标记待窗口呈现后提示用户
         _recoveryNoticePending = HasRecoveryBackup();

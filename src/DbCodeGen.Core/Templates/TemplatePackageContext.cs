@@ -41,17 +41,20 @@ public sealed class TemplatePackageContext
 
     /// <summary>
     /// 由模板包运行时信息派生渲染上下文：拷贝类型映射快照，并按基础包名计算输出目录占位。
+    /// 可传本次生成的包名覆盖值（如生成栏临时填写的完整包名），非空时取代 manifest 基础包名。
     /// </summary>
     /// <param name="package">模板包运行时信息。</param>
+    /// <param name="basePackageOverride">本次生成的包名覆盖值，可为空；为空时使用 manifest 基础包名。</param>
     /// <returns>package 侧渲染上下文。</returns>
     /// <exception cref="ArgumentNullException">package 为 null 时抛出。</exception>
-    public static TemplatePackageContext From(TemplatePackageInfo package)
+    public static TemplatePackageContext From(TemplatePackageInfo package, string? basePackageOverride = null)
     {
         ArgumentNullException.ThrowIfNull(package);
 
-        string dir = BuildDir(package.BasePackage);
+        string? basePackage = string.IsNullOrWhiteSpace(basePackageOverride) ? package.BasePackage : basePackageOverride.Trim();
+        string dir = BuildDir(basePackage);
         var typeMapSnapshot = new Dictionary<string, string>(package.TypeMap ?? new Dictionary<string, string>());
-        return new TemplatePackageContext(package.Name, package.BasePackage, dir, typeMapSnapshot);
+        return new TemplatePackageContext(package.Name, basePackage, dir, typeMapSnapshot);
     }
 
     /// <summary>
