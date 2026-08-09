@@ -99,7 +99,8 @@ public sealed class TemplateEngine
     }
 
     /// <summary>
-    /// 渲染输出路径模板中的占位变量（如 {{table.variableName}} / {{table.className}} / {{package.dir}}），
+    /// 渲染输出路径模板中的占位变量，支持 table.*（如 {{table.variableName}} / {{table.className}}）、
+    /// package.*（如 {{package.dir}}）与 tool.* 函数（如 {{tool.firstLowerCase(table.className)}}），
     /// 供批量生成解析 manifest files[].output；渲染失败时抛结构化异常携带行列。
     /// </summary>
     /// <param name="pathTemplate">输出相对路径模板。</param>
@@ -272,9 +273,10 @@ public sealed class TemplateEngine
     }
 
     /// <summary>
-    /// 组装路径渲染上下文，仅注入路径占位需要的 table 与 package 字段。
+    /// 组装路径渲染上下文，注入 table / package / tool 三个变量节点，与内容渲染对齐，
+    /// 使路径占位同样可使用 tool 函数（如 {{tool.firstLowerCase(table.className)}}）。
     /// </summary>
-    private static ScriptObject BuildPathContext(TemplateRenderContext context)
+    private ScriptObject BuildPathContext(TemplateRenderContext context)
     {
         var root = new ScriptObject();
 
@@ -293,6 +295,9 @@ public sealed class TemplateEngine
         }
 
         root.SetValue("package", packageObject, true);
+
+        // 路径占位复用 tool 函数集，供 firstLowerCase/hump2Underline 等命名转换；映射服务为空时按包 typeMap 旧行为
+        root.SetValue("tool", ToolFunctions.Build(context.Package, _typeMappingService, context.Table.DatabaseType), true);
         return root;
     }
 

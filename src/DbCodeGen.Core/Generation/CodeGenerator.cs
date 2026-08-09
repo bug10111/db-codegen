@@ -338,20 +338,29 @@ public sealed class CodeGenerator : ICodeGenerator
 
     /// <summary>
     /// 将工作区根、相对输出根与渲染后相对路径拼接为绝对路径，并做防目录穿越前缀校验。
+    /// 输出相对路径允许 .. 段越出相对输出根（如代码根 src/main/java）落到工作区根内其它目录
+    /// （如 src/main/resources），但解析后必须仍位于工作区根内，越出工作区根仍拒绝。
     /// </summary>
     /// <param name="workspaceRoot">工作区根。</param>
     /// <param name="relativeOutputRoot">相对输出根。</param>
     /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
     /// <returns>校验通过的目标绝对路径。</returns>
-    /// <exception cref="GenerationException">路径越出输出根目录时抛出（目录穿越）。</exception>
+    /// <exception cref="GenerationException">路径越出工作区根目录时抛出（目录穿越）。</exception>
     private static string ResolveAbsolutePath(string workspaceRoot, string relativeOutputRoot, string renderedRelativePath)
     {
-        // 工作区根与相对输出根拼接为本次输出的根目录
+        // 工作区根与相对输出根拼接为本次输出的根目录（如代码根 src/main/java）
         string outputRoot = Path.GetFullPath(Path.Combine(workspaceRoot, relativeOutputRoot.Replace('/', Path.DirectorySeparatorChar)));
 
-        // 渲染后相对路径解析到输出根内，规范化后做前缀校验防目录穿越
+        // 渲染后相对路径为空时直接拒绝，避免以目录路径作为写盘目标产生误导性写盘失败
+        if (string.IsNullOrWhiteSpace(renderedRelativePath))
+        {
+            throw new GenerationException($"输出路径渲染结果为空，已拒绝（目录穿越）：{renderedRelativePath}");
+        }
+
+        // 渲染后相对路径解析到输出根内，.. 段允许越出输出根但解析后必须仍在工作区根内
         string candidate = Path.GetFullPath(Path.Combine(outputRoot, renderedRelativePath.Replace('/', Path.DirectorySeparatorChar)));
-        string prefix = outputRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string workspaceRootFull = Path.GetFullPath(workspaceRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string prefix = workspaceRootFull + Path.DirectorySeparatorChar;
         if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
         {
             throw new GenerationException($"输出路径越出工作区根，已拒绝（目录穿越）：{renderedRelativePath}");

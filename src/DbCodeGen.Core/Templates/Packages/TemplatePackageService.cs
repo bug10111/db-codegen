@@ -8,7 +8,7 @@ namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
 /// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、导出、删除，
-/// 以及新建包、新增模板文件与删除模板文件，
+/// 以及新建包、新增模板文件、批量追加模板文件与删除模板文件，
 /// 内置包只读边界、zip 防穿越与解压上限、变更操作串行化均在此实现。
 /// </summary>
 public sealed class TemplatePackageService : ITemplatePackageService, IDisposable
@@ -222,6 +222,15 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> AppendTemplateFilesAsync(
+        string packageName, IReadOnlyList<TemplateFileWriteEntry> files, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => AppendTemplateFilesCoreAsync(packageName, files, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// 新建包核心流程：校验包名与首文件路径（可空）→ 内置包同名只读拒绝 → 用户包同名冲突拒绝 →
     /// 建目录写清单（首文件为空则写空 files 清单、不建物理文件）→ 重新校验返回。
@@ -246,10 +255,10 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
                 return TemplatePackageOperationResult.Invalid($"首模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstTemplatePath}");
             }
 
-            normalizedOutput = NormalizeSafeRelativePath(firstOutputPath);
+            normalizedOutput = NormalizeSafeOutputPath(firstOutputPath);
             if (normalizedOutput is null)
             {
-                return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstOutputPath}");
+                return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{firstOutputPath}");
             }
         }
 
@@ -352,7 +361,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         }
 
         string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
-        string? normalizedOutput = NormalizeSafeRelativePath(outputPath);
+        string? normalizedOutput = NormalizeSafeOutputPath(outputPath);
         if (normalizedTemplate is null)
         {
             return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
@@ -360,7 +369,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
         if (normalizedOutput is null)
         {
-            return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{outputPath}");
+            return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{outputPath}");
         }
 
         try
@@ -456,6 +465,152 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     }
 
     /// <summary>
+    /// 批量追加核心流程：加载包并校验内置只读 → 逐条目路径安全与已存在预检（全部通过才落盘）→
+    /// 写全部文件 → 批量追加 manifest 条目一次写回 → 重载返回；任一步失败回滚已写文件，不留半成品。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> AppendTemplateFilesCoreAsync(
+        string packageName, IReadOnlyList<TemplateFileWriteEntry> files, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可追加模板。");
+        }
+
+        if (files is null || files.Count == 0)
+        {
+            return TemplatePackageOperationResult.Invalid("待追加的模板文件列表为空。");
+        }
+
+        var normalizedEntries = new List<TemplateFileWriteEntry>(files.Count);
+        var writtenFiles = new List<string>();
+
+        // 逐条目规范化并校验模板与输出路径安全，任一非法整体拒绝，不进入写盘
+        foreach (TemplateFileWriteEntry entry in files)
+        {
+            if (entry is null)
+            {
+                return TemplatePackageOperationResult.Invalid("待追加的模板文件条目存在空条目。");
+            }
+
+            string? normalizedTemplate = NormalizeSafeRelativePath(entry.RelativePath);
+            string? normalizedOutput = NormalizeSafeOutputPath(entry.OutputPath);
+            if (normalizedTemplate is null)
+            {
+                return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{entry.RelativePath}");
+            }
+
+            if (normalizedOutput is null)
+            {
+                return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{entry.OutputPath}");
+            }
+
+            normalizedEntries.Add(new TemplateFileWriteEntry(normalizedTemplate, normalizedOutput, entry.Content ?? string.Empty, entry.Enabled));
+        }
+
+        try
+        {
+            // 预检全部目标模板文件不存在且批内无重名，任一已存在或重名则整体拒绝，保证全部通过才进入写盘
+            var seenTemplatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (TemplateFileWriteEntry entry in normalizedEntries)
+            {
+                if (!seenTemplatePaths.Add(entry.RelativePath))
+                {
+                    return TemplatePackageOperationResult.Invalid($"待追加条目模板路径重复：{entry.RelativePath}");
+                }
+
+                string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, entry.RelativePath);
+                if (File.Exists(templateFullPath))
+                {
+                    return TemplatePackageOperationResult.Failure($"模板文件已存在：{entry.RelativePath}");
+                }
+            }
+
+            // 全部预检通过后写文件：自动建父目录（分组目录），UTF-8 无 BOM
+            foreach (TemplateFileWriteEntry entry in normalizedEntries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, entry.RelativePath);
+                string? parentDirectory = Path.GetDirectoryName(templateFullPath);
+                if (!string.IsNullOrEmpty(parentDirectory))
+                {
+                    Directory.CreateDirectory(parentDirectory);
+                }
+
+                await File.WriteAllTextAsync(templateFullPath, entry.Content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+                writtenFiles.Add(templateFullPath);
+            }
+
+            // 批量追加 manifest 条目并一次写回，保持清单与磁盘文件一致
+            await AppendManifestEntriesAsync(package, normalizedEntries, cancellationToken).ConfigureAwait(false);
+
+            // 重载更新后包并返回成功结果
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已向模板包 {PackageName} 批量追加模板文件 {FileCount} 个。", packageName, normalizedEntries.Count);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (OperationCanceledException)
+        {
+            // 中途取消时回滚已写文件，避免半成品残留
+            RollbackWrittenFiles(writtenFiles);
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            // 写盘或清单写回中途失败时回滚已写文件，不留半成品
+            RollbackWrittenFiles(writtenFiles);
+            _logger.LogError(exception, "批量追加模板文件失败，包 {PackageName}。", packageName);
+            return TemplatePackageOperationResult.Failure($"批量追加模板失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 向包清单批量追加模板文件条目并一次重写 template.json，保持清单与磁盘文件一致。
+    /// </summary>
+    /// <param name="package">目标模板包运行时信息。</param>
+    /// <param name="entries">规范化后的待追加写入条目集合。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    private static async Task AppendManifestEntriesAsync(
+        TemplatePackageInfo package,
+        IReadOnlyList<TemplateFileWriteEntry> entries,
+        CancellationToken cancellationToken)
+    {
+        TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
+        foreach (TemplateFileWriteEntry entry in entries)
+        {
+            manifest.Files.Add(new TemplateFileEntry
+            {
+                Template = entry.RelativePath,
+                Output = entry.OutputPath,
+                Enabled = entry.Enabled
+            });
+        }
+
+        await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 尽力删除已写模板文件，回滚失败的批量追加操作，失败仅记录日志不阻断主流程。
+    /// </summary>
+    /// <param name="writtenFiles">已写文件绝对路径集合。</param>
+    private void RollbackWrittenFiles(IReadOnlyList<string> writtenFiles)
+    {
+        foreach (string filePath in writtenFiles)
+        {
+            TryDeleteFile(filePath);
+        }
+    }
+
+    /// <summary>
     /// 规范化并校验模板/输出相对路径骨架安全，返回规范化路径；不合法返回 null。
     /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移；
     /// 规范化后逐段校验非法文件名字符，避免 Path.GetFullPath 抛出未处理异常并落盘脏数据。
@@ -471,6 +626,40 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
         string normalized = TemplatePackageLoader.NormalizeRelativePath(relativePath);
         if (normalized.Length == 0 || !TemplatePackageLoader.IsSafeRelativeSkeleton(normalized))
+        {
+            return null;
+        }
+
+        // 逐段校验非法文件名字符（含 | * ? < > 等与控制字符），防 Windows 路径解析抛未处理异常
+        char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
+        foreach (string segment in normalized.Split('/'))
+        {
+            if (segment.IndexOfAny(invalidFileNameChars) >= 0)
+            {
+                return null;
+            }
+        }
+
+        return normalized;
+    }
+
+    /// <summary>
+    /// 规范化并校验输出相对路径骨架安全（允许 .. 段），返回规范化路径；不合法返回 null。
+    /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移；
+    /// 规范化后逐段校验非法文件名字符，避免 Path.GetFullPath 抛出未处理异常并落盘脏数据。
+    /// .. 段允许存在，最终由生成侧解析时限定在工作区根内，可越出代码根落到资源目录。
+    /// </summary>
+    /// <param name="relativePath">待校验的输出相对路径，可为空（为空视为未提供路径，返回 null）。</param>
+    /// <returns>规范化后的安全输出相对路径；为空或含绝对路径、盘符前缀、非法字符时返回 null。</returns>
+    private static string? NormalizeSafeOutputPath(string? relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath) || relativePath.Contains(':'))
+        {
+            return null;
+        }
+
+        string normalized = TemplatePackageLoader.NormalizeRelativePath(relativePath);
+        if (normalized.Length == 0 || !TemplatePackageLoader.IsSafeOutputPathSkeleton(normalized))
         {
             return null;
         }

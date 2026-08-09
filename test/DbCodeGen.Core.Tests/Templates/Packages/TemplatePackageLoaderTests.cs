@@ -194,12 +194,29 @@ public sealed class TemplatePackageLoaderTests : IDisposable
     }
 
     /// <summary>
-    /// 输出路径静态骨架含 .. 段应被拒绝（目录穿越）。
+    /// 输出路径静态骨架含 .. 段应允许加载，越级（如到 src/main/resources）由生成侧解析时限定在工作区根内。
     /// </summary>
     [Fact]
-    public async Task LoadFromDirectoryAsync_OutputTraversal_Throws()
+    public async Task LoadFromDirectoryAsync_OutputWithDotDot_Loads()
     {
-        string packageDir = await CreatePackageAsync(_tempRoot, "output-slip", outputPath: "{{package.dir}}/../evil.java");
+        string packageDir = await CreatePackageAsync(_tempRoot, "output-dotdot", outputPath: "../resources/mapper/{{table.className}}.xml");
+
+        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, false, CancellationToken.None);
+
+        TemplateFileInfo file = Assert.Single(package.Files);
+        Assert.Equal("../resources/mapper/{{table.className}}.xml", file.OutputPath);
+    }
+
+    /// <summary>
+    /// 输出路径含绝对路径、盘符前缀或冒号应被拒绝（静态骨架校验）。
+    /// </summary>
+    [Theory]
+    [InlineData("C:\\evil\\{{table.className}}.xml")]
+    [InlineData("/abs/evil.xml")]
+    [InlineData("out:evil.xml")]
+    public async Task LoadFromDirectoryAsync_OutputAbsolutePath_Throws(string outputPath)
+    {
+        string packageDir = await CreatePackageAsync(_tempRoot, "output-abs", outputPath: outputPath);
 
         TemplatePackageException exception = await Assert.ThrowsAsync<TemplatePackageException>(
             () => TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, false, CancellationToken.None));

@@ -1062,4 +1062,273 @@ public sealed class TemplatePackageServiceTests : IDisposable
         Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
         Assert.True(File.Exists(Path.Combine(builtinRoot, "builtin-pkg", "entity.java.scriban")));
     }
+
+    /// <summary>
+    /// 批量追加合法条目应写文件并同步追加 manifest 条目，重新加载后清单与磁盘一致，enabled 与输出路径保持。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_AppendsFilesSyncsManifestAndReloads()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("append-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        var entries = new List<TemplateFileWriteEntry>
+        {
+            new("entity/pojo.tpl", "entity/{{table.className}}.java", "class {{table.className}} {}"),
+            new("mapper/mapper.tpl", "mapper/{{table.className}}Mapper.java", "interface {{table.className}}Mapper {}", false)
+        };
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync("append-pkg", entries, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Equal(3, result.Package.Files.Count);
+        TemplateFileInfo pojo = result.Package.Files.Single(file => file.RelativeTemplatePath == "entity/pojo.tpl");
+        Assert.Equal("entity/{{table.className}}.java", pojo.OutputPath);
+        Assert.True(pojo.IsEnabled);
+        TemplateFileInfo mapper = result.Package.Files.Single(file => file.RelativeTemplatePath == "mapper/mapper.tpl");
+        Assert.False(mapper.IsEnabled);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "append-pkg", "entity", "pojo.tpl")));
+        Assert.Equal("class {{table.className}} {}", await File.ReadAllTextAsync(Path.Combine(userLibrary, "append-pkg", "entity", "pojo.tpl")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("append-pkg", CancellationToken.None);
+        Assert.Equal(3, reloaded.Files.Count);
+        Assert.Contains(reloaded.Files, file => file.RelativeTemplatePath == "mapper/mapper.tpl");
+    }
+
+    /// <summary>
+    /// 批量追加目标已存在应整体拒绝：预检全过才落盘，其它条目不写入、原文件不被覆盖、清单不追加重复条目。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_ExistingFile_ReturnsFailureWithoutWritingOthers()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "append-ex");
+
+        var entries = new List<TemplateFileWriteEntry>
+        {
+            new("entity.java.scriban", "out/{{table.className}}.java", "new content"),
+            new("second.tpl", "second.tpl", "content")
+        };
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync("append-ex", entries, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "append-ex", "second.tpl")));
+        Assert.Equal("public class {{table.className}} { }", await File.ReadAllTextAsync(Path.Combine(userLibrary, "append-ex", "entity.java.scriban")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("append-ex", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 内置包批量追加应只读拒绝，不产生任何新文件。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync(
+            "builtin-pkg",
+            new List<TemplateFileWriteEntry> { new("new.tpl", "new.tpl", "content") },
+            CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.False(File.Exists(Path.Combine(builtinRoot, "builtin-pkg", "new.tpl")));
+    }
+
+    /// <summary>
+    /// 批量追加模板相对路径含目录穿越、绝对路径或非法文件名字符应返回 Invalid，且不写入任何文件。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.tpl")]
+    [InlineData("a/../../evil.tpl")]
+    [InlineData("C:\\windows\\main.tpl")]
+    [InlineData("main|bad.tpl")]
+    [InlineData("")]
+    public async Task AppendTemplateFilesAsync_InvalidTemplatePath_ReturnsInvalid(string templatePath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync(
+            "pkg",
+            new List<TemplateFileWriteEntry> { new(templatePath, "out.tpl", "content") },
+            CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "out.tpl")));
+    }
+
+    /// <summary>
+    /// 批量追加输出路径含非法文件名字符或为空应返回 Invalid，且不写入任何文件。
+    /// </summary>
+    [Theory]
+    [InlineData("out|bad.tpl")]
+    [InlineData("")]
+    public async Task AppendTemplateFilesAsync_InvalidOutputPath_ReturnsInvalid(string outputPath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync(
+            "pkg",
+            new List<TemplateFileWriteEntry> { new("safe.tpl", outputPath, "content") },
+            CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "safe.tpl")));
+    }
+
+    /// <summary>
+    /// 新建包输出路径含 .. 段（如越级到 src/main/resources）应成功，输出路径原样写入清单并可由服务重新加载。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_OutputWithDotDot_Succeeds()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "dotdot-pkg", "说明", "mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        TemplateFileInfo file = Assert.Single(result.Package!.Files);
+        Assert.Equal("../resources/mapper/{{table.className}}Dao.xml", file.OutputPath);
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("dotdot-pkg", CancellationToken.None);
+        Assert.Equal("../resources/mapper/{{table.className}}Dao.xml", reloaded.Files[0].OutputPath);
+    }
+
+    /// <summary>
+    /// 新增文件输出路径含 .. 段应成功，输出路径原样写入 manifest 条目。
+    /// </summary>
+    [Fact]
+    public async Task AddTemplateFileAsync_OutputWithDotDot_Succeeds()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult added = await service.AddTemplateFileAsync(
+            "pkg", "mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, added.Status);
+        TemplateFileInfo file = added.Package!.Files.Single(f => f.RelativeTemplatePath == "mapper.xml.scriban");
+        Assert.Equal("../resources/mapper/{{table.className}}Dao.xml", file.OutputPath);
+    }
+
+    /// <summary>
+    /// 批量追加输出路径含 .. 段应成功，输出路径原样写入 manifest 条目且文件落盘。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_OutputWithDotDot_Succeeds()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        var entries = new List<TemplateFileWriteEntry>
+        {
+            new("mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", "<mapper>{{table.className}}</mapper>")
+        };
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync("pkg", entries, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        TemplateFileInfo file = result.Package!.Files.Single(f => f.RelativeTemplatePath == "mapper.xml.scriban");
+        Assert.Equal("../resources/mapper/{{table.className}}Dao.xml", file.OutputPath);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "mapper.xml.scriban")));
+    }
+
+    /// <summary>
+    /// 批量追加空条目列表应返回 Invalid，不产生任何变更。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_EmptyList_ReturnsInvalid()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync("pkg", new List<TemplateFileWriteEntry>(), CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("pkg", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 批量追加批次内模板路径重名应返回 Invalid，不写任何文件，避免产生重复 manifest 条目。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_DuplicatePath_ReturnsInvalid()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        var entries = new List<TemplateFileWriteEntry>
+        {
+            new("entity/pojo.tpl", "entity/pojo.java", "first"),
+            new("entity/pojo.tpl", "entity/pojo.java", "second")
+        };
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync("pkg", entries, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "entity", "pojo.tpl")));
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("pkg", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 清单写回失败应回滚已写模板文件并返回失败，清单保持原状不留半成品。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_ManifestWriteFails_RollsBackWrittenFiles()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("rollback-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        // 清单文件置只读触发写回失败，验证已写模板文件被回滚删除
+        string manifestPath = Path.Combine(userLibrary, "rollback-pkg", TemplatePackageLoader.ManifestFileName);
+        File.SetAttributes(manifestPath, FileAttributes.ReadOnly);
+        try
+        {
+            TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync(
+                "rollback-pkg",
+                new List<TemplateFileWriteEntry> { new("new-file.tpl", "new-file.tpl", "content") },
+                CancellationToken.None);
+
+            Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+            Assert.False(File.Exists(Path.Combine(userLibrary, "rollback-pkg", "new-file.tpl")));
+
+            TemplatePackageInfo reloaded = await service.LoadPackageAsync("rollback-pkg", CancellationToken.None);
+            Assert.Single(reloaded.Files);
+        }
+        finally
+        {
+            File.SetAttributes(manifestPath, FileAttributes.Normal);
+        }
+    }
 }

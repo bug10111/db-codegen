@@ -3,9 +3,9 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="AI 模板助手"
         Width="840"
-        Height="720"
+        Height="800"
         MinWidth="740"
-        MinHeight="620"
+        MinHeight="680"
         WindowStartupLocation="CenterOwner">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
@@ -92,12 +92,13 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <!-- 技术栈描述输入区（必填，灰字提示目标语言与框架） -->
-                    <GroupBox Grid.Row="0" Header="技术栈描述（必填）">
+                    <!-- 生成说明输入区（必填，灰字提示可写范围与参考镜像） -->
+                    <GroupBox Grid.Row="0" Header="生成说明（必填）">
                         <StackPanel Margin="4">
                             <TextBox Text="{Binding TechStackDescription, UpdateSourceTrigger=PropertyChanged}"
                                      IsEnabled="{Binding IsInputPanelVisible}"
@@ -106,7 +107,7 @@
                                      MinHeight="64"
                                      MaxHeight="96"
                                      VerticalScrollBarVisibility="Auto" />
-                            <TextBlock Text="请务必说明模板生成代码的目标语言和框架，例如：Java + MyBatis-Plus、C# + EF Core、TypeScript + Vue3。语言和框架不明确将影响生成质量。"
+                            <TextBlock Text="可自由描述目标语言/框架与要生成的模板范围，例如：'Java + MyBatis-Plus，按参考文件全量生成整套模板' 或 'Java + MyBatis-Plus，只生成 Controller 模板'；有参考文件时默认逐文件镜像。"
                                        FontSize="11"
                                        Foreground="Gray"
                                        TextWrapping="Wrap"
@@ -145,10 +146,104 @@
                                TextWrapping="Wrap"
                                Margin="0,6,0,0" />
 
+                    <!-- 生成到：追加到现有包 / 新建包 二选一，追加行含目标包下拉与分组输入，新建行含新包名输入 -->
+                    <StackPanel Grid.Row="3"
+                                IsEnabled="{Binding IsInputPanelVisible}"
+                                Margin="0,10,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton Content="追加到现有包"
+                                         GroupName="GenerateTarget"
+                                         IsChecked="{Binding IsAppendMode}"
+                                         Margin="0,0,16,0" />
+                            <RadioButton Content="新建包"
+                                         GroupName="GenerateTarget"
+                                         IsChecked="{Binding IsNewPackageMode}" />
+                        </StackPanel>
+
+                        <!-- 追加模式行：目标包下拉 + 分组目录输入，仅追加模式可见 -->
+                        <Grid Margin="0,6,0,0"
+                              Visibility="{Binding IsAppendMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="目标包："
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,6,0" />
+                            <ComboBox Grid.Column="1"
+                                      ItemsSource="{Binding TargetPackages}"
+                                      SelectedItem="{Binding TargetPackageName}"
+                                      Width="160"
+                                      VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="2"
+                                       Text="分组目录："
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,6,0" />
+                            <Grid Grid.Column="3" VerticalAlignment="Center">
+                                <TextBox x:Name="TargetGroupTextBox"
+                                         Text="{Binding TargetGroup, UpdateSourceTrigger=PropertyChanged}" />
+                                <!-- 分组输入灰字占位提示：输入为空时可见，不可交互 -->
+                                <TextBlock Text="可空，如 simple"
+                                           Foreground="Gray"
+                                           IsHitTestVisible="False"
+                                           VerticalAlignment="Center"
+                                           Margin="6,0,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text.Length, ElementName=TargetGroupTextBox}" Value="0">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                        </Grid>
+
+                        <!-- 新建包模式行：新包名输入，仅新建包模式可见 -->
+                        <Grid Margin="0,6,0,0"
+                              Visibility="{Binding IsNewPackageMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="新包名："
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,6,0" />
+                            <Grid Grid.Column="1" VerticalAlignment="Center">
+                                <TextBox x:Name="RequestedPackageNameTextBox"
+                                         Text="{Binding RequestedPackageName, UpdateSourceTrigger=PropertyChanged}" />
+                                <!-- 新包名灰字占位提示：输入为空时可见，不可交互 -->
+                                <TextBlock Text="留空由 AI 命名"
+                                           Foreground="Gray"
+                                           IsHitTestVisible="False"
+                                           VerticalAlignment="Center"
+                                           Margin="6,0,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text.Length, ElementName=RequestedPackageNameTextBox}" Value="0">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                        </Grid>
+                    </StackPanel>
+
                     <!-- 生成状态/结果区：待生成引导 / 生成中 / 成功面板 / 失败面板 按阶段切换 -->
-                    <Grid Grid.Row="3" Margin="0,10,0,0">
+                    <Grid Grid.Row="4" Margin="0,10,0,0">
                         <!-- 待生成引导（状态机初始态） -->
-                        <TextBlock Text="请填写技术栈描述并选择样例表，然后点击「生成」。"
+                        <TextBlock Text="请填写生成说明并选择样例表，然后点击「生成」。"
                                    Foreground="Gray"
                                    VerticalAlignment="Top"
                                    Visibility="{Binding IsIdleVisible, Converter={StaticResource BooleanToVisibilityConverter}}" />
@@ -216,7 +311,7 @@
                     </Grid>
 
                     <!-- 生成/停止 操作按钮行 -->
-                    <StackPanel Grid.Row="4"
+                    <StackPanel Grid.Row="5"
                                 Orientation="Horizontal"
                                 HorizontalAlignment="Right"
                                 Margin="0,12,0,0">

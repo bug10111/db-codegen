@@ -162,7 +162,7 @@ public sealed class TemplateAiGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 构造 AI 生成请求。
+    /// 构造 AI 生成请求；默认声明新建包模式（既有用例覆盖新建包导入流程），追加模式用例另行显式设置目标。
     /// </summary>
     /// <returns>生成请求实例。</returns>
     private static AiTemplateGenerationRequest BuildRequest()
@@ -170,7 +170,8 @@ public sealed class TemplateAiGeneratorTests : IDisposable
         return new AiTemplateGenerationRequest
         {
             TechStackDescription = "Java + MyBatis-Plus，三层分层",
-            SampleTable = BuildSampleTable()
+            SampleTable = BuildSampleTable(),
+            TargetMode = AiGenerationTargetMode.NewPackage
         };
     }
 
@@ -496,24 +497,32 @@ public sealed class TemplateAiGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 生成包输出相对路径含 .. 段应被拒绝，不落库不残留临时目录。
+    /// 生成包输出相对路径含 .. 段应成功落库（越级到资源目录由生成侧解析时限定在工作区根内）。
     /// </summary>
     [Fact]
-    public async Task GenerateAsync_OutputPathTraversal_Rejected()
+    public async Task GenerateAsync_OutputWithDotDot_Succeeds()
     {
         ConfigService config = CreateConfigService();
         TemplatePackageService service = CreatePackageService();
         string packageJson = BuildPackageDocumentJson(
-            "out-traversal-pkg",
-            ("entity.java.scriban", "../../../evil.java", "class Evil {}"));
+            "out-dotdot-pkg",
+            ("mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", "<mapper>{{table.className}}</mapper>"));
         FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
         TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
 
         AiTemplateGenerationResult result = await generator.GenerateAsync(BuildRequest(), overwrite: false, CancellationToken.None);
 
-        Assert.False(result.IsSuccess);
-        Assert.Contains(result.Errors, error => error.Contains("输出路径不合法"));
-        Assert.False(Directory.Exists(Path.Combine(_tempRoot, "generator-temp", "out-traversal-pkg")));
+        Assert.True(result.IsSuccess);
+        Assert.Equal("out-dotdot-pkg", result.PackageName);
+
+        // 校验落库的 template.json 输出路径保留 .. 越级写法，临时目录已清理
+        string userLibrary = Path.Combine(_tempRoot, "user-library");
+        string manifestPath = Path.Combine(userLibrary, "out-dotdot-pkg", "template.json");
+        Assert.True(File.Exists(manifestPath));
+        TemplateManifest manifest = JsonSerializer.Deserialize<TemplateManifest>(
+            await File.ReadAllTextAsync(manifestPath), TemplatePackageLoader.JsonOptions)!;
+        Assert.Equal("../resources/mapper/{{table.className}}Dao.xml", manifest.Files[0].Output);
+        Assert.False(Directory.Exists(Path.Combine(_tempRoot, "generator-temp", "out-dotdot-pkg")));
     }
 
     /// <summary>
@@ -654,7 +663,7 @@ public sealed class TemplateAiGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 请求不带参考文件时，用户提示词不含参考文件段落与文件名标记。
+    /// 请求不带参考文件时，用户提示词不含参考文件约定蓝本段落与文件名标记。
     /// </summary>
     [Fact]
     public async Task GenerateAsync_NoReferenceFiles_OmitsReferenceParagraph()
@@ -671,8 +680,246 @@ public sealed class TemplateAiGeneratorTests : IDisposable
 
         Assert.True(result.IsSuccess);
         string userContent = GetUserPromptFromRequestBody(Assert.Single(handler.RequestBodies));
-        Assert.DoesNotContain("参考文件", userContent);
         Assert.DoesNotContain("### ", userContent);
+        Assert.DoesNotContain("逐文件镜像", userContent);
+        Assert.DoesNotContain("翻译为 Scriban", userContent);
+        Assert.DoesNotContain("easycode", userContent);
+    }
+
+    /// <summary>
+    /// 追加模式成功时应把 AI 返回的多个 files 追加到目标用户包：清单同步、物理文件写入、
+    /// AI 返回的包级元数据（packageName/basePackage/typeMap）被丢弃不污染目标包。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendToExistingPackage_AppendsFilesAndIgnoresAiPackageMetadata()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string userLibrary = Path.Combine(_tempRoot, "user-library");
+        Directory.CreateDirectory(userLibrary);
+        await CreatePackageDirAsync(userLibrary, "target-pkg");
+
+        string packageJson = BuildPackageDocumentJson(
+            "ai-ignored-name",
+            ("service.java.scriban", "{{package.dir}}/service/{{table.className}}Service.java", "interface {{table.className}}Service {}"),
+            ("mapper.java.scriban", "{{package.dir}}/mapper/{{table.className}}Mapper.java", "interface {{table.className}}Mapper {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+        request.TargetPackageName = "target-pkg";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("target-pkg", result.PackageName);
+        Assert.Equal(Path.Combine(userLibrary, "target-pkg"), result.TemplateDir);
+
+        // 目标包可重载：原 1 个 + 新增 2 个，清单与磁盘一致，AI 的包名/基础包/类型映射均被丢弃
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("target-pkg", CancellationToken.None);
+        Assert.Equal(3, reloaded.Files.Count);
+        Assert.Contains(reloaded.Files, file => file.RelativeTemplatePath == "mapper.java.scriban");
+        Assert.Equal("target-pkg", reloaded.Name);
+        Assert.Null(reloaded.BasePackage);
+        Assert.Empty(reloaded.TypeMap);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "target-pkg", "mapper.java.scriban")));
+
+        // 未创建 AI 返回的包名目录
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "ai-ignored-name")));
+    }
+
+    /// <summary>
+    /// 追加模式指定分组前缀时，模板相对路径带分组前缀且写入分组目录，输出路径保持参考约定。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendWithGroupPrefix_AddsPrefixToTemplatePath()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string userLibrary = Path.Combine(_tempRoot, "user-library");
+        Directory.CreateDirectory(userLibrary);
+        await CreatePackageDirAsync(userLibrary, "target-pkg");
+
+        string packageJson = BuildPackageDocumentJson(
+            "ignored",
+            ("entity.java.scriban", "{{package.dir}}/entity/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+        request.TargetPackageName = "target-pkg";
+        request.TargetGroup = "simple";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("target-pkg", CancellationToken.None);
+        TemplateFileInfo appended = reloaded.Files.Single(file => file.RelativeTemplatePath == "simple/entity.java.scriban");
+        Assert.Equal("{{package.dir}}/entity/{{table.className}}.java", appended.OutputPath);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "target-pkg", "simple", "entity.java.scriban")));
+    }
+
+    /// <summary>
+    /// 追加模式目标包不存在时应返回失败，且不发起 LLM 调用。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendTargetMissing_FailsWithoutLlmCall()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("{}")));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+        request.TargetPackageName = "no-such-pkg";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains(result.Errors, error => error.Contains("目标模板包不存在"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 追加模式目标包为内置包时应返回失败（只读拒绝），且不发起 LLM 调用。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendTargetBuiltin_FailsWithoutLlmCall()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        await CreatePackageDirAsync(Path.Combine(_tempRoot, "builtin-root"), "builtin-pkg");
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("{}")));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+        request.TargetPackageName = "builtin-pkg";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains(result.Errors, error => error.Contains("只读"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 追加模式未指定目标包名时应返回失败，且不发起 LLM 调用。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendTargetEmpty_FailsWithoutLlmCall()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("{}")));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains(result.Errors, error => error.Contains("必须指定目标用户包"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 追加模式 AI 返回空文件名时应返回失败，不把分组前缀折叠成以分组命名的文件写入目标包。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_AppendWithEmptyFileName_FailsWithoutWritingGroupFile()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string userLibrary = Path.Combine(_tempRoot, "user-library");
+        Directory.CreateDirectory(userLibrary);
+        await CreatePackageDirAsync(userLibrary, "target-pkg");
+
+        string packageJson = BuildPackageDocumentJson(
+            "ignored",
+            ("", "out/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.AppendToPackage;
+        request.TargetPackageName = "target-pkg";
+        request.TargetGroup = "simple";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains(result.Errors, error => error.Contains("name 不能为空"));
+        Assert.False(File.Exists(Path.Combine(userLibrary, "target-pkg", "simple")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("target-pkg", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 新建模式用户显式指定包名时应覆盖 AI 自定包名并仍做合法性校验，走原导入流程落库。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_NewPackageWithRequestedName_OverridesAiPackageName()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string packageJson = BuildPackageDocumentJson(
+            "ai-chosen-name",
+            ("entity.java.scriban", "{{package.dir}}/entity/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.TargetMode = AiGenerationTargetMode.NewPackage;
+        request.RequestedPackageName = "user-chosen";
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("user-chosen", result.PackageName);
+        string userLibrary = Path.Combine(_tempRoot, "user-library");
+        TemplateManifest manifest = JsonSerializer.Deserialize<TemplateManifest>(
+            await File.ReadAllTextAsync(Path.Combine(userLibrary, "user-chosen", "template.json")), TemplatePackageLoader.JsonOptions)!;
+        Assert.Equal("user-chosen", manifest.Name);
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "ai-chosen-name")));
+    }
+
+    /// <summary>
+    /// 携带参考文件时提示词应要求逐文件镜像并翻译 Velocity 语法，且不再出现旧"请勿直接照搬"文案。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_ReferenceFilesPrompt_RequiresMirroringAndTranslation()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string packageJson = BuildPackageDocumentJson(
+            "mirror-pkg",
+            ("entity.java.scriban", "{{package.dir}}/entity/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.ReferenceFiles = new List<AiReferenceFileItem>
+        {
+            new("entity.java.vm", 64, "#save($entityJavaFile, $tableInfo.className.java)")
+        };
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        string userContent = GetUserPromptFromRequestBody(Assert.Single(handler.RequestBodies));
+        Assert.Contains("作为蓝本逐文件镜像", userContent);
+        Assert.Contains("逐文件镜像", userContent);
+        Assert.Contains("翻译为 Scriban", userContent);
+        Assert.Contains("最高优先级", userContent);
+        Assert.Contains("决定生成 1 个模板还是整套模板包", userContent);
+        Assert.Contains("数量与参考文件对齐", userContent);
+        Assert.DoesNotContain("请勿直接照搬", userContent);
         Assert.DoesNotContain("easycode", userContent);
     }
 

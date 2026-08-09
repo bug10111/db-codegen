@@ -32,6 +32,12 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     private readonly Func<SettingsWindow> _settingsWindowFactory;
     private readonly Func<TemplatePackageManagerWindow> _templateManagerWindowFactory;
     private readonly ILogger<AiTemplateAssistantViewModel> _logger;
+
+    /// <summary>
+    /// ②区模板编辑器视图模型，供"生成到"默认值初始化读取当前包、当前文件分组与用户包清单。
+    /// </summary>
+    private readonly TemplateViewModel _templateViewModel;
+
     private readonly Dispatcher _dispatcher;
 
     /// <summary>
@@ -56,7 +62,8 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     private CancellationTokenSource? _refreshCts;
 
     /// <summary>
-    /// 技术栈描述，必填，如"Java + MyBatis-Plus，三层分层"。
+    /// 生成说明，必填，自由文本指令，如"Java + MyBatis-Plus，三层分层，按参考文件全量生成整套模板"。
+    /// 由模型按说明决定生成 1 个模板还是整套模板包，是生成范围的最高优先级依据。
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(GenerateCommand))]
@@ -132,6 +139,43 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     private string? _generatedTemplateDir;
+
+    /// <summary>
+    /// 是否追加到现有用户包；为 false 表示新建模板包。追加模式为默认，切换后同步反向属性。
+    /// </summary>
+    [ObservableProperty]
+    private bool _isAppendMode = true;
+
+    /// <summary>
+    /// 是否新建模板包，与追加模式互为反向，供视图 RadioButton 直接双向绑定。
+    /// </summary>
+    [ObservableProperty]
+    private bool _isNewPackageMode;
+
+    /// <summary>
+    /// 追加模式下目标用户包名，从②区当前打开的用户包初始化默认值；
+    /// 为空时生成前置校验提示选择，目标包存在性由 Core 校验兜底。
+    /// </summary>
+    [ObservableProperty]
+    private string? _targetPackageName;
+
+    /// <summary>
+    /// 追加模式分组目录前缀，追加到模板相对路径，仅影响模板文件组织不影响生成代码落盘路径；
+    /// 默认取当前编辑文件的目录段，可空。
+    /// </summary>
+    [ObservableProperty]
+    private string _targetGroup = string.Empty;
+
+    /// <summary>
+    /// 新建包模式下用户显式指定的包名，留空由 AI 自定。
+    /// </summary>
+    [ObservableProperty]
+    private string _requestedPackageName = string.Empty;
+
+    /// <summary>
+    /// 追加模式可选目标包名清单，取自②区用户包清单（排除内置只读包），供目标包下拉绑定。
+    /// </summary>
+    public ObservableCollection<string> TargetPackages { get; } = new();
 
     /// <summary>
     /// 失败时保留的原始 LLM 输出文本，供人工修复，仅结果页展示不落日志。
@@ -307,6 +351,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         _settingsWindowFactory = settingsWindowFactory;
         _templateManagerWindowFactory = templateManagerWindowFactory;
         _logger = logger;
+        _templateViewModel = templateViewModel;
         _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
 
         // 组合创建改模板 Tab 视图模型，传入宿主自持的同一共享参考文件上下文实例，保证写/改两 Tab 共读共改
@@ -329,6 +374,9 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     /// </summary>
     public async Task InitializeAsync()
     {
+        // 按②区当前包与当前编辑文件初始化"生成到"默认值（目标包清单/目标包/分组目录）
+        InitializeGenerationTargetDefaults();
+
         // 从主窗口①表列表区快照当前已加载表作为样例表候选集，宿主为非模态窗口期间表区可继续变化
         AvailableTables.Clear();
         foreach (TableRowViewModel row in _tableListViewModel.TableRows)
@@ -345,6 +393,46 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         }
 
         await EnsureLlmConfiguredAsync();
+    }
+
+    /// <summary>
+    /// 按②区模板编辑器当前状态初始化"生成到"默认值：目标包清单取用户包（排除内置只读包），
+    /// 追加目标包默认取当前打开的用户包，分组目录默认取当前编辑文件的目录段。
+    /// 追加模式为目标包存在性由 Core 校验兜底，当前包为内置或未打开文件时对应字段留空。
+    /// </summary>
+    private void InitializeGenerationTargetDefaults()
+    {
+        // 目标包清单 = ②区用户包名清单（排除内置只读包），供目标包下拉直接选择
+        TargetPackages.Clear();
+        foreach (TemplatePackageListItemViewModel item in _templateViewModel.Packages)
+        {
+            if (!item.IsBuiltin)
+            {
+                TargetPackages.Add(item.Name);
+            }
+        }
+
+        // 追加目标包默认取②区当前打开的用户包；当前包为内置包时留空，由生成前置校验提示选择
+        if (_templateViewModel.CurrentPackage is not null && !_templateViewModel.CurrentPackage.IsBuiltin)
+        {
+            TargetPackageName = _templateViewModel.CurrentPackage.Name;
+        }
+
+        // 分组目录默认取当前编辑文件的目录段，未打开文件或根目录文件时留空
+        TargetGroup = GetDirectorySegment(_templateViewModel.CurrentFileRelativePath);
+    }
+
+    /// <summary>
+    /// 从模板相对路径提取目录段作为分组前缀，反斜杠统一为正斜杠后取最后一段斜杠之前的全部段；
+    /// 无目录层或空路径时返回空串。
+    /// </summary>
+    /// <param name="relativePath">模板相对路径，可空。</param>
+    /// <returns>目录段文本；无目录层时返回空串。</returns>
+    private static string GetDirectorySegment(string? relativePath)
+    {
+        string normalized = (relativePath ?? string.Empty).Replace('\\', '/').Trim();
+        int lastSlash = normalized.LastIndexOf('/');
+        return lastSlash > 0 ? normalized[..lastSlash] : string.Empty;
     }
 
     /// <summary>
@@ -467,6 +555,13 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanGenerate))]
     private async Task GenerateAsync()
     {
+        // 追加模式必须先选目标用户包，未选时直接提示并返回，不进入进度面板
+        if (IsAppendMode && string.IsNullOrWhiteSpace(TargetPackageName))
+        {
+            _dialogService.ShowError("请选择目标模板包。");
+            return;
+        }
+
         // 待生成 → 配置检查中：进入进度面板并校验 LLM 配置与样例表真实元数据就绪，任一不满足不进入生成
         IsGenerating = true;
         StatusText = "正在检查生成配置…";
@@ -508,7 +603,15 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
             {
                 TechStackDescription = TechStackDescription.Trim(),
                 SampleTable = SampleTable,
-                ReferenceFiles = referenceFiles
+                ReferenceFiles = referenceFiles,
+
+                // 生成目标定位：追加模式携带目标包名与分组前缀，新建模式携带显式包名（留空由 AI 自定）
+                TargetMode = IsAppendMode
+                    ? AiGenerationTargetMode.AppendToPackage
+                    : AiGenerationTargetMode.NewPackage,
+                TargetPackageName = IsAppendMode ? TargetPackageName : null,
+                TargetGroup = IsAppendMode ? TargetGroup.Trim() : null,
+                RequestedPackageName = IsAppendMode ? null : RequestedPackageName.Trim()
             };
 
             _generationCts?.Cancel();
@@ -528,7 +631,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     /// 生成主循环：以覆盖标志驱动调用生成服务，用户包同名冲突确认覆盖后以覆盖标志重试，
     /// 内置包同名只读拒绝与其它失败统一走失败展示，取消由取消令牌抛出中止。
     /// </summary>
-    /// <param name="request">生成请求，技术栈描述与样例表元数据。</param>
+    /// <param name="request">生成请求，含生成说明、样例表元数据与生成目标定位。</param>
     /// <param name="ct">取消令牌，贯穿生成调用链。</param>
     private async Task RunGenerationLoopAsync(AiTemplateGenerationRequest request, CancellationToken ct)
     {
@@ -550,7 +653,20 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
                     GenerationSucceeded = true;
                     GeneratedPackageName = result.PackageName;
                     GeneratedTemplateDir = result.TemplateDir;
-                    StatusText = "模板包生成成功。";
+
+                    // 成功文案区分目标模式：追加模式展示目标包与分组，新建模式展示新包名
+                    if (IsAppendMode)
+                    {
+                        string groupSuffix = string.IsNullOrWhiteSpace(TargetGroup)
+                            ? string.Empty
+                            : $"，分组“{TargetGroup.Trim()}”";
+                        StatusText = $"已追加模板到包“{GeneratedPackageName}”{groupSuffix}";
+                    }
+                    else
+                    {
+                        StatusText = $"已新建模板包“{GeneratedPackageName}”。";
+                    }
+
                     _logger.LogInformation("AI 生成模板包成功，包名 {PackageName}。", result.PackageName);
                     return;
                 }
@@ -720,7 +836,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 判定生成命令是否可执行：未在生成、样例表已就绪、技术栈描述非空且未在读取样例表。
+    /// 判定生成命令是否可执行：未在生成、样例表已就绪、生成说明非空且未在读取样例表。
     /// </summary>
     private bool CanGenerate()
     {
@@ -743,6 +859,34 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         }
 
         _ = LoadSampleTableDetailAsync(value);
+    }
+
+    /// <summary>
+    /// 追加模式变更时同步反向"新建包"标志，保证两个 RadioButton 状态互斥一致。
+    /// </summary>
+    /// <param name="value">变更后的追加模式标志。</param>
+    partial void OnIsAppendModeChanged(bool value)
+    {
+        if (IsNewPackageMode == !value)
+        {
+            return;
+        }
+
+        IsNewPackageMode = !value;
+    }
+
+    /// <summary>
+    /// 新建包模式变更时同步反向"追加模式"标志，保证两个 RadioButton 状态互斥一致。
+    /// </summary>
+    /// <param name="value">变更后的新建包标志。</param>
+    partial void OnIsNewPackageModeChanged(bool value)
+    {
+        if (IsAppendMode == !value)
+        {
+            return;
+        }
+
+        IsAppendMode = !value;
     }
 
     /// <summary>

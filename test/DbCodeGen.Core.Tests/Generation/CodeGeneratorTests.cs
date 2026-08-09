@@ -135,25 +135,88 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 渲染后相对路径越出输出根应抛目录穿越异常并整单失败。
+    /// 渲染后相对路径越出工作区根应抛目录穿越异常并整单失败（.. 仅限工作区根内）。
     /// </summary>
     [Fact]
-    public async Task BuildPreviewAsync_PathTraversal_Throws()
+    public async Task BuildPreviewAsync_PathTraversalEscapesWorkspace_Throws()
     {
         (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
         {
-            ("entity.java.scriban", "{{table.variableName}}/evil.java", "public class {{table.className}} {}")
+            ("entity.java.scriban", "../../../../evil.java", "public class {{table.className}} {}")
         });
         (string workspaceRoot, _) = CreateWorkspace(tempRoot);
-        TableInfo table = CreateTable();
-        table.VariableName = "..";
-        var files = new[] { new TemplateFileSelection("entity.java.scriban", "{{table.variableName}}/evil.java", true) };
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "../../../../evil.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
         var exception = await Assert.ThrowsAsync<GenerationException>(
-            () => generator.BuildPreviewAsync(new GenerationRequest(package, new[] { table }, files, workspaceRoot, "gen"), null, CancellationToken.None));
+            () => generator.BuildPreviewAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None));
 
         Assert.Contains("目录穿越", exception.Message);
+    }
+
+    /// <summary>
+    /// 输出路径含 .. 段应从相对输出根（如代码根 src/main/java）越级到工作区根内其它目录
+    /// （如 src/main/resources/mapper），放行且绝对路径正确解析。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_OutputDotDotEscapesCodeRoot_ResolvesWithinWorkspace()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", "<mapper>{{table.className}}</mapper>\n")
+        });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("mapper.xml.scriban", "../resources/mapper/{{table.className}}Dao.xml", true) };
+        (CodeGenerator generator, _) = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "src/main/java"),
+            null,
+            CancellationToken.None);
+
+        GenerationFileEntry entry = Assert.Single(preview.Entries);
+        Assert.Equal("../resources/mapper/SysUserDao.xml", entry.RelativePath);
+        string expected = Path.Combine(workspaceRoot, "src", "main", "resources", "mapper", "SysUserDao.xml");
+        Assert.Equal(expected, entry.AbsolutePath);
+        Assert.Equal(GenerationAction.New, entry.Action);
+    }
+
+    /// <summary>
+    /// 输出路径模板渲染结果为空（如 {{package.dir}} 占位且基础包名为空）应在预览期抛目录穿越异常，
+    /// 不落入写盘期以目录路径为目标的误导性写盘失败。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_EmptyRenderedOutput_Throws()
+    {
+        // 构造基础包名为空、输出路径仅为 {{package.dir}} 占位的模板包，渲染后输出路径为空串
+        string tempRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"));
+        _tempRoots.Add(tempRoot);
+        string packageDir = Path.Combine(tempRoot, "user-pkg");
+        Directory.CreateDirectory(packageDir);
+        var manifest = new TemplateManifest
+        {
+            Name = "user-pkg",
+            Description = "测试包",
+            Engine = "scriban",
+            BasePackage = null,
+            TypeMap = new Dictionary<string, string>(),
+            Files = new List<TemplateFileEntry>
+            {
+                new() { Template = "t.java.scriban", Output = "{{package.dir}}", Enabled = true }
+            }
+        };
+        var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        await File.WriteAllTextAsync(Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName), JsonSerializer.Serialize(manifest, jsonOptions));
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "t.java.scriban"), "class {{table.className}} {}");
+        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, isBuiltin: false, CancellationToken.None);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("t.java.scriban", "{{package.dir}}", true) };
+        (CodeGenerator generator, _) = CreateGenerator();
+
+        var exception = await Assert.ThrowsAsync<GenerationException>(
+            () => generator.BuildPreviewAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None));
+
+        Assert.Contains("渲染结果为空", exception.Message);
     }
 
     /// <summary>

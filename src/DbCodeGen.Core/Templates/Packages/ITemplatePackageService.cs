@@ -2,8 +2,8 @@ namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
 /// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、导出、删除，
-/// 以及新建包、新增模板文件与删除模板文件。
-/// 变更操作（导入/复制/删除/新建/增删文件）在实现内部经串行门互斥，读操作不加锁。
+/// 以及新建包、新增模板文件、批量追加模板文件与删除模板文件。
+/// 变更操作（导入/复制/删除/新建/增删文件/批量追加）在实现内部经串行门互斥，读操作不加锁。
 /// </summary>
 public interface ITemplatePackageService
 {
@@ -108,4 +108,16 @@ public interface ITemplatePackageService
     /// <returns>删除操作结果，成功时 Package 携带更新后的包信息。</returns>
     Task<TemplatePackageOperationResult> DeleteTemplateFileAsync(
         string packageName, string templateRelativePath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 向用户模板包批量追加模板文件（带内容）：内置只读拒绝、逐条目路径安全与已存在预检，
+    /// 全部通过后写文件并追加 manifest 条目重写清单，失败回滚已写文件，返回更新后包。
+    /// 模板相对路径可含分组目录，输出路径支持 {{变量}} 占位，两者均须防目录穿越。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="files">待追加的模板文件写入条目列表，至少一个条目。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>追加操作结果，成功时 Package 携带更新后的包信息。</returns>
+    Task<TemplatePackageOperationResult> AppendTemplateFilesAsync(
+        string packageName, IReadOnlyList<TemplateFileWriteEntry> files, CancellationToken cancellationToken);
 }

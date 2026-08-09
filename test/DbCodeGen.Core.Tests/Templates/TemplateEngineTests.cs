@@ -270,6 +270,17 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
+    /// 路径占位渲染应注册 tool 函数集，firstLowerCase 与 hump2Underline 转换输出正确。
+    /// </summary>
+    [Fact]
+    public void RenderPathTemplate_ToolFunctions_OutputsTransformedValues()
+    {
+        string output = _engine.RenderPathTemplate("{{tool.firstLowerCase(table.className)}}/{{tool.hump2Underline(table.className)}}.java", CreatePathContext());
+
+        Assert.Equal("sysUser/sys_user.java", output);
+    }
+
+    /// <summary>
     /// 无基础包名时 package.dir 应为空串，路径占位按原样渲染。
     /// </summary>
     [Fact]

@@ -91,10 +91,10 @@ public static class TemplatePackageLoader
                 throw new TemplatePackageException($"模板文件不存在：{templateRelative}");
             }
 
-            // 输出相对路径静态骨架防目录穿越
-            if (!IsSafeRelativeSkeleton(entry.Output))
+            // 输出相对路径静态骨架防目录穿越，允许 .. 段（由生成侧解析时限定在工作区根内）
+            if (!IsSafeOutputPathSkeleton(entry.Output))
             {
-                throw new TemplatePackageException($"模板文件 {templateRelative} 的输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{entry.Output}");
+                throw new TemplatePackageException($"模板文件 {templateRelative} 的输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{entry.Output}");
             }
 
             files.Add(new TemplateFileInfo
@@ -166,6 +166,32 @@ public static class TemplatePackageLoader
             {
                 return false;
             }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 校验输出相对路径的静态骨架安全：非空、非绝对路径、无盘符前缀、不含冒号；允许 .. 段（由解析端限定在工作区根内）。
+    /// </summary>
+    /// <param name="relativePath">待校验的相对路径，支持 {{变量}} 占位。</param>
+    /// <returns>路径骨架安全返回 true，否则返回 false。</returns>
+    internal static bool IsSafeOutputPathSkeleton(string relativePath)
+    {
+        string path = (relativePath ?? string.Empty).Trim();
+        if (path.Length == 0)
+        {
+            return false;
+        }
+
+        if (Path.IsPathRooted(path))
+        {
+            return false;
+        }
+
+        if (path.Contains(':'))
+        {
+            return false;
         }
 
         return true;

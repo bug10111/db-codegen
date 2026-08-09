@@ -10,7 +10,7 @@ public interface ITemplateAiGenerator
     /// 生成一套模板包并提交落库：解析 LLM 输出后先写临时目录，
     /// 经 TemplatePackageLoader 完整校验通过后再提交到用户模板库，失败或取消清理临时目录。
     /// </summary>
-    /// <param name="request">生成请求，含技术栈描述、样例表元数据与参考文件内容快照清单。</param>
+    /// <param name="request">生成请求，含生成说明、样例表元数据、参考文件内容快照清单与生成目标（追加到现有包/新建包）。</param>
     /// <param name="overwrite">与用户包同名时是否允许覆盖；内置包同名一律只读拒绝。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>生成结果，成功携带包名与落库目录，失败携带错误清单与原始输出。</returns>
