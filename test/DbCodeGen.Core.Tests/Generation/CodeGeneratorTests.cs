@@ -223,7 +223,7 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 无覆盖项时生成应写新增文件并计入跳过，且回写最近相对输出根。
+    /// 无覆盖项时生成应写新增文件并计入跳过，且一并回写工作区根与最近相对输出根。
     /// </summary>
     [Fact]
     public async Task GenerateAsync_NoOverwrite_WritesNewAndCountsSkip()
@@ -249,6 +249,7 @@ public sealed class CodeGeneratorTests : IDisposable
         Assert.False(result.IsCancelled);
         Assert.True(File.Exists(Path.Combine(outputRoot, "out", "sysUser.java")));
         Assert.Equal("public class SysUser {}\n", await File.ReadAllTextAsync(Path.Combine(outputRoot, "out", "sysUser.java")));
+        Assert.Equal(workspaceRoot, configService.Current.WorkspaceRoot);
         Assert.Equal("gen", configService.Current.LastRelativeOutputRoot);
         Assert.True(configService.SaveCount >= 1);
     }

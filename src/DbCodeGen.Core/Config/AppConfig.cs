@@ -44,4 +44,10 @@ public class AppConfig
     /// 生成时经 TypeMappingService 优先于模板包 typeMap 命中，随配置导入导出与备份恢复持久化。
     /// </summary>
     public List<TypeMappingEntry> TypeMappings { get; set; } = new();
+
+    /// <summary>
+    /// 按包名记忆的模板文件勾选态，键为包名，值为该包各模板文件的勾选态清单，
+    /// 由②模板区"勾选到层" checkbox 变化时写入，下次加载该包时覆盖 manifest 默认勾选态。
+    /// </summary>
+    public Dictionary<string, List<TemplateFileState>> TemplateFileStates { get; set; } = new();
 }

@@ -5,6 +5,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
 using DbCodeGen.App.Views;
+using DbCodeGen.Core.Config;
+using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
@@ -23,6 +25,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     private readonly IDialogService _dialogService;
     private readonly IConfirmDialogService _confirmDialogService;
     private readonly IPromptDialogService _promptDialogService;
+    private readonly IConfigService _configService;
     private readonly Func<VariablePanelWindow> _variablePanelWindowFactory;
     private readonly ILogger<TemplateViewModel> _logger;
 
@@ -192,13 +195,14 @@ public sealed partial class TemplateViewModel : ObservableObject
     public event Action<string>? EditorContentChanged;
 
     /// <summary>
-    /// 使用模板包服务、模板文件读写服务、对话框服务、输入提示服务、变量面板窗口工厂与日志器构造视图模型。
+    /// 使用模板包服务、模板文件读写服务、对话框服务、输入提示服务、配置服务、变量面板窗口工厂与日志器构造视图模型。
     /// </summary>
     /// <param name="packageService">模板包管理服务，承载包列表、复制与新建/增删文件能力。</param>
     /// <param name="templateFileWriter">模板文件读写服务，承载读取与保存写回。</param>
     /// <param name="dialogService">消息提示服务，用于加载与保存失败反馈。</param>
     /// <param name="confirmDialogService">二次确认服务，用于脏文档与内置包复制引导确认。</param>
     /// <param name="promptDialogService">文本输入提示服务，用于新建包与新建文件的参数收集。</param>
+    /// <param name="configService">配置持久化服务，承载按包记忆的模板勾选态读写。</param>
     /// <param name="variablePanelWindowFactory">变量面板窗口工厂，供变量面板入口按需创建。</param>
     /// <param name="logger">视图模型日志器，日志不记录模板正文与敏感信息。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
@@ -208,6 +212,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         IDialogService dialogService,
         IConfirmDialogService confirmDialogService,
         IPromptDialogService promptDialogService,
+        IConfigService configService,
         Func<VariablePanelWindow> variablePanelWindowFactory,
         ILogger<TemplateViewModel> logger)
     {
@@ -216,6 +221,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(confirmDialogService);
         ArgumentNullException.ThrowIfNull(promptDialogService);
+        ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(variablePanelWindowFactory);
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -224,6 +230,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         _dialogService = dialogService;
         _confirmDialogService = confirmDialogService;
         _promptDialogService = promptDialogService;
+        _configService = configService;
         _variablePanelWindowFactory = variablePanelWindowFactory;
         _logger = logger;
     }
@@ -270,10 +277,11 @@ public sealed partial class TemplateViewModel : ObservableObject
 
     /// <summary>
     /// 文件树 checkbox 勾选态变化入口，由视图层 CheckBox 点击事件调用：
-    /// 以 Files 属性变更通知广播给生成栏等消费方，使其重新评估“勾选到层”命令可用性。
+    /// 先按包名持久化当前勾选态，再以 Files 属性变更通知广播给生成栏等消费方，使其重新评估“勾选到层”命令可用性。
     /// </summary>
     public void NotifyFileSelectionChanged()
     {
+        PersistFileSelectionStates();
         OnPropertyChanged(nameof(Files));
     }
 
@@ -735,6 +743,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         try
         {
             TemplatePackageInfo package = await _packageService.LoadPackageAsync(packageItem.Name, CancellationToken.None);
+            ApplyRememberedFileStates(package);
             _currentPackage = package;
 
             Files.Clear();
@@ -984,7 +993,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 按当前包重建文件树集合。
+    /// 按当前包重建文件树集合，重建前先应用按包记忆的勾选态。
     /// </summary>
     private void ReloadFiles()
     {
@@ -994,9 +1003,86 @@ public sealed partial class TemplateViewModel : ObservableObject
             return;
         }
 
+        ApplyRememberedFileStates(_currentPackage);
         foreach (TemplateFileInfo file in _currentPackage.Files)
         {
             Files.Add(file);
+        }
+    }
+
+    /// <summary>
+    /// 将配置中按包名记忆的模板文件勾选态覆盖到包文件清单上，还原上次勾选结果。
+    /// 包名无记忆或包文件不在记忆中时保持 manifest 默认勾选态不变。
+    /// </summary>
+    /// <param name="package">加载后的模板包运行时信息。</param>
+    private void ApplyRememberedFileStates(TemplatePackageInfo package)
+    {
+        if (!_configService.Current.TemplateFileStates.TryGetValue(package.Name, out List<TemplateFileState>? remembered))
+        {
+            return;
+        }
+
+        if (remembered is null || remembered.Count == 0)
+        {
+            return;
+        }
+
+        // 按规范化相对路径建立记忆勾选态查找表，包文件命中时覆盖其勾选态
+        var stateByPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (TemplateFileState state in remembered)
+        {
+            if (state is null || string.IsNullOrWhiteSpace(state.TemplatePath))
+            {
+                continue;
+            }
+
+            stateByPath[TemplatePackageLoader.NormalizeRelativePath(state.TemplatePath)] = state.Enabled;
+        }
+
+        foreach (TemplateFileInfo file in package.Files)
+        {
+            if (stateByPath.TryGetValue(file.RelativeTemplatePath, out bool enabled))
+            {
+                file.IsEnabled = enabled;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 将当前包文件树的勾选态按包名写入配置并保存，勾选即存一次点击一次写盘。
+    /// 写盘失败仅记录警告日志，不打断模板区操作。
+    /// </summary>
+    private void PersistFileSelectionStates()
+    {
+        if (_currentPackage is null)
+        {
+            return;
+        }
+
+        // 逐文件收集勾选态，跳过空文件实例防止空引用
+        var states = new List<TemplateFileState>();
+        foreach (TemplateFileInfo file in Files)
+        {
+            if (file is null)
+            {
+                continue;
+            }
+
+            states.Add(new TemplateFileState
+            {
+                TemplatePath = file.RelativeTemplatePath,
+                Enabled = file.IsEnabled
+            });
+        }
+
+        _configService.Current.TemplateFileStates[_currentPackage.Name] = states;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "模板勾选态保存失败，包 {PackageName}。", _currentPackage.Name);
         }
     }
 

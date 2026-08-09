@@ -10,6 +10,7 @@ using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using ICSharpCode.AvalonEdit.Highlighting;
+using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.App;
 
@@ -34,6 +35,7 @@ public partial class MainWindow : Window
     private readonly PreviewViewModel _previewViewModel;
     private readonly GenerationViewModel _generationViewModel;
     private readonly HighlightingService _highlightingService;
+    private readonly ILogger<MainWindow> _logger;
 
     /// <summary>
     /// 程序性同步下拉选中项期间抑制再次触发切换，防止与用户操作互相干扰。
@@ -48,7 +50,7 @@ public partial class MainWindow : Window
     /// <summary>
     /// 使用配置服务、当前连接服务、对话框服务、数据源管理窗口工厂、设置窗口工厂、AI 向导窗口工厂、
     /// SQL 执行面板窗口工厂、迁移窗口工厂、类型映射窗口工厂、模板包管理窗口工厂、表列表视图模型、
-    /// 模板编辑器视图模型、预览视图模型与高亮服务构造主窗口。
+    /// 模板编辑器视图模型、预览视图模型、高亮服务与日志器构造主窗口。
     /// </summary>
     /// <param name="configService">配置持久化服务，用于读取已保存数据源列表。</param>
     /// <param name="currentDataSourceService">当前连接共享状态服务，用于切换当前连接与接收变更通知。</param>
@@ -65,6 +67,7 @@ public partial class MainWindow : Window
     /// <param name="previewViewModel">预览视图模型，承载③预览区选表渲染与错误定位。</param>
     /// <param name="generationViewModel">生成栏视图模型，承载④生成栏路径配置、预览与生成写盘。</param>
     /// <param name="highlightingService">编辑器高亮服务，按目标语言应用高亮定义。</param>
+    /// <param name="logger">主窗口日志器，用于关闭路径回写失败等场景记录。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public MainWindow(
         IConfigService configService,
@@ -81,7 +84,8 @@ public partial class MainWindow : Window
         TemplateViewModel templateViewModel,
         PreviewViewModel previewViewModel,
         GenerationViewModel generationViewModel,
-        HighlightingService highlightingService)
+        HighlightingService highlightingService,
+        ILogger<MainWindow> logger)
     {
         ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(currentDataSourceService);
@@ -98,6 +102,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(previewViewModel);
         ArgumentNullException.ThrowIfNull(generationViewModel);
         ArgumentNullException.ThrowIfNull(highlightingService);
+        ArgumentNullException.ThrowIfNull(logger);
 
         InitializeComponent();
         _configService = configService;
@@ -115,6 +120,7 @@ public partial class MainWindow : Window
         _previewViewModel = previewViewModel;
         _generationViewModel = generationViewModel;
         _highlightingService = highlightingService;
+        _logger = logger;
 
         // ①表列表区绑定表浏览视图模型，②模板区绑定模板编辑器视图模型，③预览区绑定预览视图模型，④生成栏绑定生成视图模型
         TableListPanel.DataContext = _tableListViewModel;
@@ -584,16 +590,42 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 窗口关闭时解除编辑器事件订阅、当前连接变更订阅与表列表视图模型订阅，避免悬挂引用。
+    /// 窗口关闭时先回写④生成栏工作区根，随后解除编辑器事件订阅、当前连接变更订阅与表列表视图模型订阅，避免悬挂引用。
     /// </summary>
     /// <param name="e">关闭事件参数。</param>
     protected override void OnClosed(EventArgs e)
     {
+        PersistWorkspaceRoot();
         UnsubscribeEditorEvents();
         _previewViewModel.Detach();
         _currentDataSourceService.CurrentChanged -= OnCurrentChanged;
         _tableListViewModel.Detach();
         _generationViewModel.Detach();
         base.OnClosed(e);
+    }
+
+    /// <summary>
+    /// 应用关闭时回写④生成栏工作区根到配置，覆盖"改了根目录但未生成即关闭"的场景。
+    /// 与配置当前值一致时直接跳过，写盘失败仅记录日志，不阻塞关闭流程。
+    /// </summary>
+    private void PersistWorkspaceRoot()
+    {
+        if (string.Equals(
+                _configService.Current.WorkspaceRoot,
+                _generationViewModel.WorkspaceRoot,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _configService.Current.WorkspaceRoot = _generationViewModel.WorkspaceRoot;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "工作区根回写失败。");
+        }
     }
 }

@@ -384,6 +384,19 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.TemplateSearchDirectories.RemoveAll(item => item is null);
         config.DataSources.RemoveAll(item => item is null);
         config.TypeMappings.RemoveAll(item => item is null);
+        config.TemplateFileStates ??= new Dictionary<string, List<TemplateFileState>>();
+
+        // 清理按包记忆的勾选态中的空键、空值清单与清单内空元素，防止下游读取空引用
+        foreach ((string key, List<TemplateFileState>? states) in config.TemplateFileStates.ToList())
+        {
+            if (string.IsNullOrWhiteSpace(key) || states is null)
+            {
+                config.TemplateFileStates.Remove(key);
+                continue;
+            }
+
+            states.RemoveAll(state => state is null);
+        }
 
         // 旧版本配置升级：映射模型 v3 引入按数据库类型分桶（通用/MySQL/PostgreSQL），
         // 迁移时保留用户已有条目，仅追加按库默认集中尚未覆盖的条目，避免覆盖用户自定义映射

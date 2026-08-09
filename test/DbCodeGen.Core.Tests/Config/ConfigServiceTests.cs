@@ -222,6 +222,56 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 保存后使用同一路径新建服务重新加载，按包记忆的模板勾选态应完整还原（多包、多文件、勾选真假混合）。
+    /// </summary>
+    [Fact]
+    public void Save_ThenNewServiceLoads_RoundTripsTemplateFileStates()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        AppConfig config = service.Load();
+
+        config.TemplateFileStates["user-pkg"] = new List<TemplateFileState>
+        {
+            new() { TemplatePath = "entity.java.scriban", Enabled = true },
+            new() { TemplatePath = "mapper.xml.scriban", Enabled = false }
+        };
+        config.TemplateFileStates["builtin-pkg"] = new List<TemplateFileState>
+        {
+            new() { TemplatePath = "main.tpl", Enabled = true }
+        };
+        service.Save();
+
+        ConfigService reloaded = CreateService(configPath);
+        AppConfig loaded = reloaded.Load();
+
+        Assert.Equal(2, loaded.TemplateFileStates.Count);
+        Assert.True(loaded.TemplateFileStates.TryGetValue("user-pkg", out List<TemplateFileState>? userStates));
+        Assert.Equal(2, userStates!.Count);
+        Assert.Contains(userStates, state => state.TemplatePath == "entity.java.scriban" && state.Enabled);
+        Assert.Contains(userStates, state => state.TemplatePath == "mapper.xml.scriban" && !state.Enabled);
+        Assert.True(loaded.TemplateFileStates.TryGetValue("builtin-pkg", out List<TemplateFileState>? builtinStates));
+        TemplateFileState mainState = Assert.Single(builtinStates!);
+        Assert.Equal("main.tpl", mainState.TemplatePath);
+        Assert.True(mainState.Enabled);
+    }
+
+    /// <summary>
+    /// 不含模板勾选态字段的旧配置文件反序列化后，TemplateFileStates 应兜底为非 null 的空字典，下游读取不抛空引用。
+    /// </summary>
+    [Fact]
+    public void Load_JsonWithoutTemplateFileStates_NormalizesToEmptyDictionary()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"workspaceRoot":"","lastRelativeOutputRoot":""}""");
+
+        AppConfig config = service.Load();
+
+        Assert.NotNull(config.TemplateFileStates);
+        Assert.Empty(config.TemplateFileStates);
+    }
+
+    /// <summary>
     /// apiKey 应密文落盘：文件中不含明文，且 GetLlmApiKey 能解密还原明文。
     /// </summary>
     [Fact]

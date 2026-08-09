@@ -91,7 +91,7 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 生成写盘核心流程：内部重算 dry-run、覆盖确认、逐文件写盘、统计与日志合并、回写最近输出根。
+    /// 生成写盘核心流程：内部重算 dry-run、覆盖确认、逐文件写盘、统计与日志合并、回写最近生成路径。
     /// </summary>
     /// <param name="request">生成请求。</param>
     /// <param name="confirmOverwriteAsync">覆盖确认回调。</param>
@@ -141,7 +141,7 @@ public sealed class CodeGenerator : ICodeGenerator
 
         if (!writeResult.IsCancelled)
         {
-            WriteBackOutputRoot(request.CodeDirectory ?? request.RelativeOutputRoot, mergedLogs);
+            WriteBackOutputRoot(request.WorkspaceRoot, request.CodeDirectory ?? request.RelativeOutputRoot, mergedLogs);
         }
 
         return new GenerationResult(
@@ -431,22 +431,24 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 生成完成后回写最近代码目录并保存，回写失败仅记录警告日志，不阻断结果返回。
+    /// 生成完成后一并回写工作区根与最近代码目录并保存，回写失败仅记录警告日志，不阻断结果返回。
     /// </summary>
+    /// <param name="workspaceRoot">本次生成使用的工作区根，写回为下次生成的默认值。</param>
     /// <param name="codeDirectory">本次生成的代码目录，作为下次生成的默认值。</param>
     /// <param name="logs">最终日志列表，回写失败时追加警告条目。</param>
-    private void WriteBackOutputRoot(string codeDirectory, List<GenerationLogEntry> logs)
+    private void WriteBackOutputRoot(string workspaceRoot, string codeDirectory, List<GenerationLogEntry> logs)
     {
         try
         {
-            // 回写最近代码目录，供下次生成作为默认值
+            // 一并回写工作区根与最近代码目录，供下次生成作为默认值
+            _configService.Current.WorkspaceRoot = workspaceRoot;
             _configService.Current.LastRelativeOutputRoot = codeDirectory;
             _configService.Save();
         }
         catch (ConfigSaveException exception)
         {
-            logs.Add(GenerationLogEntry.Warning($"最近代码目录回写失败：{exception.Message}"));
-            _logger.LogWarning(exception, "最近代码目录回写失败。");
+            logs.Add(GenerationLogEntry.Warning($"最近生成路径回写失败：{exception.Message}"));
+            _logger.LogWarning(exception, "最近生成路径回写失败。");
         }
     }
 }
