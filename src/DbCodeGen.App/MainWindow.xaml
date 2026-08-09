@@ -10,9 +10,24 @@
         MinWidth="1120"
         WindowState="Maximized"
         WindowStartupLocation="CenterScreen">
+    <Window.Resources>
+        <!-- 顶部菜单标题：加大字号与内边距，与工具栏按钮视觉一致；仅顶层菜单生效，子菜单保持默认字号 -->
+        <Style TargetType="MenuItem">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Role, RelativeSource={RelativeSource Self}}" Value="TopLevelHeader">
+                    <Setter Property="FontSize" Value="16" />
+                    <Setter Property="Padding" Value="10,6" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Role, RelativeSource={RelativeSource Self}}" Value="TopLevelItem">
+                    <Setter Property="FontSize" Value="16" />
+                    <Setter Property="Padding" Value="10,6" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
     <DockPanel>
 
-        <!-- 顶部菜单：文件承载设置与退出，工具承载数据源管理/刷新表/SQL 面板/AI 向导，帮助承载关于 -->
+        <!-- 顶部菜单：文件承载设置与退出，工具承载数据源管理/刷新表/SQL 执行面板/模板包管理/类型映射/备份恢复，帮助承载关于 -->
         <Menu DockPanel.Dock="Top">
             <MenuItem Header="文件">
                 <MenuItem Header="设置…" Click="OnOpenSettingsClick" />
@@ -24,7 +39,6 @@
                 <MenuItem Header="刷新表" Click="OnRefreshTablesClick" />
                 <Separator />
                 <MenuItem Header="SQL 执行面板…" Click="OnOpenSqlPanelClick" />
-                <MenuItem Header="AI 生成模板…" Click="OnOpenAiWizardClick" />
                 <MenuItem Header="模板包管理…" Click="OnOpenTemplateManagerClick" />
                 <MenuItem Header="类型映射…" Click="OnOpenTypeMappingClick" />
                 <MenuItem Header="备份/恢复…" Click="OnOpenMigrationClick" />
@@ -183,16 +197,26 @@
                             </StackPanel>
                         </ContentControl>
 
-                        <!-- 文件工具条：新建/删除模板文件，仅用户包可用 -->
+                        <!-- 文件工具条：新增/删除模板，仅用户包可用；AI 入口按钮随②区整体繁忙禁用 -->
                         <ContentControl Grid.Row="1" Style="{StaticResource DashedGroupBox}" Margin="0,0,0,4">
                             <StackPanel Orientation="Horizontal">
-                                <Button Content="新建文件"
+                                <Button Content="新增模板"
                                         Command="{Binding AddTemplateFileCommand}"
                                         VerticalContentAlignment="Center" />
-                                <Button Content="删除文件"
+                                <Button Content="删除模板"
                                         Command="{Binding DeleteTemplateFileCommand}"
                                         Margin="4,0,0,0"
                                         VerticalContentAlignment="Center" />
+                                <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                                <Button Content="AI 写模板"
+                                        Click="OnAiWriteTemplateClick"
+                                        VerticalContentAlignment="Center"
+                                        ToolTip="打开「AI 模板助手」并切到写模板 Tab" />
+                                <Button Content="AI 改模板"
+                                        Click="OnAiModifyTemplateClick"
+                                        Margin="4,0,0,0"
+                                        VerticalContentAlignment="Center"
+                                        ToolTip="打开「AI 模板助手」并切到改模板 Tab" />
                             </StackPanel>
                         </ContentControl>
 
@@ -208,8 +232,8 @@
                             </ListView.ItemContainerStyle>
                             <ListView.ContextMenu>
                                 <ContextMenu>
-                                    <MenuItem Header="新建模板文件" Command="{Binding AddTemplateFileCommand}" />
-                                    <MenuItem Header="删除模板文件" Command="{Binding DeleteTemplateFileCommand}" />
+                                    <MenuItem Header="新增模板" Command="{Binding AddTemplateFileCommand}" />
+                                    <MenuItem Header="删除模板" Command="{Binding DeleteTemplateFileCommand}" />
                                 </ContextMenu>
                             </ListView.ContextMenu>
                             <ListView.ItemTemplate>

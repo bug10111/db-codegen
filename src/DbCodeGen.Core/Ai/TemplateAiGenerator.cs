@@ -8,9 +8,10 @@ using Microsoft.Extensions.Logging;
 namespace DbCodeGen.Core.Ai;
 
 /// <summary>
-/// AI 模板生成服务实现：组装提示词（TEMPLATE_SPEC + 样例表 JSON + 技术栈描述）→ 调用 LLM →
+/// AI 模板生成服务实现：组装提示词（TEMPLATE_SPEC + 样例表 JSON + 技术栈描述 + 参考文件段落）→ 调用 LLM →
 /// 解析模板包 → 写临时目录 → TemplatePackageLoader 校验 → 提交落库 → 清理临时目录。
-/// apiKey 经 IConfigService.GetLlmApiKey 解密为瞬态明文，仅内存短周期，不落盘不落日志。
+/// apiKey 经 IConfigService.GetLlmApiKey 解密为瞬态明文，仅内存短周期，不落盘不落日志；
+/// 参考文件内容快照仅注入本次对话提示词，不写盘不进日志，日志只记录参考文件数量与文件名。
 /// </summary>
 public sealed class TemplateAiGenerator : ITemplateAiGenerator
 {
@@ -102,8 +103,18 @@ public sealed class TemplateAiGenerator : ITemplateAiGenerator
         {
             BaseUrl = llmConfig.BaseUrl,
             Model = llmConfig.Model,
-            ApiKey = apiKey
+            ApiKey = apiKey,
+            TimeoutSeconds = llmConfig.TimeoutSeconds
         };
+
+        // 参考文件内容仅注入提示词不进日志，日志只记录数量与文件名
+        if (request.ReferenceFiles is { Count: > 0 })
+        {
+            _logger.LogInformation(
+                "AI 模板生成请求携带 {ReferenceFileCount} 个参考文件：{ReferenceFileNames}。",
+                request.ReferenceFiles.Count,
+                string.Join(", ", request.ReferenceFiles.Select(file => file.FileName)));
+        }
 
         // 组装首轮提示词：TEMPLATE_SPEC 注入 system，技术栈描述与样例表 JSON 注入 user
         List<LlmChatMessage> messages = BuildPromptMessages(request);
@@ -174,7 +185,7 @@ public sealed class TemplateAiGenerator : ITemplateAiGenerator
     }
 
     /// <summary>
-    /// 组装提示词消息：system 注入 TEMPLATE_SPEC 规范文本，user 注入技术栈描述与样例表 JSON。
+    /// 组装提示词消息：system 注入 TEMPLATE_SPEC 规范文本，user 注入技术栈描述、样例表 JSON 与参考文件段落。
     /// </summary>
     /// <param name="request">生成请求。</param>
     /// <returns>对话消息列表。</returns>
@@ -190,7 +201,7 @@ public sealed class TemplateAiGenerator : ITemplateAiGenerator
     }
 
     /// <summary>
-    /// 拼接用户提示词正文：技术栈描述 + 样例表 JSON + 输出 JSON 结构要求。
+    /// 拼接用户提示词正文：技术栈描述 + 样例表 JSON + 参考文件段落（带文件名标记逐文件注入）+ 输出 JSON 结构要求。
     /// </summary>
     /// <param name="request">生成请求。</param>
     /// <param name="sampleTableJson">样例表序列化 JSON 文本。</param>
@@ -220,9 +231,17 @@ public sealed class TemplateAiGenerator : ITemplateAiGenerator
         builder.AppendLine("  ]");
         builder.AppendLine("}");
         builder.AppendLine();
-        if (request.IncludeEasyCodeReference)
+
+        // 参考文件内容快照逐文件注入提示词，带文件名标记区分来源；空清单不注入该段落
+        if (request.ReferenceFiles is { Count: > 0 })
         {
-            builder.AppendLine("参考素材：已提供 easycode 参考模板，请在转写时参考其命名与结构。");
+            builder.AppendLine("参考文件内容（仅作参照，供了解既有命名与结构，请勿直接照搬文件内容）：");
+            foreach (AiReferenceFileItem referenceFile in request.ReferenceFiles)
+            {
+                builder.AppendLine($"### {referenceFile.FileName}");
+                builder.AppendLine(referenceFile.Content);
+                builder.AppendLine();
+            }
         }
 
         builder.AppendLine("只输出 JSON，不要包含 markdown 代码围栏或其它文字。");

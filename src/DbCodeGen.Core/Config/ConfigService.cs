@@ -366,6 +366,12 @@ public sealed class ConfigService : IConfigService, IDisposable
                 ApiKeyEncrypted = string.Empty,
                 Model = LlmConfig.DefaultModel
             },
+            AiReferenceFileLimits = new AiReferenceFileLimits
+            {
+                MaxFileCount = AiReferenceFileLimits.DefaultMaxFileCount,
+                MaxSingleFileBytes = AiReferenceFileLimits.DefaultMaxSingleFileBytes,
+                MaxTotalBytes = AiReferenceFileLimits.DefaultMaxTotalBytes
+            },
             TemplateSearchDirectories = new List<string> { templatesDirectory },
             DataSources = new List<DataSourceConfig>(),
             TypeMappings = TypeMappingDefaults.BuildDefault().ToList()
@@ -385,6 +391,29 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.DataSources.RemoveAll(item => item is null);
         config.TypeMappings.RemoveAll(item => item is null);
         config.TemplateFileStates ??= new Dictionary<string, List<TemplateFileState>>();
+
+        // AI 参考文件限制子模型为 null 时兜底为默认实例，防止下游读取空引用
+        config.AiReferenceFileLimits ??= new AiReferenceFileLimits();
+
+        // 任一限制字段非正数时恢复对应默认常量，防止手工编辑或历史配置产生非法上限
+        if (config.AiReferenceFileLimits.MaxFileCount <= 0)
+        {
+            config.AiReferenceFileLimits.MaxFileCount = AiReferenceFileLimits.DefaultMaxFileCount;
+        }
+        if (config.AiReferenceFileLimits.MaxSingleFileBytes <= 0)
+        {
+            config.AiReferenceFileLimits.MaxSingleFileBytes = AiReferenceFileLimits.DefaultMaxSingleFileBytes;
+        }
+        if (config.AiReferenceFileLimits.MaxTotalBytes <= 0)
+        {
+            config.AiReferenceFileLimits.MaxTotalBytes = AiReferenceFileLimits.DefaultMaxTotalBytes;
+        }
+
+        // 单文件上限大于总大小上限时收敛为总大小，防止上传校验死锁（单文件永远无法通过校验）
+        if (config.AiReferenceFileLimits.MaxSingleFileBytes > config.AiReferenceFileLimits.MaxTotalBytes)
+        {
+            config.AiReferenceFileLimits.MaxSingleFileBytes = config.AiReferenceFileLimits.MaxTotalBytes;
+        }
 
         // 清理按包记忆的勾选态中的空键、空值清单与清单内空元素，防止下游读取空引用
         foreach ((string key, List<TemplateFileState>? states) in config.TemplateFileStates.ToList())
@@ -412,6 +441,13 @@ public sealed class ConfigService : IConfigService, IDisposable
         config.Llm.BaseUrl ??= LlmConfig.DefaultBaseUrl;
         config.Llm.ApiKeyEncrypted ??= string.Empty;
         config.Llm.Model ??= LlmConfig.DefaultModel;
+
+        // 请求超时非正数时恢复默认 300，防止手工编辑或历史配置产生非法超时值导致请求瞬间超时或无限挂起
+        if (config.Llm.TimeoutSeconds < 1)
+        {
+            config.Llm.TimeoutSeconds = LlmConfig.DefaultTimeoutSeconds;
+        }
+
         return config;
     }
 

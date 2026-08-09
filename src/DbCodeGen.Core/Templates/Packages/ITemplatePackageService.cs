@@ -73,17 +73,18 @@ public interface ITemplatePackageService
     Task DeletePackageAsync(string packageName, CancellationToken cancellationToken);
 
     /// <summary>
-    /// 新建用户模板包：校验包名与首文件路径后创建包目录、写入 template.json 清单并顺带创建首个空模板文件。
+    /// 新建用户模板包：校验包名后创建包目录并写入 template.json 清单；首模板文件路径可空，
+    /// 为空时创建空包（files 为空清单、不创建物理模板文件），非空时顺带创建首个空模板文件。
     /// 与内置包同名一律只读拒绝；与用户包同名返回 NameConflict（新建不走覆盖，由调用方提示改名）。
     /// </summary>
     /// <param name="packageName">新模板包包名，须符合目录名规则。</param>
     /// <param name="description">包说明，可为空。</param>
-    /// <param name="firstTemplatePath">首模板文件相对包根路径，可含分组目录，须非空且防目录穿越安全。</param>
-    /// <param name="firstOutputPath">首模板文件输出相对路径，同样防目录穿越校验。</param>
+    /// <param name="firstTemplatePath">首模板文件相对包根路径，可含分组目录；为空时创建空包，非空时须防目录穿越安全。</param>
+    /// <param name="firstOutputPath">首模板文件输出相对路径；首模板路径非空时须防目录穿越校验。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>创建操作结果，成功时 Package 携带新包信息。</returns>
     Task<TemplatePackageOperationResult> CreatePackageAsync(
-        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken);
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken);
 
     /// <summary>
     /// 向用户模板包新增一个空模板文件：建空文件并同步追加 manifest files 条目（enabled=true）后重写清单。
@@ -99,7 +100,7 @@ public interface ITemplatePackageService
 
     /// <summary>
     /// 从用户模板包删除一个模板文件：删除文件并同步移除 manifest files 对应条目后重写清单。
-    /// 内置包只读拒绝；文件不存在返回失败；包内仅剩一个文件时拒绝删除（防清单 files 为空校验失败）。
+    /// 内置包只读拒绝；文件不存在返回失败；允许删除最后一个模板，删除后包变为空包（空 files 清单合法）。
     /// </summary>
     /// <param name="packageName">目标用户模板包包名。</param>
     /// <param name="templateRelativePath">待删除模板文件相对包根路径。</param>

@@ -2,21 +2,18 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using DbCodeGen.Core.Config;
 using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.Core.Ai;
 
 /// <summary>
 /// OpenAI 兼容 LLM 对话客户端，手写 HttpClient 直连 {baseUrl}/chat/completions，Bearer 鉴权。
-/// 承载请求超时、HTTP 错误映射与响应内容抽取；apiKey 仅作为请求头存在于内存短周期，不落日志。
+/// 请求超时按请求可配置：以 LlmClientOptions.TimeoutSeconds 为基准经 CancelAfter + linked-CTS 生效，
+/// 同时承载 HTTP 错误映射与响应内容抽取；apiKey 仅作为请求头存在于内存短周期，不落日志。
 /// </summary>
 public sealed class LlmClient : ILlmClient, IDisposable
 {
-    /// <summary>
-    /// 默认请求超时秒数。
-    /// </summary>
-    public const int DefaultTimeoutSeconds = 120;
-
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly ILogger<LlmClient> _logger;
@@ -27,7 +24,7 @@ public sealed class LlmClient : ILlmClient, IDisposable
     };
 
     /// <summary>
-    /// 使用日志器与可选 HttpClient 创建客户端；未传入时自建并设默认超时。
+    /// 使用日志器与可选 HttpClient 创建客户端；未传入时自建并禁用构造时固定超时，由按请求的 linked-CTS 接管。
     /// </summary>
     /// <param name="logger">客户端日志器。</param>
     /// <param name="httpClient">外部传入的 HttpClient，为空时自建。</param>
@@ -37,7 +34,7 @@ public sealed class LlmClient : ILlmClient, IDisposable
         ArgumentNullException.ThrowIfNull(logger);
         _logger = logger;
         _ownsHttpClient = httpClient is null;
-        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(DefaultTimeoutSeconds) };
+        _httpClient = httpClient ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
     }
 
     /// <inheritdoc />
@@ -93,6 +90,12 @@ public sealed class LlmClient : ILlmClient, IDisposable
             payload["temperature"] = request.Temperature.Value;
         }
 
+        // 按请求生效超时：以配置超时建定时令牌，与调用方令牌链接，超时触发或调用方取消均可中断网络等待
+        int timeoutSeconds = options.TimeoutSeconds > 0 ? options.TimeoutSeconds : LlmConfig.DefaultTimeoutSeconds;
+        using CancellationTokenSource timeoutCts = new();
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+        using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
         using HttpRequestMessage httpRequest = new(HttpMethod.Post, endpoint);
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
         string bodyJson = JsonSerializer.Serialize(payload, PayloadJsonOptions);
@@ -101,11 +104,22 @@ public sealed class LlmClient : ILlmClient, IDisposable
         HttpResponseMessage httpResponse;
         try
         {
-            httpResponse = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+            // 发送与读取响应体共用 linked 令牌，超时在任一阶段触发均映射为可读超时错误
+            httpResponse = await _httpClient.SendAsync(httpRequest, linkedCts.Token).ConfigureAwait(false);
+            using (httpResponse)
+            {
+                string responseBody = await httpResponse.Content.ReadAsStringAsync(linkedCts.Token).ConfigureAwait(false);
+                if (!httpResponse.IsSuccessStatusCode)
+                {
+                    return MapHttpError(httpResponse.StatusCode, responseBody);
+                }
+
+                return ParseSuccessBody(responseBody);
+            }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            // 非用户取消的等待超时，映射为可读超时错误
+            // 调用方令牌未取消但超时触发，映射为可读超时错误；调用方令牌已取消则照常向上抛取消
             _logger.LogWarning("调用 LLM 端点超时：{Endpoint}。", endpoint);
             return LlmChatResponse.Failure("timeout", "调用 LLM 超时，请稍后重试或检查网络。");
         }
@@ -114,17 +128,6 @@ public sealed class LlmClient : ILlmClient, IDisposable
             _logger.LogError(exception, "调用 LLM 端点网络失败：{Endpoint}。", endpoint);
             string detail = ExtractInnermostMessage(exception) ?? "请检查网络连接。";
             return LlmChatResponse.Failure("network", $"网络请求失败：{detail}");
-        }
-
-        using (httpResponse)
-        {
-            string responseBody = await httpResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (!httpResponse.IsSuccessStatusCode)
-            {
-                return MapHttpError(httpResponse.StatusCode, responseBody);
-            }
-
-            return ParseSuccessBody(responseBody);
         }
     }
 
@@ -176,9 +179,15 @@ public sealed class LlmClient : ILlmClient, IDisposable
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
         }
 
+        // 模型列表拉取同样套用按请求超时令牌，防止端点不响应时该 GET 无限挂起
+        int timeoutSeconds = options.TimeoutSeconds > 0 ? options.TimeoutSeconds : LlmConfig.DefaultTimeoutSeconds;
+        using CancellationTokenSource timeoutCts = new();
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+        using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
         try
         {
-            HttpResponseMessage httpResponse = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+            HttpResponseMessage httpResponse = await _httpClient.SendAsync(httpRequest, linkedCts.Token).ConfigureAwait(false);
             using (httpResponse)
             {
                 if (!httpResponse.IsSuccessStatusCode)
@@ -186,7 +195,7 @@ public sealed class LlmClient : ILlmClient, IDisposable
                     return Array.Empty<string>();
                 }
 
-                string responseBody = await httpResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                string responseBody = await httpResponse.Content.ReadAsStringAsync(linkedCts.Token).ConfigureAwait(false);
                 return ParseModelList(responseBody);
             }
         }
@@ -198,7 +207,7 @@ public sealed class LlmClient : ILlmClient, IDisposable
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            // 非用户取消的等待超时同样按拉取失败处理，返回空集合
+            // 调用方令牌未取消但超时触发，按拉取失败处理返回空集合；调用方令牌已取消则照常向上抛取消
             _logger.LogDebug("读取 LLM 模型列表超时，端点 {Endpoint}。", endpoint);
             return Array.Empty<string>();
         }

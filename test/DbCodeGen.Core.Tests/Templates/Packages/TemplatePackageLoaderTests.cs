@@ -245,6 +245,25 @@ public sealed class TemplatePackageLoaderTests : IDisposable
     }
 
     /// <summary>
+    /// 清单 files 为空数组或缺省时应加载通过，返回的 Files 为空（空模板包合法）。
+    /// </summary>
+    [Theory]
+    [InlineData("""{"name":"empty-array","engine":"scriban","files":[]}""", "empty-array")]
+    [InlineData("""{"name":"no-files","engine":"scriban"}""", "no-files")]
+    public async Task LoadFromDirectoryAsync_EmptyFilesList_LoadsWithNoFiles(string manifestJson, string expectedName)
+    {
+        string packageDir = Path.Combine(_tempRoot, expectedName);
+        Directory.CreateDirectory(packageDir);
+        await File.WriteAllTextAsync(Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName), manifestJson);
+
+        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, false, CancellationToken.None);
+
+        Assert.Equal(expectedName, package.Name);
+        Assert.Empty(package.Files);
+        Assert.Equal(Path.GetFullPath(packageDir), package.RootPath);
+    }
+
+    /// <summary>
     /// 包名合法用例应全部通过。
     /// </summary>
     [Theory]

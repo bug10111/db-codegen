@@ -279,6 +279,34 @@ public sealed class DialogService : IDialogService, IConfirmDialogService, IFold
     }
 
     /// <inheritdoc />
+    public Task<IReadOnlyList<string>> PickOpenReferenceFilesAsync(string? initialDirectory = null, string title = "选择参考文件")
+    {
+        TaskCompletionSource<IReadOnlyList<string>> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        RunOnUiThread(() =>
+        {
+            // 多选打开对话框：Multiselect 开启取 FileNames 路径清单，Filter 开放所有文件以适配
+            // “其他平台生成器模板或现有项目代码”作为参考文件的场景
+            OpenFileDialog dialog = new()
+            {
+                Title = title,
+                Filter = "所有文件|*.*",
+                Multiselect = true,
+                CheckFileExists = true
+            };
+
+            // 仅当初始目录真实存在时才预填，避免对话框打开时指向无效路径
+            if (!string.IsNullOrWhiteSpace(initialDirectory) && Directory.Exists(initialDirectory))
+            {
+                dialog.InitialDirectory = initialDirectory;
+            }
+
+            bool? accepted = dialog.ShowDialog(GetOwner());
+            completion.SetResult(accepted == true ? dialog.FileNames : Array.Empty<string>());
+        });
+        return completion.Task;
+    }
+
+    /// <inheritdoc />
     public Task<string?> PromptAsync(string title, string prompt, string defaultValue = "")
     {
         TaskCompletionSource<string?> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);

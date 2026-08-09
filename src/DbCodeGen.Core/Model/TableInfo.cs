@@ -51,7 +51,7 @@ public class TableInfo
     public List<ColumnInfo> PrimaryKeys { get; set; } = new();
 
     /// <summary>
-    /// 全量列集合，与 Columns 同源，兼容 easycode 模板语义。
+    /// 全量列集合，与 Columns 同源，模板遍历全部列用。
     /// </summary>
     public List<ColumnInfo> FullColumn { get; set; } = new();
 

@@ -86,9 +86,12 @@ public partial class App : Application
         // 当前连接共享状态服务，供主窗口工具栏与各消费方联动
         services.AddSingleton<ICurrentDataSourceService, CurrentDataSourceService>();
 
-        // AI 模板生成服务：LLM 客户端与模板生成器，供 AI 向导窗口消费
+        // AI 模板生成服务：LLM 客户端与模板生成器，供「AI 模板助手」写模板 Tab 消费
         services.AddSingleton<ILlmClient, LlmClient>();
         services.AddSingleton<ITemplateAiGenerator, TemplateAiGenerator>();
+
+        // AI 改模板对话服务：复用同一 LLM 客户端承载改模板对话闭环，供「AI 模板助手」改模板 Tab 消费
+        services.AddSingleton<ITemplateAiModifier, TemplateAiModifier>();
 
         // 主窗口①表列表区视图模型，单例与主窗口生命周期一致
         services.AddSingleton<TableListViewModel>();
@@ -147,11 +150,15 @@ public partial class App : Application
         services.AddTransient<Func<TemplatePackageManagerWindow>>(provider =>
             () => provider.GetRequiredService<TemplatePackageManagerWindow>());
 
-        // AI 生成模板向导窗口与视图模型，供主窗口菜单“AI 生成模板”入口按需创建
-        services.AddTransient<AiTemplateWizardViewModel>();
-        services.AddTransient<AiTemplateWizardWindow>();
-        services.AddTransient<Func<AiTemplateWizardWindow>>(provider =>
-            () => provider.GetRequiredService<AiTemplateWizardWindow>());
+        // AI 模板助手窗口与视图模型，供主窗口工具条“AI 写模板 / AI 改模板”入口按需创建
+        services.AddTransient<AiTemplateAssistantViewModel>();
+        services.AddTransient<AiTemplateAssistantWindow>();
+        services.AddTransient<Func<AiTemplateAssistantWindow>>(provider =>
+            () => provider.GetRequiredService<AiTemplateAssistantWindow>());
+
+        // AI 模板助手窗口宿主服务，单例承载单开复用生命周期（未打开懒创建/已打开激活/关闭置空），
+        // 供主窗口“AI 写模板 / AI 改模板”入口注入调用
+        services.AddSingleton<IAiTemplateAssistantWindowService, AiTemplateAssistantWindowService>();
 
         // SQL 执行面板窗口与视图模型，供主窗口菜单“SQL 执行面板”入口按需创建
         services.AddTransient<SqlExecutorViewModel>();

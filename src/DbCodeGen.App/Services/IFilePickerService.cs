@@ -73,4 +73,12 @@ public interface IFilePickerService
     /// <param name="title">对话框标题，默认“导出类型映射”。</param>
     /// <returns>用户指定的 JSON 文件绝对路径；用户取消时返回 null。</returns>
     Task<string?> PickSaveJsonAsync(string defaultFileName, string? initialDirectory = null, string title = "导出类型映射");
+
+    /// <summary>
+    /// 弹出打开文件对话框并返回用户多选的参考文件绝对路径清单，供 AI 模板助手写/改模板注入参考文件。
+    /// </summary>
+    /// <param name="initialDirectory">初始定位目录；为空或不存在时由对话框决定起始位置。</param>
+    /// <param name="title">对话框标题，默认“选择参考文件”。</param>
+    /// <returns>选中的文件绝对路径清单；用户取消时返回空集合。</returns>
+    Task<IReadOnlyList<string>> PickOpenReferenceFilesAsync(string? initialDirectory = null, string title = "选择参考文件");
 }

@@ -2,150 +2,209 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="设置"
-        Width="640"
-        Height="560"
-        MinWidth="560"
-        MinHeight="480"
+        Width="680"
+        Height="760"
+        MinWidth="600"
+        MinHeight="640"
         WindowStartupLocation="CenterOwner">
     <Grid Margin="16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" MinHeight="140" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 工作区根默认：目录输入框加浏览按钮，批量代码生成绝对输出路径的根前缀 -->
-        <GroupBox Grid.Row="0" Header="工作区根默认" Padding="8" Margin="0,0,0,12">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
-                         VerticalContentAlignment="Center" />
-                <Button Grid.Column="1"
-                        Content="浏览..."
-                        Margin="8,0,0,0"
-                        Padding="14,4"
-                        Command="{Binding BrowseWorkspaceRootCommand}" />
-            </Grid>
-        </GroupBox>
+        <!-- 可滚动配置区：5 个配置分组自上而下排列，窗口高度不足时整体纵向滚动 -->
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      Padding="0,0,6,0">
+            <StackPanel>
 
-        <!-- LLM 配置：接口地址（OpenAI 兼容）、API Key（密码框）与模型名；API Key 留空保持原密文 -->
-        <GroupBox Grid.Row="1" Header="LLM 配置" Padding="8" Margin="0,0,0,12">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="110" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
+                <!-- 工作区根默认：目录输入框加浏览按钮，批量代码生成绝对输出路径的根前缀 -->
+                <GroupBox Header="工作区根默认" Padding="8" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding WorkspaceRoot, UpdateSourceTrigger=PropertyChanged}"
+                                 VerticalContentAlignment="Center" />
+                        <Button Grid.Column="1"
+                                Content="浏览..."
+                                Margin="8,0,0,0"
+                                Padding="14,4"
+                                Command="{Binding BrowseWorkspaceRootCommand}" />
+                    </Grid>
+                </GroupBox>
 
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="接口地址" VerticalAlignment="Center" />
-                <TextBox Grid.Row="0" Grid.Column="1"
-                         Text="{Binding LlmBaseUrl, UpdateSourceTrigger=PropertyChanged}"
-                         Margin="0,0,0,4"
-                         VerticalContentAlignment="Center"
-                         ToolTip="OpenAI 兼容协议端点（POST /chat/completions），如 https://api.deepseek.com" />
+                <!-- LLM 配置：接口地址（OpenAI 兼容）、API Key（密码框）与模型名；API Key 留空保持原密文 -->
+                <GroupBox Header="LLM 配置" Padding="8" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="110" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
-                           Text="OpenAI 兼容协议端点（POST /chat/completions），如 https://api.deepseek.com 或 https://api.deepseek.com/v1；cc-switch 的 /anthropic 地址是 Anthropic 协议，不适用。"
-                           FontSize="11"
-                           Foreground="Gray"
-                           Margin="0,0,0,6"
-                           TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="接口地址" VerticalAlignment="Center" />
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{Binding LlmBaseUrl, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="OpenAI 兼容协议端点（POST /chat/completions），如 https://api.deepseek.com" />
 
-                <TextBlock Grid.Row="2" Grid.Column="0" Text="API Key" VerticalAlignment="Center" />
-                <PasswordBox x:Name="ApiKeyPasswordBox"
-                             Grid.Row="2" Grid.Column="1"
-                             Margin="0,0,0,4"
-                             VerticalContentAlignment="Center" />
+                        <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="OpenAI 兼容协议端点（POST /chat/completions），如 https://api.deepseek.com 或 https://api.deepseek.com/v1；cc-switch 的 /anthropic 地址是 Anthropic 协议，不适用。"
+                                   FontSize="11"
+                                   Foreground="Gray"
+                                   Margin="0,0,0,6"
+                                   TextWrapping="Wrap" />
 
-                <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
-                           Text="API Key 留空表示保持原密钥，输入新值将在保存时重新加密覆盖。"
-                           FontSize="11"
-                           Foreground="Gray"
-                           Margin="0,0,0,6" />
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="API Key" VerticalAlignment="Center" />
+                        <PasswordBox x:Name="ApiKeyPasswordBox"
+                                     Grid.Row="2" Grid.Column="1"
+                                     Margin="0,0,0,4"
+                                     VerticalContentAlignment="Center" />
 
-                <TextBlock Grid.Row="4" Grid.Column="0" Text="模型" VerticalAlignment="Center" />
-                <ComboBox Grid.Row="4" Grid.Column="1"
-                          ItemsSource="{Binding ModelOptions}"
-                          Text="{Binding LlmModel, UpdateSourceTrigger=PropertyChanged}"
-                          IsEditable="True"
-                          VerticalContentAlignment="Center" />
+                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="API Key 留空表示保持原密钥，输入新值将在保存时重新加密覆盖。"
+                                   FontSize="11"
+                                   Foreground="Gray"
+                                   Margin="0,0,0,6" />
 
-                <!-- 测试连接：校验接口地址与 API Key，成功后按端点实际支持刷新模型下拉；保存仅落盘 LLM 配置 -->
-                <StackPanel Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2"
-                            Orientation="Horizontal" Margin="0,8,0,0">
-                    <Button Content="测试连接"
-                            Padding="14,4"
-                            Command="{Binding TestLlmConnectionCommand}" />
-                    <Button Content="保存"
-                            Padding="14,4"
-                            Margin="8,0,0,0"
-                            Command="{Binding SaveLlmConfigCommand}"
-                            ToolTip="仅保存 LLM 配置（接口地址/模型/API Key），不关闭窗口" />
-                    <TextBlock Text="{Binding LlmTestStatusText}"
-                               Foreground="{Binding LlmTestStatusColor}"
-                               Margin="10,0,0,0"
-                               VerticalAlignment="Center"
-                               TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-            </Grid>
-        </GroupBox>
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="模型" VerticalAlignment="Center" />
+                        <ComboBox Grid.Row="4" Grid.Column="1"
+                                  ItemsSource="{Binding ModelOptions}"
+                                  Text="{Binding LlmModel, UpdateSourceTrigger=PropertyChanged}"
+                                  IsEditable="True"
+                                  VerticalContentAlignment="Center" />
 
-        <!-- 模板搜索目录：目录列表加添加/移除按钮，供模板包管理扫描用户级模板包 -->
-        <GroupBox Grid.Row="2" Header="模板搜索目录" Padding="8" Margin="0,0,0,12">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <ListBox Grid.Column="0"
-                         ItemsSource="{Binding TemplateDirectories}"
-                         SelectedItem="{Binding SelectedTemplateDirectory}"
-                         Margin="0,0,8,0" />
-                <StackPanel Grid.Column="1">
-                    <Button Content="添加..."
-                            Margin="0,0,0,8"
-                            Padding="14,4"
-                            Command="{Binding AddTemplateDirectoryCommand}" />
-                    <Button Content="移除"
-                            Padding="14,4"
-                            Command="{Binding RemoveTemplateDirectoryCommand}" />
-                </StackPanel>
-            </Grid>
-        </GroupBox>
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="请求超时（秒）" VerticalAlignment="Center" />
+                        <TextBox Grid.Row="5" Grid.Column="1"
+                                 Text="{Binding LlmTimeoutSeconds, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="调用 LLM 请求超时秒数，默认 300 秒；写模板/改模板与测试连接共用" />
 
-        <!-- 最近相对输出根：单值记忆上次语义，批量代码生成相对输出根默认值 -->
-        <GroupBox Grid.Row="3" Header="最近代码目录" Padding="8" Margin="0,0,0,12">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <TextBox Grid.Row="0"
-                         Text="{Binding LastRelativeOutputRoot, UpdateSourceTrigger=PropertyChanged}"
-                         VerticalContentAlignment="Center" />
-                <TextBlock Grid.Row="1"
-                           Text="package，如 com.example.common；批量代码生成完成后会自动回写最新值，落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…"
-                           FontSize="11"
-                           Foreground="Gray"
-                           Margin="0,4,0,0" />
-            </Grid>
-        </GroupBox>
+                        <!-- 测试连接：校验接口地址与 API Key，成功后按端点实际支持刷新模型下拉；保存仅落盘 LLM 配置 -->
+                        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button Content="测试连接"
+                                    Padding="14,4"
+                                    Command="{Binding TestLlmConnectionCommand}" />
+                            <Button Content="保存"
+                                    Padding="14,4"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding SaveLlmConfigCommand}"
+                                    ToolTip="仅保存 LLM 配置（接口地址/模型/API Key），不关闭窗口" />
+                            <TextBlock Text="{Binding LlmTestStatusText}"
+                                       Foreground="{Binding LlmTestStatusColor}"
+                                       Margin="10,0,0,0"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </Grid>
+                </GroupBox>
 
-        <!-- 底部操作按钮：左侧类型映射入口，右侧保存触发校验落盘、取消直接关闭不保存 -->
-        <Grid Grid.Row="4">
+                <!-- AI 参考文件限制：数量/单文件/总大小上限，写模板与改模板上传参考文件时共用校验 -->
+                <GroupBox Header="AI 参考文件限制" Padding="8" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="110" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="数量上限" VerticalAlignment="Center" />
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{Binding AiReferenceMaxFileCount, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="参考文件数量上限，默认 20 个" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="单文件上限" VerticalAlignment="Center" />
+                        <TextBox Grid.Row="1" Grid.Column="1"
+                                 Text="{Binding AiReferenceMaxSingleFileMb, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="单文件大小上限（MB），默认 1 MB" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="总大小上限" VerticalAlignment="Center" />
+                        <TextBox Grid.Row="2" Grid.Column="1"
+                                 Text="{Binding AiReferenceMaxTotalMb, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,4"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="参考文件总大小上限（MB），默认 10 MB" />
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                                   Text="上传参考文件时按此限制校验：数量上限为文件个数、单文件上限不得大于总大小上限；写模板与改模板共用此限制。"
+                                   FontSize="11"
+                                   Foreground="Gray"
+                                   Margin="0,0,0,0"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </GroupBox>
+
+                <!-- 模板搜索目录：目录列表加添加/移除按钮，供模板包管理扫描用户级模板包 -->
+                <GroupBox Header="模板搜索目录" Padding="8" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ListBox Grid.Column="0"
+                                 MinHeight="140"
+                                 ItemsSource="{Binding TemplateDirectories}"
+                                 SelectedItem="{Binding SelectedTemplateDirectory}"
+                                 Margin="0,0,8,0" />
+                        <StackPanel Grid.Column="1">
+                            <Button Content="添加..."
+                                    Margin="0,0,0,8"
+                                    Padding="14,4"
+                                    Command="{Binding AddTemplateDirectoryCommand}" />
+                            <Button Content="移除"
+                                    Padding="14,4"
+                                    Command="{Binding RemoveTemplateDirectoryCommand}" />
+                        </StackPanel>
+                    </Grid>
+                </GroupBox>
+
+                <!-- 最近相对输出根：单值记忆上次语义，批量代码生成相对输出根默认值 -->
+                <GroupBox Header="最近代码目录" Padding="8" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBox Grid.Row="0"
+                                 Text="{Binding LastRelativeOutputRoot, UpdateSourceTrigger=PropertyChanged}"
+                                 VerticalContentAlignment="Center" />
+                        <TextBlock Grid.Row="1"
+                                   Text="package，如 com.example.common；批量代码生成完成后会自动回写最新值，落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…"
+                                   FontSize="11"
+                                   Foreground="Gray"
+                                   Margin="0,4,0,0" />
+                    </Grid>
+                </GroupBox>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- 底部操作按钮：左侧类型映射入口，右侧保存触发校验落盘、取消直接关闭不保存；固定不随配置区滚动 -->
+        <Grid Grid.Row="1" Margin="0,12,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />

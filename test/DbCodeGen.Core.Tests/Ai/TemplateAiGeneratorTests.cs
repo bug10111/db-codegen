@@ -170,8 +170,7 @@ public sealed class TemplateAiGeneratorTests : IDisposable
         return new AiTemplateGenerationRequest
         {
             TechStackDescription = "Java + MyBatis-Plus，三层分层",
-            SampleTable = BuildSampleTable(),
-            IncludeEasyCodeReference = false
+            SampleTable = BuildSampleTable()
         };
     }
 
@@ -229,6 +228,25 @@ public sealed class TemplateAiGeneratorTests : IDisposable
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json")
         };
+    }
+
+    /// <summary>
+    /// 从 LLM 请求体 JSON 中提取首条用户消息内容，用于断言提示词注入结果。
+    /// </summary>
+    /// <param name="requestBody">LLM 请求体 JSON 文本。</param>
+    /// <returns>用户消息内容文本。</returns>
+    private static string GetUserPromptFromRequestBody(string requestBody)
+    {
+        using JsonDocument document = JsonDocument.Parse(requestBody);
+        JsonElement messagesElement = document.RootElement.GetProperty("messages");
+
+        // 提取 role 为 user 的首条消息
+        JsonElement userMessageElement = messagesElement
+            .EnumerateArray()
+            .First(message => message.GetProperty("role").GetString() == "user");
+
+        // 取消息 content 文本作为用户提示词
+        return userMessageElement.GetProperty("content").GetString() ?? string.Empty;
     }
 
     /// <summary>
@@ -601,6 +619,61 @@ public sealed class TemplateAiGeneratorTests : IDisposable
         string systemContent = document.RootElement.GetProperty("messages")[0].GetProperty("content").GetString() ?? string.Empty;
         Assert.Contains("table.className", systemContent);
         Assert.Contains("tool", systemContent);
+    }
+
+    /// <summary>
+    /// 请求携带参考文件时，用户提示词应按文件名标记逐文件注入内容快照，且不再出现 easycode 参考素材段落。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_WithReferenceFiles_InjectsMarkedContent()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string packageJson = BuildPackageDocumentJson(
+            "ref-pkg",
+            ("entity.java.scriban", "{{package.dir}}/entity/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationRequest request = BuildRequest();
+        request.ReferenceFiles = new List<AiReferenceFileItem>
+        {
+            new("CommonMapper.cs", 42, "namespace Demo; class CommonMapper { }"),
+            new("base.scriban", 20, "Hello from base template")
+        };
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(request, overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        string userContent = GetUserPromptFromRequestBody(Assert.Single(handler.RequestBodies));
+        Assert.Contains("### CommonMapper.cs", userContent);
+        Assert.Contains("namespace Demo; class CommonMapper { }", userContent);
+        Assert.Contains("### base.scriban", userContent);
+        Assert.Contains("Hello from base template", userContent);
+        Assert.DoesNotContain("easycode", userContent);
+    }
+
+    /// <summary>
+    /// 请求不带参考文件时，用户提示词不含参考文件段落与文件名标记。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_NoReferenceFiles_OmitsReferenceParagraph()
+    {
+        ConfigService config = CreateConfigService();
+        TemplatePackageService service = CreatePackageService();
+        string packageJson = BuildPackageDocumentJson(
+            "no-ref-pkg",
+            ("entity.java.scriban", "{{package.dir}}/entity/{{table.className}}.java", "class {{table.className}} {}"));
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(packageJson)));
+        TemplateAiGenerator generator = CreateGenerator(config, service, handler, TemplateSpec);
+
+        AiTemplateGenerationResult result = await generator.GenerateAsync(BuildRequest(), overwrite: false, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        string userContent = GetUserPromptFromRequestBody(Assert.Single(handler.RequestBodies));
+        Assert.DoesNotContain("参考文件", userContent);
+        Assert.DoesNotContain("### ", userContent);
+        Assert.DoesNotContain("easycode", userContent);
     }
 
     /// <summary>

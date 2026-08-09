@@ -14,7 +14,7 @@ using DbCodeGen.Core.Security;
 namespace DbCodeGen.App.ViewModels;
 
 /// <summary>
-/// 设置窗口视图模型，承载工作区根、LLM 配置、模板搜索目录与最近相对输出根四项配置的加载、校验与保存。
+/// 设置窗口视图模型，承载工作区根、LLM 配置、模板搜索目录、最近相对输出根与 AI 参考文件限制五项配置的加载、校验与保存。
 /// </summary>
 public sealed partial class SettingsViewModel : ObservableObject
 {
@@ -53,6 +53,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string _llmModel = string.Empty;
 
     /// <summary>
+    /// LLM 请求超时秒数，默认 300；写模板/改模板调用 LLM 与测试连接共用。
+    /// </summary>
+    [ObservableProperty]
+    private int _llmTimeoutSeconds = LlmConfig.DefaultTimeoutSeconds;
+
+    /// <summary>
     /// 模型下拉候选项，初始为常用模型清单与已保存模型，测试连接成功后按端点实际支持刷新。
     /// </summary>
     public ObservableCollection<string> ModelOptions { get; } = new();
@@ -81,6 +87,24 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     private string _lastRelativeOutputRoot = string.Empty;
+
+    /// <summary>
+    /// AI 参考文件数量上限，单位个，默认 20。
+    /// </summary>
+    [ObservableProperty]
+    private int _aiReferenceMaxFileCount = AiReferenceFileLimits.DefaultMaxFileCount;
+
+    /// <summary>
+    /// AI 参考文件单文件大小上限，单位 MB，默认 1。
+    /// </summary>
+    [ObservableProperty]
+    private int _aiReferenceMaxSingleFileMb = (int)(AiReferenceFileLimits.DefaultMaxSingleFileBytes / 1048576);
+
+    /// <summary>
+    /// AI 参考文件总大小上限，单位 MB，默认 10。
+    /// </summary>
+    [ObservableProperty]
+    private int _aiReferenceMaxTotalMb = (int)(AiReferenceFileLimits.DefaultMaxTotalBytes / 1048576);
 
     /// <summary>
     /// 模板搜索目录列表，支持添加与移除。
@@ -242,7 +266,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             BaseUrl = LlmBaseUrl.Trim(),
             Model = LlmModel.Trim(),
-            ApiKey = apiKey
+            ApiKey = apiKey,
+            TimeoutSeconds = LlmTimeoutSeconds
         };
 
         IsTestingLlm = true;
@@ -334,10 +359,18 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
+        // 请求超时必须为正整数，防止非法值使 LLM 调用瞬间超时或无限挂起
+        if (LlmTimeoutSeconds < 1)
+        {
+            _dialogService.ShowError("请求超时必须为不小于 1 的整数（秒）。");
+            return;
+        }
+
         // 将 LLM 表单值写入配置快照；apiKey 输入新值则重新加密覆盖，留空保持原密文
         AppConfig config = _configService.Current;
         config.Llm.BaseUrl = LlmBaseUrl.Trim();
         config.Llm.Model = LlmModel.Trim();
+        config.Llm.TimeoutSeconds = LlmTimeoutSeconds;
         if (!string.IsNullOrWhiteSpace(ApiKeyInput))
         {
             config.Llm.ApiKeyEncrypted = _credentialProtector.Encrypt(ApiKeyInput);
@@ -374,7 +407,13 @@ public sealed partial class SettingsViewModel : ObservableObject
         config.LastRelativeOutputRoot = LastRelativeOutputRoot;
         config.Llm.BaseUrl = LlmBaseUrl.Trim();
         config.Llm.Model = LlmModel.Trim();
+        config.Llm.TimeoutSeconds = LlmTimeoutSeconds;
         config.TemplateSearchDirectories = BuildDeduplicatedTemplateDirectories();
+
+        // AI 参考文件限制：MB×1024×1024 换算字节写入配置快照，以 long 运算防溢出
+        config.AiReferenceFileLimits.MaxFileCount = AiReferenceMaxFileCount;
+        config.AiReferenceFileLimits.MaxSingleFileBytes = AiReferenceMaxSingleFileMb * 1024L * 1024L;
+        config.AiReferenceFileLimits.MaxTotalBytes = AiReferenceMaxTotalMb * 1024L * 1024L;
 
         if (!string.IsNullOrWhiteSpace(ApiKeyInput))
         {
@@ -407,7 +446,13 @@ public sealed partial class SettingsViewModel : ObservableObject
         WorkspaceRoot = config.WorkspaceRoot;
         LlmBaseUrl = config.Llm.BaseUrl;
         LlmModel = config.Llm.Model;
+        LlmTimeoutSeconds = config.Llm.TimeoutSeconds;
         LastRelativeOutputRoot = config.LastRelativeOutputRoot;
+
+        // AI 参考文件限制：字节→MB 换算，向下取整且至少为 1，展示值不高于实际上限不虚标
+        AiReferenceMaxFileCount = config.AiReferenceFileLimits.MaxFileCount;
+        AiReferenceMaxSingleFileMb = Math.Max(1, (int)(config.AiReferenceFileLimits.MaxSingleFileBytes / 1048576.0));
+        AiReferenceMaxTotalMb = Math.Max(1, (int)(config.AiReferenceFileLimits.MaxTotalBytes / 1048576.0));
 
         TemplateDirectories.Clear();
         foreach (string directory in config.TemplateSearchDirectories)
@@ -464,6 +509,38 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(LlmModel))
         {
             errorMessage = "LLM 模型名不能为空。";
+            return false;
+        }
+
+        // 请求超时必须为正整数，防止非法值使 LLM 调用瞬间超时或无限挂起
+        if (LlmTimeoutSeconds < 1)
+        {
+            errorMessage = "请求超时必须为不小于 1 的整数（秒）。";
+            return false;
+        }
+
+        // AI 参考文件限制三个值均必须为正整数，且单文件上限不得大于总大小上限，防止 F02/F03 校验死锁
+        if (AiReferenceMaxFileCount < 1)
+        {
+            errorMessage = "参考文件数量上限必须为不小于 1 的整数。";
+            return false;
+        }
+
+        if (AiReferenceMaxSingleFileMb < 1)
+        {
+            errorMessage = "单文件大小上限必须为不小于 1 的整数（MB）。";
+            return false;
+        }
+
+        if (AiReferenceMaxTotalMb < 1)
+        {
+            errorMessage = "总大小上限必须为不小于 1 的整数（MB）。";
+            return false;
+        }
+
+        if (AiReferenceMaxSingleFileMb > AiReferenceMaxTotalMb)
+        {
+            errorMessage = "单文件大小上限不得大于总大小上限。";
             return false;
         }
 

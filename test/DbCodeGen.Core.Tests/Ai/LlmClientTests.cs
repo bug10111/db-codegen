@@ -203,6 +203,34 @@ public class LlmClientTests
     }
 
     /// <summary>
+    /// 请求超时（调用方令牌未取消）应映射为可读超时失败，而不是向上抛取消异常。
+    /// </summary>
+    [Fact]
+    public async Task ChatCompletionAsync_TimeoutExceeded_ReturnsTimeoutFailure()
+    {
+        LlmClient client = new(NullLogger<LlmClient>.Instance, new HttpClient(new TimeoutHttpMessageHandler()));
+        LlmClientOptions options = CreateOptions();
+        options.TimeoutSeconds = 1;
+
+        LlmChatResponse response = await client.ChatCompletionAsync(CreateChatRequest(), options, CancellationToken.None);
+
+        Assert.False(response.IsSuccess);
+        Assert.Contains("超时", response.ErrorMessage);
+    }
+
+    /// <summary>
+    /// 构造带模型与消息的最小对话请求，供直接调用 ChatCompletionAsync 的用例使用。
+    /// </summary>
+    private static LlmChatRequest CreateChatRequest()
+    {
+        return new LlmChatRequest
+        {
+            Model = "qwen-plus",
+            Messages = new List<LlmChatMessage> { new() { Role = "user", Content = "hello" } }
+        };
+    }
+
+    /// <summary>
     /// 构造带默认端点、模型与密钥的瞬态调用配置。
     /// </summary>
     private static LlmClientOptions CreateOptions()
@@ -241,6 +269,19 @@ public class LlmClientTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             return Task.FromResult(_responder(request));
+        }
+    }
+
+    /// <summary>
+    /// mock 迟迟不响应的 LLM 端点：发送请求后挂起直至请求令牌取消，模拟服务端生成超时。
+    /// </summary>
+    private sealed class TimeoutHttpMessageHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // 挂起等待请求令牌取消（超时或调用方取消触发），模拟服务端迟迟不返回响应
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("不应走到返回响应分支");
         }
     }
 }

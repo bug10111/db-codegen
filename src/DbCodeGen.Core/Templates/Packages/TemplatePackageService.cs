@@ -197,7 +197,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
     /// <inheritdoc />
     public async Task<TemplatePackageOperationResult> CreatePackageAsync(
-        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken)
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken)
     {
         return await _gate.ExecuteExclusiveAsync(
             token => CreatePackageCoreAsync(packageName, description, firstTemplatePath, firstOutputPath, token),
@@ -223,27 +223,34 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     }
 
     /// <summary>
-    /// 新建包核心流程：校验包名与首文件路径 → 内置包同名只读拒绝 → 用户包同名冲突拒绝 →
-    /// 建目录写清单并创建首模板空文件 → 重新校验返回。
+    /// 新建包核心流程：校验包名与首文件路径（可空）→ 内置包同名只读拒绝 → 用户包同名冲突拒绝 →
+    /// 建目录写清单（首文件为空则写空 files 清单、不建物理文件）→ 重新校验返回。
     /// </summary>
     private async Task<TemplatePackageOperationResult> CreatePackageCoreAsync(
-        string packageName, string description, string firstTemplatePath, string firstOutputPath, CancellationToken cancellationToken)
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken)
     {
         if (!TemplatePackageLoader.IsValidPackageName(packageName))
         {
             return TemplatePackageOperationResult.Invalid($"包名不合法（须为字母/数字/中划线/下划线且不含路径分隔符或 ..）：{packageName}");
         }
 
-        string? normalizedTemplate = NormalizeSafeRelativePath(firstTemplatePath);
-        string? normalizedOutput = NormalizeSafeRelativePath(firstOutputPath);
-        if (normalizedTemplate is null)
+        // 首模板文件路径可空：为空创建空包，非空则须通过安全校验，把"未提供首文件"与"路径不合法"区分开
+        bool hasFirstFile = !string.IsNullOrWhiteSpace(firstTemplatePath);
+        string? normalizedTemplate = null;
+        string? normalizedOutput = null;
+        if (hasFirstFile)
         {
-            return TemplatePackageOperationResult.Invalid($"首模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstTemplatePath}");
-        }
+            normalizedTemplate = NormalizeSafeRelativePath(firstTemplatePath);
+            if (normalizedTemplate is null)
+            {
+                return TemplatePackageOperationResult.Invalid($"首模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstTemplatePath}");
+            }
 
-        if (normalizedOutput is null)
-        {
-            return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstOutputPath}");
+            normalizedOutput = NormalizeSafeRelativePath(firstOutputPath);
+            if (normalizedOutput is null)
+            {
+                return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径、.. 段与盘符前缀）：{firstOutputPath}");
+            }
         }
 
         // 与内置包同名：内置包只读，新建直接拒绝，不进入覆盖流程
@@ -268,36 +275,41 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         {
             Directory.CreateDirectory(targetDirectory);
 
-            // 写入 template.json 清单：固定 scriban 引擎并声明首模板文件条目
+            // 写入 template.json 清单：固定 scriban 引擎；提供首文件时声明首模板条目，否则写空 files 清单
             var manifest = new TemplateManifest
             {
                 Name = packageName,
                 Description = description?.Trim() ?? string.Empty,
                 Engine = TemplatePackageLoader.SupportedEngine,
-                Files = new List<TemplateFileEntry>
-                {
-                    new()
+                Files = hasFirstFile
+                    ? new List<TemplateFileEntry>
                     {
-                        Template = normalizedTemplate,
-                        Output = normalizedOutput,
-                        Enabled = true
+                        new()
+                        {
+                            Template = normalizedTemplate!,
+                            Output = normalizedOutput!,
+                            Enabled = true
+                        }
                     }
-                }
+                    : new List<TemplateFileEntry>()
             };
 
             string manifestPath = Path.Combine(targetDirectory, TemplatePackageLoader.ManifestFileName);
             string json = JsonSerializer.Serialize(manifest, TemplatePackageLoader.JsonOptions);
             await File.WriteAllTextAsync(manifestPath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
 
-            // 创建首模板空文件并自动建父目录（分组目录），保证清单 files 引用的文件真实存在
-            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(targetDirectory, normalizedTemplate);
-            string? parentDirectory = Path.GetDirectoryName(templateFullPath);
-            if (!string.IsNullOrEmpty(parentDirectory))
+            // 提供首文件时创建首模板空文件并自动建父目录（分组目录），保证清单 files 引用的文件真实存在
+            if (hasFirstFile)
             {
-                Directory.CreateDirectory(parentDirectory);
-            }
+                string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(targetDirectory, normalizedTemplate!);
+                string? parentDirectory = Path.GetDirectoryName(templateFullPath);
+                if (!string.IsNullOrEmpty(parentDirectory))
+                {
+                    Directory.CreateDirectory(parentDirectory);
+                }
 
-            await File.WriteAllTextAsync(templateFullPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+                await File.WriteAllTextAsync(templateFullPath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+            }
 
             TemplatePackageInfo created = await TemplatePackageLoader.LoadFromDirectoryAsync(targetDirectory, isBuiltin: false, cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("已创建用户模板包：{PackageName}，目录：{Directory}。", packageName, targetDirectory);
@@ -336,7 +348,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
         if (package.IsBuiltin)
         {
-            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可新增模板文件。");
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可新增模板。");
         }
 
         string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
@@ -387,13 +399,13 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
         {
             _logger.LogError(exception, "新增模板文件失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
-            return TemplatePackageOperationResult.Failure($"新增模板文件失败：{exception.Message}");
+            return TemplatePackageOperationResult.Failure($"新增模板失败：{exception.Message}");
         }
     }
 
     /// <summary>
-    /// 删除文件核心流程：加载包并校验内置只读 → 文件不存在拒绝 → 仅剩一个文件拒绝 →
-    /// 删除文件并移除 manifest 条目重写 → 重新校验返回。
+    /// 删除文件核心流程：加载包并校验内置只读 → 文件不存在拒绝 →
+    /// 删除文件并移除 manifest 条目重写 → 重新校验返回。允许删除最后一个模板，包可变为空包。
     /// </summary>
     private async Task<TemplatePackageOperationResult> DeleteTemplateFileCoreAsync(
         string packageName, string templateRelativePath, CancellationToken cancellationToken)
@@ -410,7 +422,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
         if (package.IsBuiltin)
         {
-            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可删除模板文件。");
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可删除模板。");
         }
 
         string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
@@ -427,19 +439,8 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
                 return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedTemplate}");
             }
 
-            // 至少保留一个文件，防止清单 files 为空导致重新校验失败；按"仍有其他条目存续"判断，
-            // 避免清单存在同一模板路径多条重复条目时按计数放行却把条目全部移除的清空
-            bool hasSurvivingEntry = package.Files.Any(file =>
-                !string.Equals(
-                    TemplatePackageLoader.NormalizeRelativePath(file.RelativeTemplatePath),
-                    normalizedTemplate,
-                    StringComparison.OrdinalIgnoreCase));
-            if (!hasSurvivingEntry)
-            {
-                return TemplatePackageOperationResult.Failure("模板包至少保留一个模板文件，删除最后一个文件被拒绝。");
-            }
-
-            // 先移除 manifest 对应条目并写回，成功后再删文件，避免清单写失败留下损坏包
+            // 先移除 manifest 对应条目并写回，成功后再删文件，避免清单写失败留下损坏包；
+            // 删除最后一个模板后包变为空包，空 files 清单由 loader 放行可重新校验
             await RemoveManifestFileEntryAsync(package, normalizedTemplate, cancellationToken).ConfigureAwait(false);
             File.Delete(templateFullPath);
 
@@ -450,7 +451,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
         {
             _logger.LogError(exception, "删除模板文件失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
-            return TemplatePackageOperationResult.Failure($"删除模板文件失败：{exception.Message}");
+            return TemplatePackageOperationResult.Failure($"删除模板失败：{exception.Message}");
         }
     }
 
@@ -459,9 +460,9 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移；
     /// 规范化后逐段校验非法文件名字符，避免 Path.GetFullPath 抛出未处理异常并落盘脏数据。
     /// </summary>
-    /// <param name="relativePath">待校验的相对路径。</param>
+    /// <param name="relativePath">待校验的相对路径，可为空（为空视为未提供路径，返回 null）。</param>
     /// <returns>规范化后的安全相对路径；为空或含绝对路径、盘符前缀、.. 段、非法字符时返回 null。</returns>
-    private static string? NormalizeSafeRelativePath(string relativePath)
+    private static string? NormalizeSafeRelativePath(string? relativePath)
     {
         if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath) || relativePath.Contains(':'))
         {

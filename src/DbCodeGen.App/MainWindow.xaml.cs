@@ -9,6 +9,7 @@ using DbCodeGen.App.Views;
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
+using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Highlighting;
 using Microsoft.Extensions.Logging;
 
@@ -25,7 +26,7 @@ public partial class MainWindow : Window
     private readonly IDialogService _dialogService;
     private readonly Func<DataSourceManagerWindow> _dataSourceManagerWindowFactory;
     private readonly Func<SettingsWindow> _settingsWindowFactory;
-    private readonly Func<AiTemplateWizardWindow> _aiWizardWindowFactory;
+    private readonly IAiTemplateAssistantWindowService _aiTemplateAssistantWindowService;
     private readonly Func<SqlExecutorWindow> _sqlExecutorWindowFactory;
     private readonly Func<MigrationWindow> _migrationWindowFactory;
     private readonly Func<TypeMappingWindow> _typeMappingWindowFactory;
@@ -48,7 +49,7 @@ public partial class MainWindow : Window
     private bool _isLoadingDocument;
 
     /// <summary>
-    /// 使用配置服务、当前连接服务、对话框服务、数据源管理窗口工厂、设置窗口工厂、AI 向导窗口工厂、
+    /// 使用配置服务、当前连接服务、对话框服务、数据源管理窗口工厂、设置窗口工厂、AI 模板助手窗口宿主服务、
     /// SQL 执行面板窗口工厂、迁移窗口工厂、类型映射窗口工厂、模板包管理窗口工厂、表列表视图模型、
     /// 模板编辑器视图模型、预览视图模型、高亮服务与日志器构造主窗口。
     /// </summary>
@@ -57,7 +58,7 @@ public partial class MainWindow : Window
     /// <param name="dialogService">消息提示服务，用于打开管理窗口失败等场景反馈。</param>
     /// <param name="dataSourceManagerWindowFactory">数据源管理窗口工厂，供“管理…”入口按需创建。</param>
     /// <param name="settingsWindowFactory">设置窗口工厂，供“文件”菜单“设置…”入口按需创建。</param>
-    /// <param name="aiWizardWindowFactory">AI 生成模板向导窗口工厂，供“工具”菜单入口按需创建。</param>
+    /// <param name="aiTemplateAssistantWindowService">AI 模板助手窗口宿主服务，供②工具条“AI 写模板 / AI 改模板”入口打开/激活窗口并切对应 Tab。</param>
     /// <param name="sqlExecutorWindowFactory">SQL 执行面板窗口工厂，供“工具”菜单入口按需创建。</param>
     /// <param name="migrationWindowFactory">迁移窗口工厂，供“工具”菜单“备份/恢复…”入口按需创建。</param>
     /// <param name="typeMappingWindowFactory">类型映射窗口工厂，供“工具”菜单“类型映射…”入口按需创建。</param>
@@ -75,7 +76,7 @@ public partial class MainWindow : Window
         IDialogService dialogService,
         Func<DataSourceManagerWindow> dataSourceManagerWindowFactory,
         Func<SettingsWindow> settingsWindowFactory,
-        Func<AiTemplateWizardWindow> aiWizardWindowFactory,
+        IAiTemplateAssistantWindowService aiTemplateAssistantWindowService,
         Func<SqlExecutorWindow> sqlExecutorWindowFactory,
         Func<MigrationWindow> migrationWindowFactory,
         Func<TypeMappingWindow> typeMappingWindowFactory,
@@ -92,7 +93,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(dataSourceManagerWindowFactory);
         ArgumentNullException.ThrowIfNull(settingsWindowFactory);
-        ArgumentNullException.ThrowIfNull(aiWizardWindowFactory);
+        ArgumentNullException.ThrowIfNull(aiTemplateAssistantWindowService);
         ArgumentNullException.ThrowIfNull(sqlExecutorWindowFactory);
         ArgumentNullException.ThrowIfNull(migrationWindowFactory);
         ArgumentNullException.ThrowIfNull(typeMappingWindowFactory);
@@ -110,7 +111,7 @@ public partial class MainWindow : Window
         _dialogService = dialogService;
         _dataSourceManagerWindowFactory = dataSourceManagerWindowFactory;
         _settingsWindowFactory = settingsWindowFactory;
-        _aiWizardWindowFactory = aiWizardWindowFactory;
+        _aiTemplateAssistantWindowService = aiTemplateAssistantWindowService;
         _sqlExecutorWindowFactory = sqlExecutorWindowFactory;
         _migrationWindowFactory = migrationWindowFactory;
         _typeMappingWindowFactory = typeMappingWindowFactory;
@@ -243,21 +244,36 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 点击菜单“AI 生成模板…”打开 AI 生成模板向导窗口，向导内完成 LLM 配置检查与样例表选择。
+    /// 点击②工具条「AI 写模板」打开/激活「AI 模板助手」窗口并切到写模板 Tab，
+    /// 窗口单开复用生命周期由注入的窗口宿主服务承载。
     /// </summary>
-    private void OnOpenAiWizardClick(object sender, RoutedEventArgs e)
+    private async void OnAiWriteTemplateClick(object sender, RoutedEventArgs e)
     {
         try
         {
-            AiTemplateWizardWindow window = _aiWizardWindowFactory();
-            window.Owner = this;
-            window.ShowDialog();
+            await _aiTemplateAssistantWindowService.ShowAsync(AiAssistantTab.Write);
         }
         catch (Exception exception)
         {
             // 窗口创建或展示失败时给用户可读提示，不中断主窗口运行
-            _dialogService.ShowError($"打开 AI 生成模板向导失败：{exception.Message}");
-            return;
+            _dialogService.ShowError($"打开 AI 模板助手失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 点击②工具条「AI 改模板」打开/激活「AI 模板助手」窗口并切到改模板 Tab，
+    /// 窗口单开复用生命周期由注入的窗口宿主服务承载。
+    /// </summary>
+    private async void OnAiModifyTemplateClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await _aiTemplateAssistantWindowService.ShowAsync(AiAssistantTab.Modify);
+        }
+        catch (Exception exception)
+        {
+            // 窗口创建或展示失败时给用户可读提示，不中断主窗口运行
+            _dialogService.ShowError($"打开 AI 模板助手失败：{exception.Message}");
         }
     }
 
@@ -416,7 +432,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 文件树行右键按下时选中该行，保证上下文菜单“删除模板文件”作用于右键目标而非上次左键选中项。
+    /// 文件树行右键按下时选中该行，保证上下文菜单“删除模板”作用于右键目标而非上次左键选中项。
     /// </summary>
     private void OnTemplateFileListItemPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -435,6 +451,7 @@ public partial class MainWindow : Window
         _templateViewModel.ClearDocumentRequested += OnClearDocumentRequested;
         _templateViewModel.LanguageChanged += OnLanguageChanged;
         _templateViewModel.InsertVariableRequested += OnInsertVariableRequested;
+        _templateViewModel.ReplaceDocumentRequested += OnReplaceDocumentRequested;
         _previewViewModel.PreviewTextChanged += OnPreviewTextChanged;
         _previewViewModel.NavigateToEditor += OnNavigateToEditor;
     }
@@ -448,6 +465,7 @@ public partial class MainWindow : Window
         _templateViewModel.ClearDocumentRequested -= OnClearDocumentRequested;
         _templateViewModel.LanguageChanged -= OnLanguageChanged;
         _templateViewModel.InsertVariableRequested -= OnInsertVariableRequested;
+        _templateViewModel.ReplaceDocumentRequested -= OnReplaceDocumentRequested;
         _previewViewModel.PreviewTextChanged -= OnPreviewTextChanged;
         _previewViewModel.NavigateToEditor -= OnNavigateToEditor;
     }
@@ -482,6 +500,31 @@ public partial class MainWindow : Window
             _isLoadingDocument = false;
         }
 
+        TemplateEditor.CaretOffset = 0;
+        TemplateEditor.Focus();
+    }
+
+    /// <summary>
+    /// 整体替换模板编辑器文本：AI 改模板「应用到编辑器」经 TemplateViewModel.ApplyAiEditedTemplate 触发。
+    /// 加载期间抑制置脏，写入后清空撤销栈防止回退到 AI 替换前状态，光标归零并聚焦编辑器。
+    /// </summary>
+    /// <param name="text">AI 返回的完整新模板文件内容。</param>
+    private void OnReplaceDocumentRequested(string text)
+    {
+        _isLoadingDocument = true;
+        try
+        {
+            TemplateEditor.Clear();
+            TemplateEditor.Document.Text = text;
+        }
+        finally
+        {
+            _isLoadingDocument = false;
+        }
+
+        // 清空撤销栈，防止回退到 AI 替换前的文档状态
+        TextDocument document = TemplateEditor.Document;
+        document.UndoStack.ClearAll();
         TemplateEditor.CaretOffset = 0;
         TemplateEditor.Focus();
     }

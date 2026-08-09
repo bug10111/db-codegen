@@ -1,3 +1,5 @@
+using DbCodeGen.Core.Config;
+
 namespace DbCodeGen.Core.Ai;
 
 /// <summary>
@@ -20,4 +22,9 @@ public sealed class LlmClientOptions
     /// 明文 apiKey，仅本次 HTTP 调用的内存短周期，经 IConfigService.GetLlmApiKey 解密所得。
     /// </summary>
     public string ApiKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 请求超时秒数，取自 LlmConfig.TimeoutSeconds，按本次请求生效；非正数时客户端回退默认 300。
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = LlmConfig.DefaultTimeoutSeconds;
 }

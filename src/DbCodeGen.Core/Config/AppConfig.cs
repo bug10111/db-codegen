@@ -30,6 +30,11 @@ public class AppConfig
     public LlmConfig Llm { get; set; } = new();
 
     /// <summary>
+    /// AI 参考文件限制配置，写模板与改模板上传参考文件时按数量/单文件/总大小上限共用校验。
+    /// </summary>
+    public AiReferenceFileLimits AiReferenceFileLimits { get; set; } = new();
+
+    /// <summary>
     /// 模板搜索目录列表，默认包含 %AppData%\DbCodeGen\Templates，供模板包管理扫描用户级模板包。
     /// </summary>
     public List<string> TemplateSearchDirectories { get; set; } = new();

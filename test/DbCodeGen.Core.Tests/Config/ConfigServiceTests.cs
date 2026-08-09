@@ -83,6 +83,7 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Equal("https://dashscope.aliyuncs.com/compatible-mode/v1", config.Llm.BaseUrl);
         Assert.Equal("qwen-plus", config.Llm.Model);
         Assert.Equal(string.Empty, config.Llm.ApiKeyEncrypted);
+        Assert.Equal(300, config.Llm.TimeoutSeconds);
         string expectedTemplates = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbCodeGen", "Templates");
         Assert.Contains(expectedTemplates, config.TemplateSearchDirectories);
@@ -174,6 +175,7 @@ public sealed class ConfigServiceTests : IDisposable
         config.LastRelativeOutputRoot = "src/main/java";
         config.Llm.BaseUrl = "https://custom.example.com/v1";
         config.Llm.Model = "qwen-max";
+        config.Llm.TimeoutSeconds = 240;
         config.TemplateSearchDirectories.Clear();
         config.TemplateSearchDirectories.Add(@"C:\templates\custom");
         config.TypeMappings.Clear();
@@ -200,6 +202,7 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Equal("src/main/java", loaded.LastRelativeOutputRoot);
         Assert.Equal("https://custom.example.com/v1", loaded.Llm.BaseUrl);
         Assert.Equal("qwen-max", loaded.Llm.Model);
+        Assert.Equal(240, loaded.Llm.TimeoutSeconds);
         Assert.Single(loaded.TemplateSearchDirectories);
         Assert.Equal(@"C:\templates\custom", loaded.TemplateSearchDirectories[0]);
         DataSourceConfig dataSource = Assert.Single(loaded.DataSources);
@@ -481,5 +484,128 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Empty(errors);
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(configPath));
         Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    /// <summary>
+    /// 首次启动默认配置中 AI 参考文件限制应为契约默认值：数量 20、单文件 1MB、总大小 10MB。
+    /// </summary>
+    [Fact]
+    public void Load_NoFile_AiReferenceFileLimitsHasContractDefaults()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out _);
+
+        AppConfig config = service.Load();
+
+        Assert.NotNull(config.AiReferenceFileLimits);
+        Assert.Equal(20, config.AiReferenceFileLimits.MaxFileCount);
+        Assert.Equal(1 * 1024 * 1024, config.AiReferenceFileLimits.MaxSingleFileBytes);
+        Assert.Equal(10 * 1024 * 1024, config.AiReferenceFileLimits.MaxTotalBytes);
+    }
+
+    /// <summary>
+    /// 修改 AI 参考文件限制后保存再新实例加载，三个字段应完整还原，落盘字段为 camelCase 的 aiReferenceFileLimits，验证读写幂等。
+    /// </summary>
+    [Fact]
+    public void Save_ThenNewServiceLoads_RoundTripsAiReferenceFileLimits()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        AppConfig config = service.Load();
+
+        config.AiReferenceFileLimits.MaxFileCount = 5;
+        config.AiReferenceFileLimits.MaxSingleFileBytes = 2 * 1024 * 1024;
+        config.AiReferenceFileLimits.MaxTotalBytes = 8 * 1024 * 1024;
+        service.Save();
+
+        string fileText = File.ReadAllText(configPath, Encoding.UTF8);
+        Assert.Contains("aiReferenceFileLimits", fileText);
+
+        ConfigService reloaded = CreateService(configPath);
+        AppConfig loaded = reloaded.Load();
+
+        Assert.Equal(5, loaded.AiReferenceFileLimits.MaxFileCount);
+        Assert.Equal(2 * 1024 * 1024, loaded.AiReferenceFileLimits.MaxSingleFileBytes);
+        Assert.Equal(8 * 1024 * 1024, loaded.AiReferenceFileLimits.MaxTotalBytes);
+    }
+
+    /// <summary>
+    /// 配置文件显式写入 null 的 aiReferenceFileLimits 字段时，加载后应兜底为默认实例，下游读取不抛空引用。
+    /// </summary>
+    [Fact]
+    public void Load_JsonWithNullAiReferenceFileLimits_NormalizesToDefaults()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"workspaceRoot":"","lastRelativeOutputRoot":"","aiReferenceFileLimits":null}""");
+
+        AppConfig config = service.Load();
+
+        Assert.NotNull(config.AiReferenceFileLimits);
+        Assert.Equal(20, config.AiReferenceFileLimits.MaxFileCount);
+        Assert.Equal(1 * 1024 * 1024, config.AiReferenceFileLimits.MaxSingleFileBytes);
+        Assert.Equal(10 * 1024 * 1024, config.AiReferenceFileLimits.MaxTotalBytes);
+    }
+
+    /// <summary>
+    /// 手工编辑配置使任一限制字段非正数时，加载后应恢复对应默认常量，防止非法上限生效。
+    /// </summary>
+    [Fact]
+    public void Load_AiReferenceFileLimitsNonPositive_NormalizesToDefaults()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"aiReferenceFileLimits":{"maxFileCount":0,"maxSingleFileBytes":-1,"maxTotalBytes":-5}}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(20, config.AiReferenceFileLimits.MaxFileCount);
+        Assert.Equal(1 * 1024 * 1024, config.AiReferenceFileLimits.MaxSingleFileBytes);
+        Assert.Equal(10 * 1024 * 1024, config.AiReferenceFileLimits.MaxTotalBytes);
+    }
+
+    /// <summary>
+    /// 手工编辑使单文件上限大于总大小上限时，加载后应收敛为总大小上限，防止上传校验死锁。
+    /// </summary>
+    [Fact]
+    public void Load_AiReferenceFileLimitsSingleFileExceedsTotal_ConvergesToTotal()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"aiReferenceFileLimits":{"maxFileCount":5,"maxSingleFileBytes":8,"maxTotalBytes":4}}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(5, config.AiReferenceFileLimits.MaxFileCount);
+        Assert.Equal(4, config.AiReferenceFileLimits.MaxSingleFileBytes);
+        Assert.Equal(4, config.AiReferenceFileLimits.MaxTotalBytes);
+    }
+
+    /// <summary>
+    /// 手工编辑配置使 LLM 请求超时非正数时，加载后应恢复默认 300，防止非法超时值使请求瞬间超时或无限挂起。
+    /// </summary>
+    [Fact]
+    public void Load_LlmTimeoutSecondsNonPositive_NormalizesToDefault()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"llm":{"baseUrl":"https://example.com/v1","timeoutSeconds":0}}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(300, config.Llm.TimeoutSeconds);
+    }
+
+    /// <summary>
+    /// 配置文件缺省 LLM 请求超时字段时，加载后应使用属性初始化器默认 300，旧配置自然回退无需迁移。
+    /// </summary>
+    [Fact]
+    public void Load_LlmWithoutTimeoutSeconds_DefaultsTo300()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"llm":{"baseUrl":"https://example.com/v1"}}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(300, config.Llm.TimeoutSeconds);
     }
 }

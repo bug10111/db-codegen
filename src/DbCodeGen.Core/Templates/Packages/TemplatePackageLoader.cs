@@ -6,7 +6,7 @@ namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
 /// 模板包加载与校验器：解析 template.json、校验引擎与包名、逐模板文件做防目录穿越与存在性校验，
-/// 产出运行时 TemplatePackageInfo。内置包与用户包共用同一套校验规则。
+/// 产出运行时 TemplatePackageInfo。内置包与用户包共用同一套校验规则；文件清单允许为空（空模板包）。
 /// </summary>
 public static class TemplatePackageLoader
 {
@@ -333,7 +333,7 @@ public static class TemplatePackageLoader
     }
 
     /// <summary>
-    /// 校验包名、引擎与文件清单的完整性。
+    /// 校验包名与引擎的合法性；文件清单允许为空，files 为空的包视为合法空模板包。
     /// </summary>
     /// <param name="manifest">归一化后的清单。</param>
     private static void ValidatePackageIdentity(TemplateManifest manifest)
@@ -346,11 +346,6 @@ public static class TemplatePackageLoader
         if (!string.Equals(manifest.Engine, SupportedEngine, StringComparison.OrdinalIgnoreCase))
         {
             throw new TemplatePackageException($"不支持的模板引擎：{manifest.Engine}，当前仅支持 {SupportedEngine}。");
-        }
-
-        if (manifest.Files.Count == 0)
-        {
-            throw new TemplatePackageException("清单 files 不能为空，至少声明一个模板文件。");
         }
     }
 }

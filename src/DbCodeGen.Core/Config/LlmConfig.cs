@@ -16,6 +16,11 @@ public class LlmConfig
     public const string DefaultModel = "qwen-plus";
 
     /// <summary>
+    /// 默认请求超时秒数，AI 写模板/改模板调用 LLM 的默认总超时。
+    /// </summary>
+    public const int DefaultTimeoutSeconds = 300;
+
+    /// <summary>
     /// 常用 OpenAI 兼容模型名清单，设置窗口模型下拉的初始候选项，测试连接成功后按端点实际支持刷新。
     /// </summary>
     public static readonly IReadOnlyList<string> CommonModels = new[]
@@ -50,4 +55,9 @@ public class LlmConfig
     /// 模型名，默认 qwen-plus。
     /// </summary>
     public string Model { get; set; } = DefaultModel;
+
+    /// <summary>
+    /// 调用 LLM 请求超时秒数，默认 300；按请求生效，写模板/改模板与测试连接共用。
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = DefaultTimeoutSeconds;
 }

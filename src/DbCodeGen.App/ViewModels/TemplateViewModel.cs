@@ -165,6 +165,12 @@ public sealed partial class TemplateViewModel : ObservableObject
     public TemplatePackageInfo? CurrentPackage => _currentPackage;
 
     /// <summary>
+    /// 当前已加载模板文件相对包根路径，供 AI 改模板目标展示与目标一致性守卫使用。
+    /// 未加载模板文件时返回 null。
+    /// </summary>
+    public string? CurrentFileRelativePath => _currentFile?.RelativeTemplatePath;
+
+    /// <summary>
     /// 是否持有未保存修改，供主窗口关闭前触发未保存确认。
     /// </summary>
     public bool HasDirtyDocument => IsDirty;
@@ -193,6 +199,12 @@ public sealed partial class TemplateViewModel : ObservableObject
     /// 编辑器内容变化事件，预览区订阅后重置防抖并触发渲染。
     /// </summary>
     public event Action<string>? EditorContentChanged;
+
+    /// <summary>
+    /// 替换文档请求事件，视图层订阅后在 AvalonEdit 编辑器中整体替换当前文档文本。
+    /// AI 改模板「应用到编辑器」经 ApplyAiEditedTemplate 触发，替换后重置撤销栈。
+    /// </summary>
+    public event Action<string>? ReplaceDocumentRequested;
 
     /// <summary>
     /// 使用模板包服务、模板文件读写服务、对话框服务、输入提示服务、配置服务、变量面板窗口工厂与日志器构造视图模型。
@@ -258,6 +270,21 @@ public sealed partial class TemplateViewModel : ObservableObject
         EditorText = text;
         IsDirty = !string.Equals(text, _originalText, StringComparison.Ordinal);
         EditorContentChanged?.Invoke(text);
+    }
+
+    /// <summary>
+    /// 应用 AI 改模板结果：整体替换编辑器文本并相对磁盘原文置脏，随后触发替换文档与预览渲染事件。
+    /// 仅修改内存文本，不直接写盘；落盘仍走既有保存链路（用户包写盘 / 内置包只读拒绝并复制引导）。
+    /// </summary>
+    /// <param name="newContent">AI 返回的完整新模板文件内容。</param>
+    public void ApplyAiEditedTemplate(string newContent)
+    {
+        EditorText = newContent;
+        IsDirty = !string.Equals(newContent, _originalText, StringComparison.Ordinal);
+
+        // 通知视图层替换编辑器文本并重置撤销栈，通知预览区按新内容防抖渲染
+        ReplaceDocumentRequested?.Invoke(newContent);
+        EditorContentChanged?.Invoke(newContent);
     }
 
     /// <summary>
@@ -330,13 +357,13 @@ public sealed partial class TemplateViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 新建模板包：依次询问包名、说明与首模板文件相对路径（默认 main.tpl，输出路径与首文件路径一致），
-    /// 创建成功后刷新包列表并选中新包，自动进入文件树并载入首文件。
+    /// 新建模板包：询问包名与说明后创建空包，创建成功后刷新包列表并自动选中新包，
+    /// 随后通过"新增模板"逐个添加模板文件。
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanCreatePackage))]
     private async Task CreatePackageAsync()
     {
-        // 依次收集新建包输入：包名必填，说明可空，首模板文件默认 main.tpl
+        // 收集新建包输入：包名必填，说明可空；空包创建不要求首模板文件
         string? packageName = await _promptDialogService.PromptAsync(
             "新建模板包", "请输入新包名（字母/数字/中划线/下划线）：");
         if (string.IsNullOrWhiteSpace(packageName))
@@ -351,19 +378,11 @@ public sealed partial class TemplateViewModel : ObservableObject
             return;
         }
 
-        string? templatePath = await _promptDialogService.PromptAsync(
-            "新建模板包", "请输入首模板文件相对路径（可含分组目录）：", "main.tpl");
-        if (string.IsNullOrWhiteSpace(templatePath))
-        {
-            return;
-        }
-
-        string firstTemplate = templatePath.Trim();
         IsBusy = true;
         try
         {
             TemplatePackageOperationResult result = await _packageService.CreatePackageAsync(
-                name, description.Trim(), firstTemplate, firstTemplate, CancellationToken.None);
+                name, description.Trim(), null, null, CancellationToken.None);
 
             if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
             {
@@ -373,7 +392,7 @@ public sealed partial class TemplateViewModel : ObservableObject
 
             await ReloadPackagesAsync(defaultSelectFirstPackage: false);
             SelectPackageAndLoad(result.Package.Name);
-            _dialogService.ShowInfo($"已新建模板包“{result.Package.Name}”，首模板文件“{firstTemplate}”已创建。");
+            _dialogService.ShowInfo($"已新建模板包“{result.Package.Name}”，可点击“新增模板”添加模板文件。");
             _logger.LogInformation("新建模板包成功，包名 {PackageName}。", result.Package.Name);
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
@@ -404,7 +423,7 @@ public sealed partial class TemplateViewModel : ObservableObject
 
         string packageName = SelectedPackage.Name;
         string? templatePath = await _promptDialogService.PromptAsync(
-            "新建模板文件", $"为模板包“{packageName}”输入新文件相对路径（可含分组目录）：");
+            "新增模板", $"为模板包“{packageName}”输入新文件相对路径（可含分组目录）：");
         if (string.IsNullOrWhiteSpace(templatePath))
         {
             return;
@@ -412,7 +431,7 @@ public sealed partial class TemplateViewModel : ObservableObject
 
         string relativePath = templatePath.Trim();
         string? outputPath = await _promptDialogService.PromptAsync(
-            "新建模板文件", "输入该文件的输出相对路径：", relativePath);
+            "新增模板", "输入该文件的输出相对路径：", relativePath);
         if (outputPath is null)
         {
             return;
@@ -421,7 +440,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         // 新建文件会重建文件树并切换当前文件，脏文档先经二次确认，取消则终止本次新建
         if (IsDirty)
         {
-            bool canLeave = await ConfirmSaveBeforeSwitchAsync("新建模板文件");
+            bool canLeave = await ConfirmSaveBeforeSwitchAsync("新增模板");
             if (!canLeave)
             {
                 return;
@@ -437,7 +456,7 @@ public sealed partial class TemplateViewModel : ObservableObject
 
             if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
             {
-                _dialogService.ShowError(result.Message ?? "新增模板文件失败。");
+                _dialogService.ShowError(result.Message ?? "新增模板失败。");
                 return;
             }
 
@@ -455,12 +474,12 @@ public sealed partial class TemplateViewModel : ObservableObject
             }
 
             SelectFileAndLoad(relativePath);
-            _dialogService.ShowInfo($"已新建模板文件“{relativePath}”。");
-            _logger.LogInformation("新增模板文件成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
+            _dialogService.ShowInfo($"已新增模板“{relativePath}”。");
+            _logger.LogInformation("新增模板成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
         {
-            _dialogService.ShowError($"新增模板文件失败：{exception.Message}");
+            _dialogService.ShowError($"新增模板失败：{exception.Message}");
         }
         finally
         {
@@ -490,7 +509,7 @@ public sealed partial class TemplateViewModel : ObservableObject
             && string.Equals(_currentFile.RelativeTemplatePath, relativePath, StringComparison.OrdinalIgnoreCase);
 
         bool confirmed = await _confirmDialogService.ConfirmAsync(
-            "删除模板文件", $"确定要删除模板文件“{relativePath}”吗？删除后不可恢复。");
+            "删除模板", $"确定要删除模板“{relativePath}”吗？删除后不可恢复。");
         if (!confirmed)
         {
             return;
@@ -504,7 +523,7 @@ public sealed partial class TemplateViewModel : ObservableObject
 
             if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
             {
-                _dialogService.ShowError(result.Message ?? "删除模板文件失败。");
+                _dialogService.ShowError(result.Message ?? "删除模板失败。");
                 return;
             }
 
@@ -543,12 +562,12 @@ public sealed partial class TemplateViewModel : ObservableObject
                 _isApplyingRollback = false;
             }
 
-            _dialogService.ShowInfo($"已删除模板文件“{relativePath}”。");
-            _logger.LogInformation("删除模板文件成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
+            _dialogService.ShowInfo($"已删除模板“{relativePath}”。");
+            _logger.LogInformation("删除模板成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, relativePath);
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
         {
-            _dialogService.ShowError($"删除模板文件失败：{exception.Message}");
+            _dialogService.ShowError($"删除模板失败：{exception.Message}");
         }
         finally
         {

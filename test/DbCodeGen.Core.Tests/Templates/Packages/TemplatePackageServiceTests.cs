@@ -730,6 +730,62 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 以空首文件创建空包应成功：files 为空清单、不创建物理模板文件、清单文件存在且可由服务重新加载。
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreatePackageAsync_EmptyPackage_CreatesLoadableEmptyPackage(string? firstTemplatePath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "empty-pkg", "空包说明", firstTemplatePath, firstTemplatePath, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Empty(result.Package.Files);
+        Assert.False(result.Package.IsBuiltin);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "empty-pkg", TemplatePackageLoader.ManifestFileName)));
+
+        // 空包目录除清单外不应产生任何物理模板文件
+        string[] files = Directory.GetFiles(Path.Combine(userLibrary, "empty-pkg"), "*", SearchOption.AllDirectories);
+        Assert.Equal(new[] { TemplatePackageLoader.ManifestFileName }, files.Select(Path.GetFileName).ToArray());
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("empty-pkg", CancellationToken.None);
+        Assert.Equal("scriban", reloaded.Engine);
+        Assert.Equal("空包说明", reloaded.Description);
+        Assert.Empty(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 空包建包后通过新增模板逐个添加文件：文件与清单条目同步追加，重新加载后清单与磁盘一致。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_EmptyPackage_ThenAddTemplateFile_SyncsManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("grow-pkg", "", null, null, CancellationToken.None);
+
+        TemplatePackageOperationResult added = await service.AddTemplateFileAsync(
+            "grow-pkg", "entity/pojo.tpl", "entity/{{table.className}}.java", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, added.Status);
+        Assert.Single(added.Package!.Files);
+        Assert.Equal("entity/pojo.tpl", added.Package.Files[0].RelativeTemplatePath);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "grow-pkg", "entity", "pojo.tpl")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("grow-pkg", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+        Assert.Equal("entity/pojo.tpl", reloaded.Files[0].RelativeTemplatePath);
+    }
+
+    /// <summary>
     /// 新建包名与内置包同名应只读拒绝，且不在用户库创建任何内容。
     /// </summary>
     [Fact]
@@ -932,10 +988,11 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
-    /// 删除包内最后一个文件应返回失败，文件与清单保持不变，防清单 files 为空校验失败。
+    /// 删除包内最后一个文件应成功：删除后包 files 为空、物理文件移除、清单写回空 files，
+    /// 且空包可被服务重新加载（空 files 清单合法）。
     /// </summary>
     [Fact]
-    public async Task DeleteTemplateFileAsync_LastFile_Rejected()
+    public async Task DeleteTemplateFileAsync_LastFile_DeletesToEmptyLoadablePackage()
     {
         string builtinRoot = Path.Combine(_tempRoot, "builtin");
         string userLibrary = Path.Combine(_tempRoot, "user");
@@ -944,8 +1001,14 @@ public sealed class TemplatePackageServiceTests : IDisposable
 
         TemplatePackageOperationResult result = await service.DeleteTemplateFileAsync("single", "main.tpl", CancellationToken.None);
 
-        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
-        Assert.True(File.Exists(Path.Combine(userLibrary, "single", "main.tpl")));
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Empty(result.Package.Files);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "single", "main.tpl")));
+        Assert.True(File.Exists(Path.Combine(userLibrary, "single", TemplatePackageLoader.ManifestFileName)));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("single", CancellationToken.None);
+        Assert.Empty(reloaded.Files);
     }
 
     /// <summary>
