@@ -1,4 +1,5 @@
 using System.Windows;
+using DbCodeGen.App.Services;
 using DbCodeGen.App.ViewModels;
 
 namespace DbCodeGen.App.Views;
@@ -22,7 +23,20 @@ public partial class TemplatePackageManagerWindow : Window
         InitializeComponent();
         DataContext = viewModel;
         _viewModel = viewModel;
+
+        // 包列表挂接拖拽排序：落位索引经拖拽辅助计算后交由视图模型重排并持久化
+        ListViewDragDropHelper.Attach(PackageListView, OnPackageDrop);
         Loaded += OnLoaded;
+    }
+
+    /// <summary>
+    /// 包列表拖拽落位回调，把源索引与目标索引交给视图模型执行重排与顺序持久化。
+    /// </summary>
+    /// <param name="sourceIndex">被拖拽包当前索引。</param>
+    /// <param name="targetIndex">落位目标索引。</param>
+    private void OnPackageDrop(int sourceIndex, int targetIndex)
+    {
+        _viewModel.MovePackage(sourceIndex, targetIndex);
     }
 
     /// <summary>

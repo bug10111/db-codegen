@@ -8,7 +8,9 @@ namespace DbCodeGen.Core.Templates.Packages;
 public interface ITemplatePackageService
 {
     /// <summary>
-    /// 列出全部模板包：内置包优先、组内按包名字符串升序排序；单个包加载异常不中断整体列表。
+    /// 列出全部模板包：默认按内置包优先、组内包名字符串升序排序，单个包加载异常不中断整体列表。
+    /// 存在包展示顺序记忆时按记忆覆盖：记忆内仍存在的包按记忆顺序前置，不在记忆内的新包按默认规则追加末尾，记忆含已删除包名时过滤；
+    /// 记忆缺失或为空时保持默认排序。②区包下拉与模板包管理窗口包列表统一经本方法消费同一份包顺序记忆。
     /// </summary>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板包运行时信息列表。</returns>

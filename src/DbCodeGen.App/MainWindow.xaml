@@ -171,7 +171,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="160" />
+                            <RowDefinition Height="190" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
@@ -220,11 +220,42 @@
                             </StackPanel>
                         </ContentControl>
 
-                        <!-- 包内模板文件树：checkbox 表达“勾选到层”运行时勾选态，选中文件后加载编辑器 -->
+                        <!-- 包内模板文件树：排序工具条 + checkbox 表达“勾选到层”运行时勾选态，选中文件后加载编辑器 -->
                         <ContentControl Grid.Row="2" Style="{StaticResource DashedGroupBox}" Margin="0,0,0,4">
-                            <ListView ItemsSource="{Binding Files}"
-                                      SelectedItem="{Binding SelectedFile}"
-                                      ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+
+                                <!-- 文件顺序排序工具条：上移/下移边界由命令可用性驱动禁用，恢复默认在存在顺序记忆时可点 -->
+                                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,2">
+                                    <Button Content="上移"
+                                            Command="{Binding MoveFileUpCommand}"
+                                            VerticalContentAlignment="Center"
+                                            ToolTip="将选中的模板文件上移一位" />
+                                    <Button Content="下移"
+                                            Command="{Binding MoveFileDownCommand}"
+                                            Margin="4,0,0,0"
+                                            VerticalContentAlignment="Center"
+                                            ToolTip="将选中的模板文件下移一位" />
+                                    <Button Content="恢复默认排序"
+                                            Command="{Binding ResetFileOrderCommand}"
+                                            Margin="4,0,0,0"
+                                            VerticalContentAlignment="Center"
+                                            ToolTip="清除当前包的排序记忆，恢复模板包清单声明顺序" />
+                                    <TextBlock Text="可按住拖拽调整顺序"
+                                               Margin="12,0,0,0"
+                                               FontSize="11"
+                                               Foreground="Gray"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+
+                                <ListView Grid.Row="1"
+                                          x:Name="TemplateFileListView"
+                                          ItemsSource="{Binding Files}"
+                                          SelectedItem="{Binding SelectedFile}"
+                                          ScrollViewer.HorizontalScrollBarVisibility="Auto">
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <EventSetter Event="PreviewMouseRightButtonDown" Handler="OnTemplateFileListItemPreviewMouseRightButtonDown" />
@@ -249,7 +280,8 @@
                                     </StackPanel>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
-                            </ListView>
+                                </ListView>
+                            </Grid>
                         </ContentControl>
 
                         <!-- 编辑器工具条：插入变量 / 保存，作用于当前编辑的模板内容 -->

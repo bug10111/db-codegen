@@ -129,6 +129,10 @@ public partial class MainWindow : Window
         PreviewPanel.DataContext = _previewViewModel;
         GenerationPanel.DataContext = _generationViewModel;
 
+        // ②区文件树挂接拖拽排序：落位索引由拖拽辅助计算，经视图模型复用与上移/下移一致的移动逻辑并持久化顺序记忆
+        ListViewDragDropHelper.Attach(TemplateFileListView, (sourceIndex, targetIndex) =>
+            _templateViewModel.MoveFileTo(sourceIndex, targetIndex));
+
         SubscribeEditorEvents();
         ApplyHighlighting(_templateViewModel.Language);
 
@@ -633,7 +637,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 窗口关闭时先回写④生成栏工作区根，随后解除编辑器事件订阅、当前连接变更订阅与表列表视图模型订阅，避免悬挂引用。
+    /// 窗口关闭时先回写④生成栏工作区根，随后解除编辑器事件订阅、当前连接变更订阅、
+    /// 表列表视图模型订阅与模板视图模型配置变化订阅，避免悬挂引用。
     /// </summary>
     /// <param name="e">关闭事件参数。</param>
     protected override void OnClosed(EventArgs e)
@@ -644,6 +649,7 @@ public partial class MainWindow : Window
         _currentDataSourceService.CurrentChanged -= OnCurrentChanged;
         _tableListViewModel.Detach();
         _generationViewModel.Detach();
+        _templateViewModel.Detach();
         base.OnClosed(e);
     }
 

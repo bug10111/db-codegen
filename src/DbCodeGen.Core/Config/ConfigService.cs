@@ -427,6 +427,23 @@ public sealed class ConfigService : IConfigService, IDisposable
             states.RemoveAll(state => state is null);
         }
 
+        // 包展示顺序记忆兜底为空列表并剔除空白包名，防止下游按记忆重排时读到空串
+        config.TemplatePackageOrder ??= new List<string>();
+        config.TemplatePackageOrder.RemoveAll(item => string.IsNullOrWhiteSpace(item));
+
+        // 包内文件顺序记忆兜底为空字典，并剔除空键、空值清单与清单内空白相对路径，与勾选态清理模式一致
+        config.TemplateFileOrder ??= new Dictionary<string, List<string>>();
+        foreach ((string key, List<string>? paths) in config.TemplateFileOrder.ToList())
+        {
+            if (string.IsNullOrWhiteSpace(key) || paths is null)
+            {
+                config.TemplateFileOrder.Remove(key);
+                continue;
+            }
+
+            paths.RemoveAll(path => string.IsNullOrWhiteSpace(path));
+        }
+
         // 旧版本配置升级：映射模型 v3 引入按数据库类型分桶（通用/MySQL/PostgreSQL），
         // 迁移时保留用户已有条目，仅追加按库默认集中尚未覆盖的条目，避免覆盖用户自定义映射
         if (config.Version < 3)

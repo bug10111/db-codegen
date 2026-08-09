@@ -55,4 +55,16 @@ public class AppConfig
     /// 由②模板区"勾选到层" checkbox 变化时写入，下次加载该包时覆盖 manifest 默认勾选态。
     /// </summary>
     public Dictionary<string, List<TemplateFileState>> TemplateFileStates { get; set; } = new();
+
+    /// <summary>
+    /// 包展示顺序记忆，值为按展示顺序排列的包名清单；空集合视为默认排序（内置优先+包名升序），
+    /// 由模板包管理窗口包排序操作写入，加载包列表时覆盖默认顺序。
+    /// </summary>
+    public List<string> TemplatePackageOrder { get; set; } = new();
+
+    /// <summary>
+    /// 按包名记忆的包内模板文件展示顺序，键为包名，值为该包模板文件相对包根路径按展示顺序排列的清单，
+    /// 相对路径为正斜杠规范化（与 manifest files[].template 对应）；空集合视为默认排序（manifest files[] 声明顺序）。
+    /// </summary>
+    public Dictionary<string, List<string>> TemplateFileOrder { get; set; } = new();
 }

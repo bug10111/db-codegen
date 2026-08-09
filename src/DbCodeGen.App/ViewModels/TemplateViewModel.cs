@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using System.Windows;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
@@ -28,6 +30,11 @@ public sealed partial class TemplateViewModel : ObservableObject
     private readonly IConfigService _configService;
     private readonly Func<VariablePanelWindow> _variablePanelWindowFactory;
     private readonly ILogger<TemplateViewModel> _logger;
+
+    /// <summary>
+    /// 主窗口 UI 线程调度器，配置保存事件可能在非 UI 线程触发，刷新包列表前经它切回 UI 线程。
+    /// </summary>
+    private readonly Dispatcher _dispatcher;
 
     /// <summary>
     /// 当前已加载的模板包运行时信息，提供包根目录与只读标记。
@@ -80,6 +87,11 @@ public sealed partial class TemplateViewModel : ObservableObject
     private VariablePanelWindow? _variablePanelWindow;
 
     /// <summary>
+    /// 上次应用包顺序记忆的包名指纹，用于配置保存后比对包顺序是否变化，避免无关保存触发包列表重载。
+    /// </summary>
+    private string[] _lastPackageOrderFingerprint = Array.Empty<string>();
+
+    /// <summary>
     /// 模板包列表，绑定②区包下拉，内置包优先、包名排序由服务契约保证。
     /// </summary>
     [ObservableProperty]
@@ -100,10 +112,13 @@ public sealed partial class TemplateViewModel : ObservableObject
     private ObservableCollection<TemplateFileInfo> _files = new();
 
     /// <summary>
-    /// 文件树选中项，切换时经脏文档确认后加载文件内容。
+    /// 文件树选中项，切换时经脏文档确认后加载文件内容；变化时联动刷新文件排序命令可用性。
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MoveFileUpCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MoveFileDownCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ResetFileOrderCommand))]
     private TemplateFileInfo? _selectedFile;
 
     /// <summary>
@@ -141,6 +156,9 @@ public sealed partial class TemplateViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(CreatePackageCommand))]
     [NotifyCanExecuteChangedFor(nameof(AddTemplateFileCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MoveFileUpCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MoveFileDownCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ResetFileOrderCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -245,6 +263,11 @@ public sealed partial class TemplateViewModel : ObservableObject
         _configService = configService;
         _variablePanelWindowFactory = variablePanelWindowFactory;
         _logger = logger;
+
+        _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+
+        // 订阅配置保存事件：模板包管理窗口排序落盘后经包顺序指纹比对刷新②区包下拉，实现跨窗口联动
+        _configService.ConfigChanged += OnConfigChanged;
     }
 
     /// <summary>
@@ -253,6 +276,49 @@ public sealed partial class TemplateViewModel : ObservableObject
     public async Task InitializeAsync()
     {
         await ReloadPackagesAsync();
+    }
+
+    /// <summary>
+    /// 解除配置保存事件订阅，供主窗口关闭时调用，避免悬挂引用与重复订阅。
+    /// </summary>
+    public void Detach()
+    {
+        _configService.ConfigChanged -= OnConfigChanged;
+    }
+
+    /// <summary>
+    /// 配置保存事件回调：配置可能在非 UI 线程保存，统一切换到 UI 线程后按包顺序指纹判断是否需要刷新包下拉。
+    /// </summary>
+    /// <param name="sender">事件发送方。</param>
+    /// <param name="e">事件参数。</param>
+    private void OnConfigChanged(object? sender, EventArgs e)
+    {
+        if (_dispatcher.CheckAccess())
+        {
+            HandleConfigOrderChange();
+        }
+        else
+        {
+            _dispatcher.InvokeAsync(HandleConfigOrderChange);
+        }
+    }
+
+    /// <summary>
+    /// 在 UI 线程处理包顺序变化：模板包管理窗口排序落盘后，包顺序记忆指纹变化时重载包列表，
+    /// 使②区包下拉即时跟随；勾选态等无关配置保存不触发重载。
+    /// </summary>
+    private void HandleConfigOrderChange()
+    {
+        // 读取当前包顺序记忆并比对上次指纹，仅包顺序变化时重载，避免无关保存触发包列表重载
+        string[] currentFingerprint = _configService.Current.TemplatePackageOrder.ToArray();
+        if (_lastPackageOrderFingerprint.SequenceEqual(currentFingerprint, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        // 先更新指纹再触发重载，防止重载期间再次收到配置事件重复进入
+        _lastPackageOrderFingerprint = currentFingerprint;
+        _ = ReloadPackagesAsync();
     }
 
     /// <summary>
@@ -670,6 +736,9 @@ public sealed partial class TemplateViewModel : ObservableObject
         {
             IReadOnlyList<TemplatePackageInfo> packages = await _packageService.ListPackagesAsync(CancellationToken.None);
 
+            // 记录本次加载后生效的包顺序记忆指纹，供跨窗口配置变化比对，避免无关保存触发重载
+            _lastPackageOrderFingerprint = _configService.Current.TemplatePackageOrder.ToArray();
+
             // 重建期间抑制选中项变更事件，避免清空集合被误判为用户切换触发脏文档确认；随后按原包名恢复选中
             string? previousPackageName = SelectedPackage?.Name;
             _isApplyingRollback = true;
@@ -763,6 +832,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         {
             TemplatePackageInfo package = await _packageService.LoadPackageAsync(packageItem.Name, CancellationToken.None);
             ApplyRememberedFileStates(package);
+            ApplyRememberedFileOrder(package);
             _currentPackage = package;
 
             Files.Clear();
@@ -1012,7 +1082,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 按当前包重建文件树集合，重建前先应用按包记忆的勾选态。
+    /// 按当前包重建文件树集合，重建前先应用按包记忆的勾选态与文件展示顺序。
     /// </summary>
     private void ReloadFiles()
     {
@@ -1023,6 +1093,7 @@ public sealed partial class TemplateViewModel : ObservableObject
         }
 
         ApplyRememberedFileStates(_currentPackage);
+        ApplyRememberedFileOrder(_currentPackage);
         foreach (TemplateFileInfo file in _currentPackage.Files)
         {
             Files.Add(file);
@@ -1068,6 +1139,60 @@ public sealed partial class TemplateViewModel : ObservableObject
     }
 
     /// <summary>
+    /// 将配置中按包名记忆的模板文件展示顺序覆盖到包文件清单上，记忆内仍存在的文件按记忆顺序前置，
+    /// 不在记忆内的新文件按 manifest 声明顺序追加末尾；包名无记忆或记忆为空时保持 manifest 声明顺序。
+    /// 记忆中的失效文件（已删除）被过滤，不进入重排结果；排序记忆只在内存应用，不修改包资产。
+    /// </summary>
+    /// <param name="package">加载后的模板包运行时信息。</param>
+    private void ApplyRememberedFileOrder(TemplatePackageInfo package)
+    {
+        if (!_configService.Current.TemplateFileOrder.TryGetValue(package.Name, out List<string>? remembered))
+        {
+            return;
+        }
+
+        if (remembered is null || remembered.Count == 0)
+        {
+            return;
+        }
+
+        // 按规范化相对路径建立文件查找表，记忆匹配与去重统一按大小写不敏感比较，与包内路径匹配先例一致
+        var filesByPath = new Dictionary<string, TemplateFileInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (TemplateFileInfo file in package.Files)
+        {
+            filesByPath[file.RelativeTemplatePath] = file;
+        }
+
+        // 按记忆顺序收集仍存在的文件：重复记忆只消费一次，失效文件（已删除）被过滤
+        var reordered = new List<TemplateFileInfo>(package.Files.Count);
+        var processedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string rememberedPath in remembered)
+        {
+            string normalizedPath = TemplatePackageLoader.NormalizeRelativePath(rememberedPath);
+            if (string.IsNullOrWhiteSpace(normalizedPath) || !processedPaths.Add(normalizedPath))
+            {
+                continue;
+            }
+
+            if (filesByPath.TryGetValue(normalizedPath, out TemplateFileInfo? file))
+            {
+                reordered.Add(file);
+            }
+        }
+
+        // 不在记忆内的新文件按 manifest 声明顺序追加末尾，保证新增文件始终可见且顺序稳定
+        foreach (TemplateFileInfo file in package.Files)
+        {
+            if (!processedPaths.Contains(file.RelativeTemplatePath))
+            {
+                reordered.Add(file);
+            }
+        }
+
+        package.Files = reordered;
+    }
+
+    /// <summary>
     /// 将当前包文件树的勾选态按包名写入配置并保存，勾选即存一次点击一次写盘。
     /// 写盘失败仅记录警告日志，不打断模板区操作。
     /// </summary>
@@ -1102,6 +1227,254 @@ public sealed partial class TemplateViewModel : ObservableObject
         catch (ConfigSaveException exception)
         {
             _logger.LogWarning(exception, "模板勾选态保存失败，包 {PackageName}。", _currentPackage.Name);
+        }
+    }
+
+    /// <summary>
+    /// 将文件树选中文件上移一位：重排包文件清单与展示集合，选中项跟随，并即时持久化顺序记忆。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanMoveFileUp))]
+    private void MoveFileUp()
+    {
+        if (_currentPackage is null || SelectedFile is null)
+        {
+            return;
+        }
+
+        int sourceIndex = Files.IndexOf(SelectedFile);
+        if (sourceIndex < 0)
+        {
+            return;
+        }
+
+        MoveFileCore(sourceIndex, sourceIndex - 1);
+    }
+
+    /// <summary>
+    /// 将文件树选中文件下移一位：重排包文件清单与展示集合，选中项跟随，并即时持久化顺序记忆。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanMoveFileDown))]
+    private void MoveFileDown()
+    {
+        if (_currentPackage is null || SelectedFile is null)
+        {
+            return;
+        }
+
+        int sourceIndex = Files.IndexOf(SelectedFile);
+        if (sourceIndex < 0)
+        {
+            return;
+        }
+
+        MoveFileCore(sourceIndex, sourceIndex + 1);
+    }
+
+    /// <summary>
+    /// 按拖拽落位索引移动文件树项：经 T03 拖拽辅助计算源/目标索引后调用，复用与上移/下移一致的移动逻辑。
+    /// </summary>
+    /// <param name="sourceIndex">被拖拽文件当前索引。</param>
+    /// <param name="targetIndex">拖拽落点目标最终索引。</param>
+    public void MoveFileTo(int sourceIndex, int targetIndex)
+    {
+        MoveFileCore(sourceIndex, targetIndex);
+    }
+
+    /// <summary>
+    /// 恢复当前包文件默认顺序：清除该包文件顺序记忆并落盘，重新加载包按 manifest 声明顺序还原，
+    /// 勾选态记忆仍生效；脏文档先经二次确认，避免重建文件树打断未保存编辑。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanResetFileOrder))]
+    private async Task ResetFileOrderAsync()
+    {
+        if (_currentPackage is null)
+        {
+            return;
+        }
+
+        string packageName = _currentPackage.Name;
+        string? selectedPath = SelectedFile?.RelativeTemplatePath;
+
+        // 恢复默认会重建文件树并切换当前文件，脏文档先经二次确认，取消则终止本次恢复
+        if (IsDirty)
+        {
+            bool canLeave = await ConfirmSaveBeforeSwitchAsync("恢复默认排序");
+            if (!canLeave)
+            {
+                return;
+            }
+        }
+
+        IsBusy = true;
+        try
+        {
+            // 重新加载包取回 manifest 声明顺序，勾选态记忆随后在重建文件树时应用
+            TemplatePackageInfo package = await _packageService.LoadPackageAsync(packageName, CancellationToken.None);
+            _currentPackage = package;
+
+            // 清除当前包文件顺序记忆并落盘，使后续加载回到 manifest 声明顺序
+            _configService.Current.TemplateFileOrder.Remove(packageName);
+            try
+            {
+                _configService.Save();
+            }
+            catch (ConfigSaveException exception)
+            {
+                _logger.LogWarning(exception, "恢复默认文件顺序保存失败，包 {PackageName}。", packageName);
+            }
+
+            // 重建文件树：应用勾选态记忆并按 manifest 声明顺序填充；期间抑制选中项变更，防空选中触发脏文档确认
+            _isApplyingRollback = true;
+            try
+            {
+                ReloadFiles();
+            }
+            finally
+            {
+                _isApplyingRollback = false;
+            }
+
+            // 恢复选中到原文件（可能已随顺序变化换位），找不到时默认选中首个文件
+            TemplateFileInfo? target = string.IsNullOrWhiteSpace(selectedPath)
+                ? null
+                : Files.FirstOrDefault(file =>
+                    string.Equals(file.RelativeTemplatePath, selectedPath, StringComparison.OrdinalIgnoreCase));
+            if (target is null && Files.Count > 0)
+            {
+                target = Files[0];
+            }
+
+            if (target is not null)
+            {
+                _lastSelectedFile = target;
+                SelectedFile = target;
+            }
+
+            StatusText = $"已恢复模板文件默认顺序：{package.Name}";
+            ResetFileOrderCommand.NotifyCanExecuteChanged();
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+        {
+            _dialogService.ShowError($"恢复模板文件默认顺序失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定文件上移命令是否可执行：选中文件非空、非繁忙且未达文件树首位。
+    /// </summary>
+    private bool CanMoveFileUp()
+    {
+        if (_currentPackage is null || SelectedFile is null || IsBusy)
+        {
+            return false;
+        }
+
+        return CollectionReorderHelper.CanMoveUp(Files.IndexOf(SelectedFile));
+    }
+
+    /// <summary>
+    /// 判定文件下移命令是否可执行：选中文件非空、非繁忙且未达文件树末位。
+    /// </summary>
+    private bool CanMoveFileDown()
+    {
+        if (_currentPackage is null || SelectedFile is null || IsBusy)
+        {
+            return false;
+        }
+
+        return CollectionReorderHelper.CanMoveDown(Files.IndexOf(SelectedFile), Files.Count);
+    }
+
+    /// <summary>
+    /// 判定恢复默认文件顺序命令是否可执行：当前包存在文件顺序记忆且非繁忙。
+    /// </summary>
+    private bool CanResetFileOrder()
+    {
+        if (_currentPackage is null || IsBusy)
+        {
+            return false;
+        }
+
+        return _configService.Current.TemplateFileOrder.TryGetValue(_currentPackage.Name, out List<string>? remembered)
+            && remembered is not null && remembered.Count > 0;
+    }
+
+    /// <summary>
+    /// 将文件树指定项从源索引移动到目标索引：统一经重排辅助移动展示集合，同步包文件清单顺序，
+    /// 选中项跟随移动，并把新顺序写入按包记忆的文件顺序配置并落盘。
+    /// </summary>
+    /// <param name="sourceIndex">被移动文件当前索引。</param>
+    /// <param name="targetIndex">移动完成后目标最终索引。</param>
+    private void MoveFileCore(int sourceIndex, int targetIndex)
+    {
+        if (_currentPackage is null)
+        {
+            return;
+        }
+
+        // 源索引越界时直接返回，防止经拖拽落位回调传入异常索引时抛到视图层事件冒泡
+        if (sourceIndex < 0 || sourceIndex >= Files.Count)
+        {
+            return;
+        }
+
+        // 统一经重排辅助移动，目标索引超界收敛、单项不移动，返回移动后新索引；原位未动不触发后续流程
+        int newIndex = CollectionReorderHelper.MoveTo(Files, sourceIndex, targetIndex);
+        if (newIndex == sourceIndex)
+        {
+            return;
+        }
+
+        // 同步包文件清单与展示集合一致，保证生成栏 BuildSelectedFiles 迭代顺序与文件树展示一致
+        _currentPackage.Files = Files.ToList();
+
+        // 选中项跟随移动：Move 保持项实例不变，显式复位选中项到新位置，绑定 SelectedItem 随之更新
+        SelectedFile = Files[newIndex];
+
+        // 即时持久化顺序记忆并落盘，写盘失败仅记日志不打断排序交互
+        PersistFileOrder();
+
+        // 移动后首末边界与顺序记忆状态可能变化，主动刷新上移/下移与恢复默认命令的可用性
+        MoveFileUpCommand.NotifyCanExecuteChanged();
+        MoveFileDownCommand.NotifyCanExecuteChanged();
+        ResetFileOrderCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// 将当前文件树的相对路径顺序按包名写入配置并保存，一次排序一次写盘。
+    /// 写盘失败仅记录警告日志，不打断模板区排序操作。
+    /// </summary>
+    private void PersistFileOrder()
+    {
+        if (_currentPackage is null)
+        {
+            return;
+        }
+
+        // 按重排后的展示集合逐文件收集相对路径，作为该包的文件展示顺序记忆
+        var order = new List<string>(Files.Count);
+        foreach (TemplateFileInfo file in Files)
+        {
+            if (file is null)
+            {
+                continue;
+            }
+
+            order.Add(file.RelativeTemplatePath);
+        }
+
+        _configService.Current.TemplateFileOrder[_currentPackage.Name] = order;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "模板文件顺序保存失败，包 {PackageName}。", _currentPackage.Name);
         }
     }
 

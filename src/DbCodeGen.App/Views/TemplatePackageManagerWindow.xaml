@@ -14,6 +14,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -34,8 +35,22 @@
             </StackPanel>
         </ContentControl>
 
+        <!-- 排序工具条：上移/下移/恢复默认排序 与拖拽提示，包顺序即时写入配置记忆 -->
+        <ContentControl Grid.Row="1" Style="{StaticResource DashedGroupBox}" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal">
+                <Button Content="↑ 上移" Command="{Binding MovePackageUpCommand}" />
+                <Button Content="↓ 下移" Command="{Binding MovePackageDownCommand}" Margin="4,0,0,0" />
+                <Button Content="恢复默认排序" Command="{Binding ResetPackageOrderCommand}" Margin="4,0,0,0" />
+                <Rectangle Style="{StaticResource ToolbarSeparator}" />
+                <TextBlock Text="可按住包行拖拽调整顺序"
+                           VerticalAlignment="Center"
+                           FontSize="11"
+                           Foreground="Gray" />
+            </StackPanel>
+        </ContentControl>
+
         <!-- 复制输入区：进入复制模式后展示，确认复制前需填写新包名 -->
-        <Border Grid.Row="1"
+        <Border Grid.Row="2"
                 Margin="0,0,0,10"
                 Padding="10,8"
                 Background="#F3F3F3"
@@ -55,8 +70,9 @@
             </StackPanel>
         </Border>
 
-        <!-- 模板包列表：名称/说明/来源/文件数/引擎/修改时间 -->
-        <ListView Grid.Row="2"
+        <!-- 模板包列表：名称/说明/来源/文件数/引擎/修改时间，支持上移/下移与拖拽排序 -->
+        <ListView x:Name="PackageListView"
+                  Grid.Row="3"
                   ItemsSource="{Binding Packages}"
                   SelectedItem="{Binding SelectedPackage}"
                   ScrollViewer.HorizontalScrollBarVisibility="Auto">
@@ -91,7 +107,7 @@
         </ListView>
 
         <!-- 状态提示：内置包只读提醒与复制引导 -->
-        <TextBlock Grid.Row="3"
+        <TextBlock Grid.Row="4"
                    Text="{Binding StatusText}"
                    FontSize="11"
                    Foreground="Gray"

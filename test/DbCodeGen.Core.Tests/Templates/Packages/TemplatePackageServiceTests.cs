@@ -186,6 +186,116 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 列表存在包顺序记忆时，记忆内仍存在的包应按记忆顺序前置，内置包与用户包均可参与排序。
+    /// </summary>
+    [Fact]
+    public async Task ListPackagesAsync_AppliesRememberedPackageOrder()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "alpha");
+        await CreatePackageAsync(builtinRoot, "zebra");
+        await CreatePackageAsync(userLibrary, "mid");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out ConfigService configService, out _);
+
+        // 写入包顺序记忆：用户包 mid 前置，内置包按 zebra、alpha 排列，验证记忆覆盖默认排序且内置包可参与排序
+        AppConfig config = configService.Load();
+        config.TemplatePackageOrder.Add("mid");
+        config.TemplatePackageOrder.Add("zebra");
+        config.TemplatePackageOrder.Add("alpha");
+        configService.Save();
+
+        IReadOnlyList<TemplatePackageInfo> packages = await service.ListPackagesAsync(CancellationToken.None);
+
+        string[] names = packages.Select(package => package.Name).ToArray();
+        Assert.Equal(new[] { "mid", "zebra", "alpha" }, names);
+    }
+
+    /// <summary>
+    /// 记忆存在时，不在记忆内的新包应按默认规则（内置优先+包名升序）追加末尾，保证新包始终可见。
+    /// </summary>
+    [Fact]
+    public async Task ListPackagesAsync_NewPackagesOutsideMemory_AppendedAtEnd()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "beta");
+        await CreatePackageAsync(builtinRoot, "alpha");
+        await CreatePackageAsync(userLibrary, "newpkg");
+        await CreatePackageAsync(userLibrary, "mid");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out ConfigService configService, out _);
+
+        // 记忆仅含 mid，其余包视为新包按默认规则追加末尾
+        AppConfig config = configService.Load();
+        config.TemplatePackageOrder.Add("mid");
+        configService.Save();
+
+        IReadOnlyList<TemplatePackageInfo> packages = await service.ListPackagesAsync(CancellationToken.None);
+
+        string[] names = packages.Select(package => package.Name).ToArray();
+        Assert.Equal(new[] { "mid", "alpha", "beta", "newpkg" }, names);
+    }
+
+    /// <summary>
+    /// 记忆包含已删除包名时应被过滤，不影响仍存在包的记忆顺序。
+    /// </summary>
+    [Fact]
+    public async Task ListPackagesAsync_MemoryContainsDeletedPackageName_Filtered()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "alpha");
+        await CreatePackageAsync(userLibrary, "mid");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out ConfigService configService, out _);
+
+        // 记忆含已删除包名 deleted-pkg 与实际存在的 mid、alpha，失效包名应被过滤
+        AppConfig config = configService.Load();
+        config.TemplatePackageOrder.Add("mid");
+        config.TemplatePackageOrder.Add("deleted-pkg");
+        config.TemplatePackageOrder.Add("alpha");
+        configService.Save();
+
+        IReadOnlyList<TemplatePackageInfo> packages = await service.ListPackagesAsync(CancellationToken.None);
+
+        string[] names = packages.Select(package => package.Name).ToArray();
+        Assert.Equal(new[] { "mid", "alpha" }, names);
+    }
+
+    /// <summary>
+    /// 包顺序记忆清除后列表应回到默认排序（内置优先+包名升序）。
+    /// </summary>
+    [Fact]
+    public async Task ListPackagesAsync_MemoryCleared_FallsBackToDefaultOrder()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "zebra");
+        await CreatePackageAsync(builtinRoot, "alpha");
+        await CreatePackageAsync(userLibrary, "mid");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out ConfigService configService, out _);
+
+        // 先写入记忆验证生效，再清除记忆确认回到默认排序
+        AppConfig config = configService.Load();
+        config.TemplatePackageOrder.Add("mid");
+        config.TemplatePackageOrder.Add("zebra");
+        config.TemplatePackageOrder.Add("alpha");
+        configService.Save();
+        IReadOnlyList<TemplatePackageInfo> withMemory = await service.ListPackagesAsync(CancellationToken.None);
+        Assert.Equal(new[] { "mid", "zebra", "alpha" }, withMemory.Select(package => package.Name).ToArray());
+
+        config.TemplatePackageOrder.Clear();
+        configService.Save();
+
+        IReadOnlyList<TemplatePackageInfo> packages = await service.ListPackagesAsync(CancellationToken.None);
+
+        string[] names = packages.Select(package => package.Name).ToArray();
+        Assert.Equal(new[] { "alpha", "zebra", "mid" }, names);
+        Assert.True(packages[0].IsBuiltin);
+        Assert.True(packages[1].IsBuiltin);
+        Assert.False(packages[2].IsBuiltin);
+    }
+
+    /// <summary>
     /// 合法 zip 导入应成功安装到用户模板库，返回 Succeeded 与新包信息。
     /// </summary>
     [Fact]

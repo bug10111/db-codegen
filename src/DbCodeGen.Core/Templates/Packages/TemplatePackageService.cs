@@ -78,11 +78,69 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             await CollectPackagesFromDirectoryAsync(searchDirectory, isBuiltin: false, packages, cancellationToken).ConfigureAwait(false);
         }
 
+        // 包展示顺序记忆为空视为默认排序，保持"内置优先+包名升序"基线不变
+        List<string> rememberedOrder = _configService.Load().TemplatePackageOrder;
+        if (rememberedOrder.Count == 0)
+        {
+            return SortByDefaultOrder(packages);
+        }
+
+        // 记忆非空时按记忆覆盖默认排序：记忆内仍存在的包按记忆顺序前置，新包按默认规则追加末尾
+        return SortByRememberedOrder(packages, rememberedOrder);
+    }
+
+    /// <summary>
+    /// 按默认排序规则对包列表排序：内置包优先，组内按包名字符串升序（大小写不敏感），保证 UI 稳定。
+    /// 包展示顺序记忆为空或不存在时使用，也是记忆模式下新包追加末尾的排序基线。
+    /// </summary>
+    /// <param name="packages">待排序的模板包集合。</param>
+    /// <returns>按默认规则排序后的包列表。</returns>
+    private static List<TemplatePackageInfo> SortByDefaultOrder(IEnumerable<TemplatePackageInfo> packages)
+    {
         // 默认排序：内置包优先，组内按包名字符串升序（大小写不敏感），保证 UI 稳定
         IOrderedEnumerable<TemplatePackageInfo> ordered = packages
             .OrderByDescending(package => package.IsBuiltin)
             .ThenBy(package => package.Name, StringComparer.OrdinalIgnoreCase);
         return ordered.ToList();
+    }
+
+    /// <summary>
+    /// 按包展示顺序记忆覆盖默认排序：记忆内仍存在的包按记忆顺序前置，
+    /// 不在记忆内的新包按默认规则追加末尾，记忆中的失效包名（已删除的包）被过滤不进入列表。
+    /// </summary>
+    /// <param name="packages">已收集的全部模板包集合。</param>
+    /// <param name="rememberedOrder">包展示顺序记忆，按展示顺序排列的包名清单。</param>
+    /// <returns>按记忆覆盖排序后的包列表。</returns>
+    private static List<TemplatePackageInfo> SortByRememberedOrder(IEnumerable<TemplatePackageInfo> packages, IReadOnlyList<string> rememberedOrder)
+    {
+        // 建立包名到包的映射，记忆匹配与去重统一按大小写不敏感比较，与包名升序基线一致
+        var packagesByName = new Dictionary<string, TemplatePackageInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (TemplatePackageInfo package in packages)
+        {
+            packagesByName[package.Name] = package;
+        }
+
+        // 按记忆顺序收集仍存在的包：重复记忆只消费一次，失效包名（已删除）被过滤
+        var remembered = new List<TemplatePackageInfo>();
+        var processedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string rememberedName in rememberedOrder)
+        {
+            if (!processedNames.Add(rememberedName))
+            {
+                continue;
+            }
+
+            if (packagesByName.TryGetValue(rememberedName, out TemplatePackageInfo? package))
+            {
+                remembered.Add(package);
+            }
+        }
+
+        // 不在记忆内的新包按默认规则追加末尾，保证新建/导入的包始终可见且顺序稳定
+        List<TemplatePackageInfo> newPackages = SortByDefaultOrder(
+            packages.Where(package => !processedNames.Contains(package.Name)));
+        remembered.AddRange(newPackages);
+        return remembered;
     }
 
     /// <inheritdoc />

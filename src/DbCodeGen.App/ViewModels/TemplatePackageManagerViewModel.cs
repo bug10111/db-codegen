@@ -4,7 +4,9 @@ using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
+using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Templates.Packages;
+using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.App.ViewModels;
 
@@ -78,6 +80,8 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     private readonly IFolderPickerService _folderPickerService;
     private readonly IFilePickerService _filePickerService;
     private readonly IPromptDialogService _promptDialogService;
+    private readonly IConfigService _configService;
+    private readonly ILogger<TemplatePackageManagerViewModel> _logger;
 
     /// <summary>
     /// 复制模式下被复制的源包名，复制确认时据此定位，避免期间列表选中项变化影响操作目标。
@@ -97,6 +101,8 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(BeginCopyCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MovePackageUpCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MovePackageDownCommand))]
     private TemplatePackageListItemViewModel? _selectedPackage;
 
     /// <summary>
@@ -134,6 +140,9 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteCommand))]
     [NotifyCanExecuteChangedFor(nameof(RefreshCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MovePackageUpCommand))]
+    [NotifyCanExecuteChangedFor(nameof(MovePackageDownCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ResetPackageOrderCommand))]
     private bool _isBusy;
 
     /// <summary>
@@ -147,7 +156,7 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     public string CopySourceDisplay => string.IsNullOrWhiteSpace(_copySourceName) ? "复制模板包" : $"从“{_copySourceName}”复制";
 
     /// <summary>
-    /// 使用模板包服务与对话框服务构造模板包管理视图模型。
+    /// 使用模板包服务、配置服务与对话框服务构造模板包管理视图模型。
     /// </summary>
     /// <param name="packageService">模板包管理服务，承载列表加载与导入复制导出删除操作。</param>
     /// <param name="dialogService">消息提示服务，用于操作结果与错误反馈。</param>
@@ -155,6 +164,8 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     /// <param name="folderPickerService">目录选择服务，用于选择待导入的模板包文件夹。</param>
     /// <param name="filePickerService">文件选择服务，用于选择待导入与导出的 zip 文件。</param>
     /// <param name="promptDialogService">文本输入提示服务，用于新增模板包时收集包名与说明。</param>
+    /// <param name="configService">配置服务，用于读写包展示顺序记忆。</param>
+    /// <param name="logger">日志器，用于记录包顺序持久化失败等诊断信息。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public TemplatePackageManagerViewModel(
         ITemplatePackageService packageService,
@@ -162,7 +173,9 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         IConfirmDialogService confirmDialogService,
         IFolderPickerService folderPickerService,
         IFilePickerService filePickerService,
-        IPromptDialogService promptDialogService)
+        IPromptDialogService promptDialogService,
+        IConfigService configService,
+        ILogger<TemplatePackageManagerViewModel> logger)
     {
         ArgumentNullException.ThrowIfNull(packageService);
         ArgumentNullException.ThrowIfNull(dialogService);
@@ -170,6 +183,8 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(folderPickerService);
         ArgumentNullException.ThrowIfNull(filePickerService);
         ArgumentNullException.ThrowIfNull(promptDialogService);
+        ArgumentNullException.ThrowIfNull(configService);
+        ArgumentNullException.ThrowIfNull(logger);
 
         _packageService = packageService;
         _dialogService = dialogService;
@@ -177,6 +192,8 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         _folderPickerService = folderPickerService;
         _filePickerService = filePickerService;
         _promptDialogService = promptDialogService;
+        _configService = configService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -210,6 +227,154 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// 将选中包上移一位：列表即时重排并把新顺序写入包顺序记忆。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanMovePackageUp))]
+    private void MovePackageUp()
+    {
+        int index = GetSelectedPackageIndex();
+        if (index < 0)
+        {
+            return;
+        }
+
+        // 上移一位后若实际移动则持久化新顺序，位于首位未移动时不触发写盘
+        int newIndex = CollectionReorderHelper.MoveUp(Packages, index);
+        if (newIndex != index)
+        {
+            PersistPackageOrder();
+        }
+    }
+
+    /// <summary>
+    /// 将选中包下移一位：列表即时重排并把新顺序写入包顺序记忆。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanMovePackageDown))]
+    private void MovePackageDown()
+    {
+        int index = GetSelectedPackageIndex();
+        if (index < 0)
+        {
+            return;
+        }
+
+        // 下移一位后若实际移动则持久化新顺序，位于末位未移动时不触发写盘
+        int newIndex = CollectionReorderHelper.MoveDown(Packages, index);
+        if (newIndex != index)
+        {
+            PersistPackageOrder();
+        }
+    }
+
+    /// <summary>
+    /// 恢复默认包顺序：清除包顺序记忆并保存，重载列表回到"内置优先+包名升序"基线。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanResetPackageOrder))]
+    private async Task ResetPackageOrderAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            // 清除包顺序记忆后落盘，使列表重载回默认排序基线；写盘失败仅记日志，内存记忆已清空
+            _configService.Current.TemplatePackageOrder.Clear();
+            try
+            {
+                _configService.Save();
+            }
+            catch (ConfigSaveException exception)
+            {
+                _logger.LogWarning(exception, "恢复默认包顺序保存失败。");
+            }
+
+            await ReloadPackagesAsync();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 将指定位置的包移动到目标位置并持久化新顺序，供包列表拖拽落位事件调用。
+    /// 拖拽项可能并非当前选中项，先选中被移动包使选中项跟随移动，与上移/下移语义一致。
+    /// </summary>
+    /// <param name="sourceIndex">被移动包当前索引。</param>
+    /// <param name="targetIndex">落位目标索引（移动完成后的最终位置）。</param>
+    public void MovePackage(int sourceIndex, int targetIndex)
+    {
+        if (IsBusy || sourceIndex < 0 || sourceIndex >= Packages.Count)
+        {
+            return;
+        }
+
+        // 先选中被移动包，保证拖拽后选中项跟随被移动项，命令可用性随选中项刷新
+        SelectedPackage = Packages[sourceIndex];
+
+        int newIndex = CollectionReorderHelper.MoveTo(Packages, sourceIndex, targetIndex);
+        if (newIndex != sourceIndex)
+        {
+            PersistPackageOrder();
+        }
+    }
+
+    /// <summary>
+    /// 判定上移命令是否可执行：选中包非空、非繁忙且未达首位。
+    /// </summary>
+    private bool CanMovePackageUp() => !IsBusy && CollectionReorderHelper.CanMoveUp(GetSelectedPackageIndex());
+
+    /// <summary>
+    /// 判定下移命令是否可执行：选中包非空、非繁忙且未达末位。
+    /// </summary>
+    private bool CanMovePackageDown() => !IsBusy && CollectionReorderHelper.CanMoveDown(GetSelectedPackageIndex(), Packages.Count);
+
+    /// <summary>
+    /// 判定恢复默认排序命令是否可执行：非繁忙且存在包顺序记忆。
+    /// </summary>
+    private bool CanResetPackageOrder() => !IsBusy && _configService.Current.TemplatePackageOrder.Count > 0;
+
+    /// <summary>
+    /// 获取选中包在列表中的当前索引，无选中项时返回 -1。
+    /// </summary>
+    private int GetSelectedPackageIndex()
+    {
+        if (SelectedPackage is null)
+        {
+            return -1;
+        }
+
+        return Packages.IndexOf(SelectedPackage);
+    }
+
+    /// <summary>
+    /// 将列表当前包名顺序写入包顺序记忆并落盘，写盘失败仅记警告日志不打断排序操作。
+    /// 落盘成功后触发 ConfigChanged，供②区模板视图经 ListPackagesAsync 按序刷新包下拉。
+    /// </summary>
+    private void PersistPackageOrder()
+    {
+        _configService.Current.TemplatePackageOrder = Packages.Select(package => package.Name).ToList();
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "模板包顺序保存失败。");
+        }
+
+        RefreshOrderCommandStates();
+    }
+
+    /// <summary>
+    /// 刷新排序相关命令的可用性，供列表重排或记忆清除后按钮边界与启用态即时更新。
+    /// </summary>
+    private void RefreshOrderCommandStates()
+    {
+        MovePackageUpCommand.NotifyCanExecuteChanged();
+        MovePackageDownCommand.NotifyCanExecuteChanged();
+        ResetPackageOrderCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>

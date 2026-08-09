@@ -275,6 +275,83 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 保存后使用同一路径新建服务重新加载，包顺序与包内文件顺序记忆应完整还原，
+    /// 落盘字段为 camelCase 的 templatePackageOrder/templateFileOrder，验证读写幂等。
+    /// </summary>
+    [Fact]
+    public void Save_ThenNewServiceLoads_RoundTripsTemplateOrderFields()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        AppConfig config = service.Load();
+
+        config.TemplatePackageOrder.Add("java-mybatis");
+        config.TemplatePackageOrder.Add("my-user-pkg");
+        config.TemplateFileOrder["user-pkg"] = new List<string> { "entity/Entity.java", "mapper/Mapper.xml" };
+        config.TemplateFileOrder["builtin-pkg"] = new List<string> { "main.tpl" };
+        service.Save();
+
+        string fileText = File.ReadAllText(configPath, Encoding.UTF8);
+        Assert.Contains("templatePackageOrder", fileText);
+        Assert.Contains("templateFileOrder", fileText);
+
+        ConfigService reloaded = CreateService(configPath);
+        AppConfig loaded = reloaded.Load();
+
+        Assert.Equal(2, loaded.TemplatePackageOrder.Count);
+        Assert.Equal("java-mybatis", loaded.TemplatePackageOrder[0]);
+        Assert.Equal("my-user-pkg", loaded.TemplatePackageOrder[1]);
+        Assert.Equal(2, loaded.TemplateFileOrder.Count);
+        Assert.True(loaded.TemplateFileOrder.TryGetValue("user-pkg", out List<string>? userFiles));
+        Assert.Equal(2, userFiles!.Count);
+        Assert.Equal("entity/Entity.java", userFiles[0]);
+        Assert.Equal("mapper/Mapper.xml", userFiles[1]);
+        Assert.True(loaded.TemplateFileOrder.TryGetValue("builtin-pkg", out List<string>? builtinFiles));
+        Assert.Equal("main.tpl", Assert.Single(builtinFiles!));
+    }
+
+    /// <summary>
+    /// 不含排序记忆字段的旧配置文件反序列化后，TemplatePackageOrder 与 TemplateFileOrder 应兜底为非 null 的空集合，
+    /// 下游按记忆重排时读到空集合即视为默认排序，不抛空引用。
+    /// </summary>
+    [Fact]
+    public void Load_JsonWithoutTemplateOrderFields_NormalizesToEmptyCollections()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"workspaceRoot":"","lastRelativeOutputRoot":""}""");
+
+        AppConfig config = service.Load();
+
+        Assert.NotNull(config.TemplatePackageOrder);
+        Assert.Empty(config.TemplatePackageOrder);
+        Assert.NotNull(config.TemplateFileOrder);
+        Assert.Empty(config.TemplateFileOrder);
+    }
+
+    /// <summary>
+    /// 手工编辑配置使排序记忆字段含 null 值、空白包名、空键、空值清单与清单内空白项时，
+    /// 加载后应剔除非法项，仅保留合法排序记忆，防止下游按记忆重排读到空串或空引用。
+    /// </summary>
+    [Fact]
+    public void Load_JsonWithNullAndBlankTemplateOrderEntries_Normalizes()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"templatePackageOrder":["java-mybatis","",null,"  ","my-user-pkg"],"templateFileOrder":{"user-pkg":["entity/Entity.java","",null,"mapper/Mapper.xml"],"":["x.tpl"],"  ":["y.tpl"],"null-list":null}}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(2, config.TemplatePackageOrder.Count);
+        Assert.Equal("java-mybatis", config.TemplatePackageOrder[0]);
+        Assert.Equal("my-user-pkg", config.TemplatePackageOrder[1]);
+        Assert.Single(config.TemplateFileOrder);
+        Assert.True(config.TemplateFileOrder.TryGetValue("user-pkg", out List<string>? userFiles));
+        Assert.Equal(2, userFiles!.Count);
+        Assert.Equal("entity/Entity.java", userFiles[0]);
+        Assert.Equal("mapper/Mapper.xml", userFiles[1]);
+    }
+
+    /// <summary>
     /// apiKey 应密文落盘：文件中不含明文，且 GetLlmApiKey 能解密还原明文。
     /// </summary>
     [Fact]
