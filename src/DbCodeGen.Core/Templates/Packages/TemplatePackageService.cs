@@ -7,8 +7,8 @@ using Microsoft.Extensions.Logging;
 namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
-/// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、导出、删除，
-/// 以及新建包、新增模板文件、批量追加模板文件与删除模板文件，
+/// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、重命名、导出、删除，
+/// 以及新建包、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名，
 /// 内置包只读边界、zip 防穿越与解压上限、变更操作串行化均在此实现。
 /// </summary>
 public sealed class TemplatePackageService : ITemplatePackageService, IDisposable
@@ -289,6 +289,24 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> RenamePackageAsync(
+        string packageName, string newName, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => RenamePackageCoreAsync(packageName, newName, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> RenameTemplateFileAsync(
+        string packageName, string templateRelativePath, string newRelativePath, CancellationToken cancellationToken)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => RenameTemplateFileCoreAsync(packageName, templateRelativePath, newRelativePath, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// 新建包核心流程：校验包名与首文件路径（可空）→ 内置包同名只读拒绝 → 用户包同名冲突拒绝 →
     /// 建目录写清单（首文件为空则写空 files 清单、不建物理文件）→ 重新校验返回。
@@ -520,6 +538,247 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             _logger.LogError(exception, "删除模板文件失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
             return TemplatePackageOperationResult.Failure($"删除模板失败：{exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// 重命名包核心流程：校验新包名 → 加载源包 → 内置包只读拒绝 → 新名与内置包/用户包冲突判断 →
+    /// 物理改目录名 → 重写清单包名 → 重新校验返回；失败时已改目录尽力回滚。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> RenamePackageCoreAsync(
+        string packageName, string newName, CancellationToken cancellationToken)
+    {
+        if (!TemplatePackageLoader.IsValidPackageName(newName))
+        {
+            return TemplatePackageOperationResult.Invalid($"新包名不合法（须为字母/数字/中划线/下划线且不含路径分隔符或 ..）：{newName}");
+        }
+
+        TemplatePackageInfo source;
+        try
+        {
+            source = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包不存在或加载失败：{exception.Message}");
+        }
+
+        // 内置包只读：不允许重命名
+        if (source.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可重命名。");
+        }
+
+        // 新名与内置包同名：内置包只读，拒绝重命名到该名称
+        if (PackageNameExists(_builtinRootPath, newName))
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {newName} 只读，不可重命名到该名称。");
+        }
+
+        // 新旧同名视为成功原样返回，避免无意义重命名与覆盖自身目录
+        if (string.Equals(source.Name, newName, StringComparison.OrdinalIgnoreCase))
+        {
+            TemplatePackageInfo unchanged = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                source.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            return TemplatePackageOperationResult.Success(unchanged);
+        }
+
+        // 新名在任一用户模板搜索目录已被占用时返回冲突，防跨目录同名包
+        foreach (string searchDirectory in GetUserTemplateDirectories())
+        {
+            if (Directory.Exists(Path.Combine(searchDirectory, newName)))
+            {
+                return TemplatePackageOperationResult.NameConflict($"同名用户包 {newName} 已存在，请更换新包名。");
+            }
+        }
+
+        // 在源包所在父目录内改名，目标目录即新包名目录
+        string sourceDirectory = Path.GetFullPath(source.RootPath);
+        string? parentDirectory = Path.GetDirectoryName(sourceDirectory);
+        if (string.IsNullOrEmpty(parentDirectory))
+        {
+            return TemplatePackageOperationResult.Failure($"模板包目录无法定位：{packageName}");
+        }
+
+        string targetDirectory = Path.Combine(parentDirectory, newName);
+        bool directoryMoved = false;
+        try
+        {
+            Directory.Move(sourceDirectory, targetDirectory);
+            directoryMoved = true;
+
+            // 重写清单包名为新名，保持"包名=目录名"不变量，再整体重新校验
+            await RewriteManifestNameAsync(targetDirectory, newName, cancellationToken).ConfigureAwait(false);
+            TemplatePackageInfo renamed = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                targetDirectory, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已重命名模板包：{OldName} → {NewName}，目录 {Directory}。", packageName, newName, targetDirectory);
+            return TemplatePackageOperationResult.Success(renamed);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            // 目录已改而清单重写失败时尽力回滚目录名，避免留下新目录名配旧清单的半成品包
+            if (directoryMoved && Directory.Exists(targetDirectory) && !Directory.Exists(sourceDirectory))
+            {
+                TryMoveDirectoryBack(targetDirectory, sourceDirectory, packageName, newName);
+            }
+
+            _logger.LogError(exception, "重命名模板包失败，源包 {OldName}，新名 {NewName}。", packageName, newName);
+            return TemplatePackageOperationResult.Failure($"重命名模板包失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 重命名文件核心流程：加载包并校验内置只读 → 新旧相对路径安全校验 → 旧文件存在、新文件不存在 →
+    /// 物理改名文件 → 更新清单对应条目并重写 → 重新校验返回；失败时已改名文件尽力回滚。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> RenameTemplateFileCoreAsync(
+        string packageName, string templateRelativePath, string newRelativePath, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可重命名模板。");
+        }
+
+        string? normalizedOld = NormalizeSafeRelativePath(templateRelativePath);
+        string? normalizedNew = NormalizeSafeRelativePath(newRelativePath);
+        if (normalizedOld is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
+        }
+
+        if (normalizedNew is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"新模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{newRelativePath}");
+        }
+
+        // 新旧路径相同视为成功原样返回，避免无意义重命名与覆盖自身
+        if (string.Equals(normalizedOld, normalizedNew, StringComparison.OrdinalIgnoreCase))
+        {
+            return TemplatePackageOperationResult.Success(package);
+        }
+
+        try
+        {
+            string oldFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedOld);
+            string newFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedNew);
+            if (!File.Exists(oldFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedOld}");
+            }
+
+            if (File.Exists(newFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"目标模板文件已存在：{normalizedNew}");
+            }
+
+            // 先物理改名文件并自动建目标父目录（分组目录），成功后再更新清单条目
+            string? parentDirectory = Path.GetDirectoryName(newFullPath);
+            if (!string.IsNullOrEmpty(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            File.Move(oldFullPath, newFullPath);
+
+            try
+            {
+                await RenameManifestFileEntryAsync(package, normalizedOld, normalizedNew, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 清单更新失败时回滚已改名文件，避免磁盘新名配旧清单的孤儿状态
+                if (File.Exists(newFullPath) && !File.Exists(oldFullPath))
+                {
+                    TryMoveFileBack(newFullPath, oldFullPath, normalizedOld, normalizedNew);
+                }
+
+                throw;
+            }
+
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "已重命名模板文件，包 {PackageName}，旧路径 {OldPath}，新路径 {NewPath}。", packageName, normalizedOld, normalizedNew);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(
+                exception, "重命名模板文件失败，包 {PackageName}，旧路径 {OldPath}，新路径 {NewPath}。",
+                packageName, normalizedOld, normalizedNew);
+            return TemplatePackageOperationResult.Failure($"重命名模板失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 尽力将重命名中的包目录改回源目录名，回滚失败仅记录日志不阻断主流程。
+    /// </summary>
+    /// <param name="targetDirectory">已改名的目标目录。</param>
+    /// <param name="sourceDirectory">源目录名。</param>
+    /// <param name="oldName">源包名。</param>
+    /// <param name="newName">新包名。</param>
+    private void TryMoveDirectoryBack(string targetDirectory, string sourceDirectory, string oldName, string newName)
+    {
+        try
+        {
+            Directory.Move(targetDirectory, sourceDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                exception, "重命名模板包回滚目录失败，源包 {OldName}，新名 {NewName}。", oldName, newName);
+        }
+    }
+
+    /// <summary>
+    /// 尽力将重命名中的模板文件改回源路径，回滚失败仅记录日志不阻断主流程。
+    /// </summary>
+    /// <param name="newFullPath">已改名的新文件路径。</param>
+    /// <param name="oldFullPath">源文件路径。</param>
+    /// <param name="oldPath">源相对路径。</param>
+    /// <param name="newPath">新相对路径。</param>
+    private void TryMoveFileBack(string newFullPath, string oldFullPath, string oldPath, string newPath)
+    {
+        try
+        {
+            File.Move(newFullPath, oldFullPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                exception, "重命名模板文件回滚失败，旧路径 {OldPath}，新路径 {NewPath}。", oldPath, newPath);
+        }
+    }
+
+    /// <summary>
+    /// 将包清单中指定模板条目更新为新相对路径并重写 template.json，保持清单与磁盘文件一致。
+    /// </summary>
+    /// <param name="package">目标模板包运行时信息。</param>
+    /// <param name="oldPath">重命名前的模板相对路径。</param>
+    /// <param name="newPath">重命名后的模板相对路径。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    private static async Task RenameManifestFileEntryAsync(
+        TemplatePackageInfo package, string oldPath, string newPath, CancellationToken cancellationToken)
+    {
+        TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
+        foreach (TemplateFileEntry entry in manifest.Files)
+        {
+            if (string.Equals(TemplatePackageLoader.NormalizeRelativePath(entry.Template), oldPath, StringComparison.OrdinalIgnoreCase))
+            {
+                entry.Template = newPath;
+            }
+        }
+
+        await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

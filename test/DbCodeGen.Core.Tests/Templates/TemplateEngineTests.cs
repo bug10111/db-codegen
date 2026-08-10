@@ -64,7 +64,103 @@ public sealed class TemplateEngineTests
         PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("sysUser|SysUser|sys_user|SYS_USER", result.Output);
+        Assert.Equal("sysUser|SysUser|sys_user|sys-user", result.Output);
+    }
+
+    /// <summary>
+    /// 内容渲染应规整多余空行：控制标签独占一行残留的连续空行压缩为单个空行，且注解与其字段保持紧邻不被空行隔开。
+    /// </summary>
+    [Fact]
+    public void Render_NormalizesExcessBlankLines_AnnotationAdjacentToField()
+    {
+        string template = "public class Info{{ table.className }} {\n"
+            + "{{ for column in table.fullColumn }}\n"
+            + "    @Schema(description = \"{{ column.comment }}\")\n"
+            + "    private {{ tool.type(column.rawDbType) }} {{ column.propertyName }};\n"
+            + "{{ end }}\n"
+            + "}";
+
+        PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        // 连续空行压缩为单个：渲染结果中不应出现 2 个及以上连续空行
+        Assert.DoesNotContain("\n\n\n", result.Output);
+        // 注解与其字段紧邻：@Schema 下一行紧跟字段声明，中间无空行
+        Assert.Contains("@Schema(description = \"主键\")\n    private Long id;", result.Output);
+        // 类体开括号后保留单个空行再进入首个成员
+        Assert.Contains("class InfoSysUser {\n\n    @Schema", result.Output);
+    }
+
+    /// <summary>
+    /// 注解行（以右括号结尾）后的空行应被删除：即使模板在注解与字段之间放置了控制标签残留空行，
+    /// 渲染结果仍应保证注解紧邻其字段，字段与下一个注解之间保留一个空行。
+    /// </summary>
+    [Fact]
+    public void Render_NormalizesBlankLines_AnnotationAdjacentToFieldEvenWithTagsBetween()
+    {
+        string template = "public class Info{{ table.className }} {\n"
+            + "{{ for column in table.fullColumn }}\n"
+            + "{{ if column.comment }}\n"
+            + "    @Schema(description = \"{{ column.comment }}\")\n"
+            + "{{ end }}\n"
+            + "    private {{ tool.type(column.rawDbType) }} {{ column.propertyName }};\n"
+            + "{{ end }}\n"
+            + "}";
+
+        PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        // 注解行后的控制标签残留空行被删除：@Schema 下一行紧跟字段声明
+        Assert.Contains("@Schema(description = \"主键\")\n    private Long id;", result.Output);
+        // 字段与下一个注解之间保留单个空行作为成员分隔
+        Assert.Contains("private Long id;\n\n    @Schema(description = \"用户名\")", result.Output);
+        // 无连续两个及以上空行
+        Assert.DoesNotContain("\n\n\n", result.Output);
+    }
+
+    /// <summary>
+    /// 方法链延续行（以点开头）之前的空行应被删除：queryWrapper 直接紧邻首条链式调用，
+    /// 各链式调用行之间无空行，结尾分号紧邻最后一条调用。
+    /// </summary>
+    [Fact]
+    public void Render_NormalizesBlankLines_MethodChainContinuationAdjacent()
+    {
+        string template = "        LambdaQueryWrapper<{{ table.className }}> queryWrapper = new LambdaQueryWrapper<>();\n"
+            + "        queryWrapper\n"
+            + "{{ for column in table.otherColumn }}\n"
+            + "{{ if tool.hump2Underline(column.propertyName) != 'id' }}\n"
+            + "                    .eq(ObjUtil.isNotEmpty(x.get{{ tool.firstUpperCase(column.propertyName) }}()),{{ table.className }}::get{{ tool.firstUpperCase(column.propertyName) }},x.get{{ tool.firstUpperCase(column.propertyName) }}())\n"
+            + "{{ end }}\n"
+            + "{{ end }}\n"
+            + "                    ;";
+
+        PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        // queryWrapper 与首个方法链延续行之间无空行
+        Assert.Contains("queryWrapper\n                    .eq(", result.Output);
+        // 方法链延续行之间无空行
+        Assert.DoesNotContain("())\n\n                    .", result.Output);
+        // 结尾分号直接紧邻最后一条链式调用
+        Assert.DoesNotContain("())\n\n                    ;", result.Output);
+    }
+
+    /// <summary>
+    /// 渲染结果的空行规整：连续 2 个及以上空行压缩为单个空行、全空白行归一为空串、行尾风格保持模板原样、末尾多余空行压缩为单个。
+    /// </summary>
+    [Theory]
+    [InlineData("line1\n\n\nline2", "line1\n\nline2")]
+    [InlineData("line1\r\n\r\n\r\nline2", "line1\r\n\r\nline2")]
+    [InlineData("line1\n   \n\t \nline2", "line1\n\nline2")]
+    [InlineData("line1\n\n\n", "line1\n")]
+    [InlineData("", "")]
+    [InlineData("line1\nline2", "line1\nline2")]
+    public void Render_NormalizesBlankLines_CompressesConsecutiveBlankLines(string template, string expected)
+    {
+        PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(expected, result.Output);
     }
 
     /// <summary>
@@ -476,5 +572,11 @@ public sealed class TemplateEngineTests
 
         /// <inheritdoc />
         public string? GetLlmApiKey() => null;
+
+        /// <inheritdoc />
+        public void ChangeDataDirectory(string dataDirectory)
+        {
+            throw new NotSupportedException("测试替身不支持切换数据目录。");
+        }
     }
 }

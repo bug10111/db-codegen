@@ -69,7 +69,7 @@ public sealed class TemplateEngine
             var context = new TemplateContext();
             context.CancellationToken = cancellationToken;
             context.PushGlobal(root);
-            string output = template.Render(context);
+            string output = NormalizeBlankLines(template.Render(context));
             stopwatch.Stop();
             return PreviewResult.Success(output, stopwatch.ElapsedMilliseconds);
         }
@@ -307,5 +307,104 @@ public sealed class TemplateEngine
     private static string FormatErrorMessage(string sourceName, string message, int line, int column)
     {
         return $"{sourceName} 第 {line} 行 第 {column} 列：{message}";
+    }
+
+    /// <summary>
+    /// 规整渲染结果的空行排版：连续多个空行压缩为单个空行、开头空行丢弃、仅含空白字符的行归一为空串、行尾风格保持模板原样；
+    /// 并删除"注解行（以右括号结尾）之后"与"方法链延续行（以点开头）之前"的空行，保证注解紧邻字段、链式调用紧邻上一语句。
+    /// 用于消除"控制标签独占一行"在渲染后残留的多余空行，避免生成代码被空行撑开。
+    /// </summary>
+    /// <param name="text">渲染后的原始文本。</param>
+    /// <returns>规整后的文本，空输入原样返回。</returns>
+    private static string NormalizeBlankLines(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        // 按模板原始行尾风格（CRLF 或 LF）切分，避免规整后行尾风格漂移
+        string newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+        // 第一遍：连续空行压缩为单个、开头空行丢弃、仅含空白字符的行统一为空串
+        var collected = new List<string>(lines.Length);
+        bool previousBlank = false;
+        foreach (string line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                if (collected.Count > 0 && !previousBlank)
+                {
+                    collected.Add(string.Empty);
+                }
+
+                previousBlank = true;
+                continue;
+            }
+
+            collected.Add(line);
+            previousBlank = false;
+        }
+
+        // 第二遍：删除不应保留的空行——前一非空行以右括号结尾（注解应紧邻其字段），
+        // 或后一非空行以点开头（方法链延续行应紧邻上一语句）
+        var normalized = new List<string>(collected.Count);
+        for (int index = 0; index < collected.Count; index++)
+        {
+            if (collected[index].Length == 0)
+            {
+                string? previous = FindPreviousNonBlank(collected, index);
+                string? next = FindNextNonBlank(collected, index);
+                bool shouldDrop = (previous is not null && previous.TrimEnd().EndsWith(")", StringComparison.Ordinal))
+                    || (next is not null && next.TrimStart().StartsWith(".", StringComparison.Ordinal));
+                if (shouldDrop)
+                {
+                    continue;
+                }
+            }
+
+            normalized.Add(collected[index]);
+        }
+
+        return string.Join(newline, normalized);
+    }
+
+    /// <summary>
+    /// 向前查找指定空行之前的最近一个非空行，无则返回空引用。
+    /// </summary>
+    /// <param name="lines">已规整的行集合。</param>
+    /// <param name="fromIndex">起始索引（不含）。</param>
+    /// <returns>最近的非空行文本，不存在返回 null。</returns>
+    private static string? FindPreviousNonBlank(List<string> lines, int fromIndex)
+    {
+        for (int index = fromIndex - 1; index >= 0; index--)
+        {
+            if (lines[index].Length > 0)
+            {
+                return lines[index];
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 向后查找指定空行之后的最近一个非空行，无则返回空引用。
+    /// </summary>
+    /// <param name="lines">已规整的行集合。</param>
+    /// <param name="fromIndex">起始索引（不含）。</param>
+    /// <returns>最近的非空行文本，不存在返回 null。</returns>
+    private static string? FindNextNonBlank(List<string> lines, int fromIndex)
+    {
+        for (int index = fromIndex + 1; index < lines.Count; index++)
+        {
+            if (lines[index].Length > 0)
+            {
+                return lines[index];
+            }
+        }
+
+        return null;
     }
 }

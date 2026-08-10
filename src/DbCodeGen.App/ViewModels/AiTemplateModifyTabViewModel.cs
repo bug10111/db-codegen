@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -7,6 +8,8 @@ using DbCodeGen.App.Services;
 using DbCodeGen.App.Views;
 using DbCodeGen.Core.Ai;
 using DbCodeGen.Core.Config;
+using DbCodeGen.Core.Templates;
+using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.App.ViewModels;
@@ -33,16 +36,20 @@ internal enum AiModifySessionState
 }
 
 /// <summary>
-/// 「AI 模板助手」改模板 Tab 视图模型（App.Ai）：以对话方式修改②区当前打开的模板文件——
-/// 展示当前修改目标（订阅 TemplateViewModel.PropertyChanged 实时刷新）、维护用户/AI 会话消息、
-/// 发送修改请求（快照编辑器最新内容 + 共享参考文件集合 + 多轮历史）、执行「应用到编辑器」目标一致性守卫
-/// （目标文件比对 + 内容一致性确认）后整体替换编辑器文本并置脏。
+/// 「AI 模板助手」改模板 Tab 视图模型（App.Ai）：以对话方式修改模板文件——
+/// 维护「选择要修改的模板」多选面板（勾选当前包文件，默认勾选②区当前文件）、用户/AI 会话消息、
+/// 发送修改请求并按下述两条链路分流：
+/// 单文件模式（仅勾选②区当前文件）走既有「AI 单文件 → 结果已返回 → 应用到编辑器」流程不回退，
+/// 含目标一致性守卫与内置包编辑-复制保存路径；
+/// 多文件模式（勾选多个文件或勾选非当前文件）单次调用 LLM 一次返回全部文件结果、成功结果直接写当前用户包、
+/// 当前文件被改时经 ApplyExternalWriteToCurrentFile 刷新编辑器并复位脏标记。
 /// 与写模板 Tab 共享同一窗口级参考文件上下文实例；会话历史仅成功轮追加，失败/取消轮不追加避免上下文污染。
 /// </summary>
 public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
 {
     private readonly ITemplateAiModifier _templateAiModifier;
     private readonly TemplateViewModel _templateViewModel;
+    private readonly TemplateFileWriter _templateFileWriter;
     private readonly IConfigService _configService;
     private readonly IDialogService _dialogService;
     private readonly IConfirmDialogService _confirmDialogService;
@@ -71,6 +78,11 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     private AiModifySessionState _state = AiModifySessionState.Idle;
 
     /// <summary>
+    /// 全选/清空批量更新勾选期间抑制逐项刷新，循环结束统一刷新一次，避免冗余通知。
+    /// </summary>
+    private bool _isBulkUpdatingSelection;
+
+    /// <summary>
     /// 修改指令输入文本，必填非空才可发送。
     /// </summary>
     [ObservableProperty]
@@ -81,6 +93,11 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     /// 会话消息列表，用户指令与 AI 结果气泡按加入顺序展示。
     /// </summary>
     public ObservableCollection<AiModifyChatItem> Messages { get; } = new();
+
+    /// <summary>
+    /// 「选择要修改的模板」多选面板勾选项，按当前模板包文件重建，默认勾选②区当前编辑文件。
+    /// </summary>
+    public ObservableCollection<ModifyFileSelectionItem> SelectableFiles { get; } = new();
 
     /// <summary>
     /// 是否空闲：可输入指令并发送。
@@ -117,12 +134,25 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 使用改模板对话服务、②区模板编辑器视图模型、配置服务、对话框服务、二次确认服务、设置窗口工厂、
-    /// 日志器与窗口级共享参考文件上下文构造改模板 Tab 视图模型。
+    /// 多选面板勾选摘要文本：按当前勾选数量组合展示，供面板底部引导用户确认批量范围。
+    /// </summary>
+    public string SelectionInfoText
+    {
+        get
+        {
+            int count = SelectableFiles.Count(item => item.IsSelected);
+            return count == 0 ? "未选择文件" : $"已选择 {count} 个文件";
+        }
+    }
+
+    /// <summary>
+    /// 使用改模板对话服务、②区模板编辑器视图模型、模板文件读写服务、配置服务、对话框服务、
+    /// 二次确认服务、设置窗口工厂、日志器与窗口级共享参考文件上下文构造改模板 Tab 视图模型。
     /// 共享上下文由宿主视图模型传入同一实例，与写模板 Tab 共读共改。
     /// </summary>
     /// <param name="templateAiModifier">改模板对话服务，承载 LLM 调用与结果解析。</param>
     /// <param name="templateViewModel">②区模板编辑器视图模型，目标展示与应用入口的事实源。</param>
+    /// <param name="templateFileWriter">模板文件读写服务，批量修改读盘与写盘保存。</param>
     /// <param name="configService">配置服务，读取 LLM 配置与 apiKey 是否已配置。</param>
     /// <param name="dialogService">消息提示服务，用于前置校验与守卫失败提示。</param>
     /// <param name="confirmDialogService">二次确认服务，用于 LLM 未配置跳设置与内容一致性覆盖确认。</param>
@@ -133,6 +163,7 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     public AiTemplateModifyTabViewModel(
         ITemplateAiModifier templateAiModifier,
         TemplateViewModel templateViewModel,
+        TemplateFileWriter templateFileWriter,
         IConfigService configService,
         IDialogService dialogService,
         IConfirmDialogService confirmDialogService,
@@ -142,6 +173,7 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(templateAiModifier);
         ArgumentNullException.ThrowIfNull(templateViewModel);
+        ArgumentNullException.ThrowIfNull(templateFileWriter);
         ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(confirmDialogService);
@@ -151,6 +183,7 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
 
         _templateAiModifier = templateAiModifier;
         _templateViewModel = templateViewModel;
+        _templateFileWriter = templateFileWriter;
         _configService = configService;
         _dialogService = dialogService;
         _confirmDialogService = confirmDialogService;
@@ -158,11 +191,12 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
         _logger = logger;
         _sharedContext = sharedContext;
 
-        // 订阅②区模板编辑器状态与文档加载/关闭事件，实时刷新当前修改目标展示与发送可用性
+        // 订阅②区模板编辑器状态与文档加载/关闭事件，实时刷新当前修改目标展示、发送可用性与多选面板
         _templateViewModel.PropertyChanged += OnTemplateViewModelPropertyChanged;
         _templateViewModel.LoadDocumentRequested += OnTemplateDocumentLoadRequested;
         _templateViewModel.ClearDocumentRequested += OnTemplateDocumentClearRequested;
         OnPropertyChanged(nameof(TargetDisplayText));
+        RebuildSelectableFiles();
     }
 
     /// <summary>
@@ -180,20 +214,23 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// ②区模板文档加载回调：文档开关不变的文件切换也会触发，保证目标展示的包名与相对路径实时刷新。
+    /// ②区模板文档加载回调：文档开关不变的文件切换也会触发，保证目标展示的包名与相对路径实时刷新，
+    /// 并按当前包文件重建多选面板、默认勾选当前编辑文件。
     /// </summary>
-    /// <param name="_">新载入的模板文本，目标展示不依赖正文内容。</param>
+    /// <param name="_">新载入的模板文本，目标展示与多选面板不依赖正文内容。</param>
     private void OnTemplateDocumentLoadRequested(string _)
     {
         RefreshTargetDisplay();
+        RebuildSelectableFiles();
     }
 
     /// <summary>
-    /// ②区模板文档关闭回调：目标回落到"未选择模板文件"并刷新发送可用性。
+    /// ②区模板文档关闭回调：目标回落到"未选择模板文件"，按当前包文件重建多选面板（无当前文件可默认勾选）。
     /// </summary>
     private void OnTemplateDocumentClearRequested()
     {
         RefreshTargetDisplay();
+        RebuildSelectableFiles();
     }
 
     /// <summary>
@@ -206,23 +243,159 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 发送修改指令：前置校验②区已打开文件、指令非空与 LLM 已配置，
-    /// 快照②区编辑器最新内容与共享参考文件集合，调用改模板对话服务并追加会话消息。
+    /// 按②区当前模板包文件重建多选面板勾选项：先解绑旧项订阅再重建，默认勾选②区当前编辑文件；
+    /// 当前包未加载时清空面板。重建后刷新勾选摘要与全选/清空命令可用性。
+    /// </summary>
+    private void RebuildSelectableFiles()
+    {
+        // 解绑旧勾选项的勾选变更订阅，避免悬挂引用与重复刷新
+        foreach (ModifyFileSelectionItem item in SelectableFiles)
+        {
+            item.PropertyChanged -= OnSelectionItemPropertyChanged;
+        }
+
+        SelectableFiles.Clear();
+
+        TemplatePackageInfo? package = _templateViewModel.CurrentPackage;
+        string? currentPath = _templateViewModel.CurrentFileRelativePath;
+        if (package is null)
+        {
+            RefreshSelectionState();
+            return;
+        }
+
+        // 遍历当前包文件重建可选项，相对路径与②区当前编辑文件一致时默认勾选
+        foreach (TemplateFileInfo file in package.Files)
+        {
+            if (file is null)
+            {
+                continue;
+            }
+
+            bool isCurrent = string.Equals(file.RelativeTemplatePath, currentPath, StringComparison.OrdinalIgnoreCase);
+            ModifyFileSelectionItem item = new(file, isCurrent);
+            item.PropertyChanged += OnSelectionItemPropertyChanged;
+            SelectableFiles.Add(item);
+        }
+
+        RefreshSelectionState();
+    }
+
+    /// <summary>
+    /// 勾选项勾选状态变化回调：单次勾选影响发送可用性与勾选摘要，统一刷新相关状态；
+    /// 全选/清空批量更新期间跳过逐项刷新，由批量命令末尾统一刷新。
+    /// </summary>
+    /// <param name="sender">变更的勾选项。</param>
+    /// <param name="e">属性变化事件参数。</param>
+    private void OnSelectionItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ModifyFileSelectionItem.IsSelected) && !_isBulkUpdatingSelection)
+        {
+            RefreshSelectionState();
+        }
+    }
+
+    /// <summary>
+    /// 刷新勾选摘要与发送/全选/清空命令可用性，供勾选变化、面板重建与全选清空命令复用。
+    /// </summary>
+    private void RefreshSelectionState()
+    {
+        OnPropertyChanged(nameof(SelectionInfoText));
+        SendCommand.NotifyCanExecuteChanged();
+        SelectAllCommand.NotifyCanExecuteChanged();
+        ClearSelectionCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// 全选当前包内全部待修改文件，随后刷新勾选摘要与命令可用性。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSelectAll))]
+    private void SelectAll()
+    {
+        // 批量置勾选期间抑制逐项刷新，循环结束统一刷新一次
+        _isBulkUpdatingSelection = true;
+        try
+        {
+            foreach (ModifyFileSelectionItem item in SelectableFiles)
+            {
+                item.IsSelected = true;
+            }
+        }
+        finally
+        {
+            _isBulkUpdatingSelection = false;
+        }
+
+        RefreshSelectionState();
+    }
+
+    /// <summary>
+    /// 判定全选命令是否可执行：面板非空且存在未勾选项时可全选。
+    /// </summary>
+    private bool CanSelectAll()
+    {
+        return SelectableFiles.Count > 0 && SelectableFiles.Any(item => !item.IsSelected);
+    }
+
+    /// <summary>
+    /// 清空全部勾选，随后刷新勾选摘要与命令可用性。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanClearSelection))]
+    private void ClearSelection()
+    {
+        // 批量置勾选期间抑制逐项刷新，循环结束统一刷新一次
+        _isBulkUpdatingSelection = true;
+        try
+        {
+            foreach (ModifyFileSelectionItem item in SelectableFiles)
+            {
+                item.IsSelected = false;
+            }
+        }
+        finally
+        {
+            _isBulkUpdatingSelection = false;
+        }
+
+        RefreshSelectionState();
+    }
+
+    /// <summary>
+    /// 判定清空命令是否可执行：存在已勾选项时可清空。
+    /// </summary>
+    private bool CanClearSelection()
+    {
+        return SelectableFiles.Any(item => item.IsSelected);
+    }
+
+    /// <summary>
+    /// 收集当前勾选的待修改文件项，供发送分流判断与批量请求组装使用。
+    /// </summary>
+    /// <returns>勾选文件项清单。</returns>
+    private List<ModifyFileSelectionItem> GetSelectedItems()
+    {
+        return SelectableFiles.Where(item => item.IsSelected).ToList();
+    }
+
+    /// <summary>
+    /// 发送修改指令：先做指令非空与勾选非空前置校验，再按勾选范围分流——
+    /// 仅勾选②区当前文件走单文件预览-应用流程，其余走批量修改并直接写盘流程。
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanSend))]
     private async Task SendAsync()
     {
-        // 前置校验：②区已打开模板文件才可发送，未打开时提示先选择文件
-        if (!_templateViewModel.HasDocument)
-        {
-            _dialogService.ShowInfo("请先在②区打开一个模板文件。");
-            return;
-        }
-
         // 前置校验：修改指令必填非空
         if (string.IsNullOrWhiteSpace(InstructionText))
         {
             _dialogService.ShowInfo("请输入修改指令。");
+            return;
+        }
+
+        // 前置校验：至少勾选一个待修改文件，未勾选时提示先选择
+        List<ModifyFileSelectionItem> selectedItems = GetSelectedItems();
+        if (selectedItems.Count == 0)
+        {
+            _dialogService.ShowInfo("请至少勾选一个要修改的模板文件。");
             return;
         }
 
@@ -233,6 +406,48 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
         }
 
         string instruction = InstructionText.Trim();
+
+        // 单文件模式判定：仅勾选②区当前文件时保持既有单文件预览-应用流程不回退
+        string? currentFilePath = _templateViewModel.CurrentFileRelativePath;
+        bool singleFileMode = selectedItems.Count == 1
+            && currentFilePath is not null
+            && string.Equals(selectedItems[0].RelativePath, currentFilePath, StringComparison.OrdinalIgnoreCase);
+
+        if (singleFileMode)
+        {
+            await SendSingleFileAsync(instruction);
+        }
+        else
+        {
+            await SendBatchAsync(instruction, selectedItems);
+        }
+    }
+
+    /// <summary>
+    /// 判定发送命令是否可执行：非发送中、指令非空且多选面板存在已勾选文件时可发送。
+    /// </summary>
+    private bool CanSend()
+    {
+        return !IsSending
+            && !string.IsNullOrWhiteSpace(InstructionText)
+            && SelectableFiles.Any(item => item.IsSelected);
+    }
+
+    /// <summary>
+    /// 单文件修改发送：快照②区当前文件最新内容与共享参考文件集合，调用单文件改模板服务，
+    /// 成功进入结果已返回状态供「应用到编辑器」目标一致性守卫后回填，失败与取消回空闲。
+    /// </summary>
+    /// <param name="instruction">修改指令。</param>
+    private async Task SendSingleFileAsync(string instruction)
+    {
+        // 前置校验：②区已打开模板文件才可发送，未打开时提示先选择文件（单文件模式判定已保证，防御性兜底）
+        if (!_templateViewModel.HasDocument)
+        {
+            _dialogService.ShowInfo("请先在②区打开一个模板文件。");
+            return;
+        }
+
+        // 校验通过后清空指令输入框，避免重发时残留旧指令
         InstructionText = string.Empty;
 
         // 快照②区当前修改目标与编辑器最新内容（含未保存编辑，用户所见即所改，不用磁盘原文）
@@ -310,11 +525,254 @@ public sealed partial class AiTemplateModifyTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 判定发送命令是否可执行：空闲、②区已打开文件且指令非空时可发送。
+    /// 批量修改发送：当前包必须为用户包（内置包只读中止），逐文件收集内容（当前文件取编辑器、其余读盘），
+    /// 单次调用 LLM 一次返回全部文件修改结果，AI 成功结果逐文件写盘，当前文件被改时刷新编辑器并复位脏标记，
+    /// 完成后追加 user 指令 + assistant 紧凑摘要历史与批量结果气泡，状态回空闲。
     /// </summary>
-    private bool CanSend()
+    /// <param name="instruction">修改指令。</param>
+    /// <param name="selectedItems">勾选的待修改文件项。</param>
+    private async Task SendBatchAsync(string instruction, List<ModifyFileSelectionItem> selectedItems)
     {
-        return !IsSending && _templateViewModel.HasDocument && !string.IsNullOrWhiteSpace(InstructionText);
+        // 前置校验：当前包已加载才可批量修改，未加载时提示先选择模板包
+        TemplatePackageInfo? package = _templateViewModel.CurrentPackage;
+        if (package is null)
+        {
+            _dialogService.ShowInfo("请先在②区选择模板包。");
+            return;
+        }
+
+        // 内置包只读安全边界：批量修改直接写盘无法落盘，提示先复制为可编辑用户包，中止本次批量
+        if (package.IsBuiltin)
+        {
+            _dialogService.ShowError("内置包只读，无法批量修改保存，请先在②区/模板包管理复制为可编辑用户包后再操作。");
+            return;
+        }
+
+        // 校验通过后清空指令输入框，避免重发时残留旧指令
+        InstructionText = string.Empty;
+
+        string packageName = package.Name;
+        string? currentFilePath = _templateViewModel.CurrentFileRelativePath;
+
+        // 追加用户指令气泡，随后取共享参考文件集合快照
+        Messages.Add(new AiModifyChatItem(AiModifyChatRole.User, instruction, false, null));
+        IReadOnlyList<AiReferenceFileItem> referenceFiles = _sharedContext.Snapshot();
+
+        // 复用取消源，保证上一轮在途调用被取消后再发起新一轮
+        _modifyCts?.Cancel();
+        _modifyCts?.Dispose();
+        _modifyCts = new CancellationTokenSource();
+        CancellationToken ct = _modifyCts.Token;
+
+        // 批量不产生可应用的单文件结果，清除更早单文件轮遗留的可应用结果，防旧气泡「应用到编辑器」误覆盖已写盘内容
+        _pendingResult = null;
+
+        SetState(AiModifySessionState.Sending);
+        _logger.LogInformation(
+            "AI 改模板批量发送开始，包 {PackageName}，勾选文件数 {FileCount}。", packageName, selectedItems.Count);
+
+        try
+        {
+            // 收集各文件内容：②区当前文件取编辑器最新内容（含未保存编辑），其余从磁盘读取；
+            // 读取失败记入本地失败清单，不进入 AI 批量请求，不中断其它文件
+            var aiFiles = new List<AiModifyFileItem>(selectedItems.Count);
+            var readFailures = new List<AiModifyFileResult>();
+            string? currentFileAiInput = null;
+            foreach (ModifyFileSelectionItem item in selectedItems)
+            {
+                if (string.Equals(item.RelativePath, currentFilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    string editorContent = _templateViewModel.EditorText;
+                    currentFileAiInput = editorContent;
+                    aiFiles.Add(new AiModifyFileItem { RelativePath = item.RelativePath, Content = editorContent });
+                    continue;
+                }
+
+                try
+                {
+                    string content = await _templateFileWriter.ReadAsync(package, item.RelativePath, ct);
+                    aiFiles.Add(new AiModifyFileItem { RelativePath = item.RelativePath, Content = content });
+                }
+                catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+                {
+                    // 单文件读取失败记入失败清单，继续处理其它文件，不中断批量
+                    _logger.LogWarning(exception, "AI 改模板批量读取文件失败，路径 {RelativePath}。", item.RelativePath);
+                    readFailures.Add(AiModifyFileResult.ForFailure(item.RelativePath, $"读取模板文件失败：{exception.Message}"));
+                }
+            }
+
+            // 无任何可修改文件时跳过 AI 调用，避免空请求进入 LLM；有文件时调用批量改模板服务
+            AiModifyMultipleResult modifyResult;
+            if (aiFiles.Count > 0)
+            {
+                var request = new AiModifyMultipleRequest
+                {
+                    PackageName = packageName,
+                    Files = aiFiles,
+                    ModificationInstruction = instruction,
+                    ReferenceFiles = referenceFiles,
+                    HistoryMessages = _historyMessages.ToList()
+                };
+                modifyResult = await _templateAiModifier.ModifyMultipleAsync(request, ct);
+            }
+            else
+            {
+                modifyResult = AiModifyMultipleResult.Failed(new List<string> { "所有勾选文件均无法读取。" });
+            }
+
+            // 合并读失败与 AI 逐文件结果，统一按文件粒度写盘与汇总，保证失败文件不落盘
+            var allFileResults = new List<AiModifyFileResult>(readFailures);
+            allFileResults.AddRange(modifyResult.FileResults);
+
+            // 逐文件写盘：AI 成功结果写当前用户包，写盘失败记入该文件错误；
+            // 写盘为本地小文件操作且结果已完整产出，用不可取消令牌保证已收集结果不被半途丢弃
+            var savedPaths = new List<string>();
+            var failedEntries = new List<(string Path, string Error)>();
+            foreach (AiModifyFileResult fileResult in allFileResults)
+            {
+                if (!fileResult.IsSuccess)
+                {
+                    failedEntries.Add((fileResult.RelativePath, fileResult.Error ?? "AI 修改失败。"));
+                    continue;
+                }
+
+                TemplateSaveResult saveResult = await _templateFileWriter.WriteAsync(
+                    package, fileResult.RelativePath, fileResult.NewContent!, CancellationToken.None);
+                if (saveResult.IsSuccess)
+                {
+                    savedPaths.Add(fileResult.RelativePath);
+                    _logger.LogInformation(
+                        "AI 改模板批量写盘成功，包 {PackageName}，相对路径 {RelativePath}。", packageName, fileResult.RelativePath);
+                }
+                else
+                {
+                    failedEntries.Add((fileResult.RelativePath, saveResult.Message ?? "写盘失败。"));
+                }
+            }
+
+            // 批量级错误（文件清单为空等）并入失败清单首部，随气泡逐条展示
+            if (modifyResult.Errors.Count > 0)
+            {
+                var batchErrors = new List<(string Path, string Error)>(modifyResult.Errors.Count);
+                foreach (string error in modifyResult.Errors)
+                {
+                    batchErrors.Add(("批量修改", error));
+                }
+
+                batchErrors.AddRange(failedEntries);
+                failedEntries = batchErrors;
+            }
+
+            // 当前②区文件被批量写盘成功时刷新编辑器并复位脏标记，触发预览重渲染；
+            // 批量期间②区编辑器被用户键入时先二次确认，防批量写盘结果静默覆盖未保存键入
+            string? savedCurrentContent = null;
+            foreach (AiModifyFileResult fileResult in allFileResults)
+            {
+                if (fileResult.IsSuccess
+                    && string.Equals(fileResult.RelativePath, currentFilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    savedCurrentContent = fileResult.NewContent;
+                    break;
+                }
+            }
+
+            if (savedCurrentContent is not null && currentFilePath is not null)
+            {
+                // 仅当②区当前文件仍为批量修改时的目标文件才处理编辑器刷新，用户已切换文件则不打扰
+                bool stillOnTargetFile = string.Equals(
+                    _templateViewModel.CurrentFileRelativePath, currentFilePath, StringComparison.OrdinalIgnoreCase);
+                if (stillOnTargetFile)
+                {
+                    // 批量期间②区编辑器被用户键入时先二次确认，防批量写盘结果静默覆盖未保存键入
+                    bool editorChangedDuringBatch = currentFileAiInput is not null
+                        && !string.Equals(_templateViewModel.EditorText, currentFileAiInput, StringComparison.Ordinal);
+                    if (!editorChangedDuringBatch
+                        || await _confirmDialogService.ConfirmAsync(
+                            "检测到编辑器内容已在批量修改期间被修改",
+                            "检测到编辑器内容已在批量修改期间被修改，是否以批量写盘结果刷新编辑器？"))
+                    {
+                        _templateViewModel.ApplyExternalWriteToCurrentFile(currentFilePath, savedCurrentContent);
+                    }
+                }
+            }
+
+            // 历史：仅当批量实际写盘存在成功结果且未被取消时追加 user 指令 + assistant 紧凑摘要，
+            // 摘要以实际写盘结果为准而非 AI 解析结果（写盘失败的文件记失败），与单文件「仅成功轮追加」契约一致
+            bool hasSuccessfulResult = savedPaths.Count > 0;
+            if (hasSuccessfulResult && !ct.IsCancellationRequested)
+            {
+                _historyMessages.Add(new LlmChatMessage { Role = "user", Content = instruction });
+
+                // 按文件路径建立写盘失败原因映射与成功集合，供逐文件摘要判定；批量级合成错误项不参与逐文件摘要
+                var savedPathSet = new HashSet<string>(savedPaths, StringComparer.OrdinalIgnoreCase);
+                var failedByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach ((string path, string error) in failedEntries)
+                {
+                    failedByPath.TryAdd(path, error);
+                }
+
+                var summaryLines = new List<string>(allFileResults.Count);
+                foreach (AiModifyFileResult fileResult in allFileResults)
+                {
+                    if (savedPathSet.Contains(fileResult.RelativePath))
+                    {
+                        summaryLines.Add($"{fileResult.RelativePath}：成功");
+                    }
+                    else
+                    {
+                        string error = failedByPath.TryGetValue(fileResult.RelativePath, out string? failedError)
+                            && failedError is not null
+                            ? failedError
+                            : "写盘失败。";
+                        summaryLines.Add($"{fileResult.RelativePath}：{error}");
+                    }
+                }
+
+                _historyMessages.Add(new LlmChatMessage { Role = "assistant", Content = string.Join("\n", summaryLines) });
+            }
+
+            // 会话气泡：多行摘要展示 ✅ 已保存 N 个 / ❌ 失败 M 个逐文件列出，已自动写盘无需「应用到编辑器」
+            var bubbleLines = new List<string>();
+            if (savedPaths.Count > 0)
+            {
+                bubbleLines.Add($"✅ 已保存 {savedPaths.Count} 个文件");
+            }
+
+            if (failedEntries.Count > 0)
+            {
+                bubbleLines.Add($"❌ 失败 {failedEntries.Count} 个：");
+                foreach ((string path, string error) in failedEntries)
+                {
+                    bubbleLines.Add($"  {path}：{error}");
+                }
+            }
+
+            if (bubbleLines.Count == 0)
+            {
+                bubbleLines.Add("批量修改未产生任何结果。");
+            }
+
+            Messages.Add(new AiModifyChatItem(AiModifyChatRole.Ai, string.Join("\n", bubbleLines), false, null));
+            _logger.LogInformation(
+                "AI 改模板批量完成，包 {PackageName}，成功 {SuccessCount} 个，失败 {FailureCount} 个。",
+                packageName,
+                savedPaths.Count,
+                failedEntries.Count);
+            SetState(AiModifySessionState.Idle);
+        }
+        catch (OperationCanceledException)
+        {
+            // 用户停止或窗口关闭取消在途批量调用：不追加历史，回空闲
+            Messages.Add(new AiModifyChatItem(AiModifyChatRole.Ai, "批量发送已取消。", false, null));
+            SetState(AiModifySessionState.Idle);
+        }
+        catch (Exception exception)
+        {
+            // 调用异常：不追加历史，展示可读错误回空闲
+            _logger.LogError(exception, "AI 改模板批量调用异常，包 {PackageName}。", packageName);
+            Messages.Add(new AiModifyChatItem(AiModifyChatRole.Ai, $"批量修改调用失败：{exception.Message}", false, null));
+            SetState(AiModifySessionState.Idle);
+        }
     }
 
     /// <summary>

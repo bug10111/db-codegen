@@ -103,6 +103,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(AddTemplateFileCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RenameTemplateFileCommand))]
     private TemplatePackageListItemViewModel? _selectedPackage;
 
     /// <summary>
@@ -116,6 +117,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RenameTemplateFileCommand))]
     [NotifyCanExecuteChangedFor(nameof(MoveFileUpCommand))]
     [NotifyCanExecuteChangedFor(nameof(MoveFileDownCommand))]
     [NotifyCanExecuteChangedFor(nameof(ResetFileOrderCommand))]
@@ -156,6 +158,7 @@ public sealed partial class TemplateViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(CreatePackageCommand))]
     [NotifyCanExecuteChangedFor(nameof(AddTemplateFileCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteTemplateFileCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RenameTemplateFileCommand))]
     [NotifyCanExecuteChangedFor(nameof(MoveFileUpCommand))]
     [NotifyCanExecuteChangedFor(nameof(MoveFileDownCommand))]
     [NotifyCanExecuteChangedFor(nameof(ResetFileOrderCommand))]
@@ -351,6 +354,41 @@ public sealed partial class TemplateViewModel : ObservableObject
         // 通知视图层替换编辑器文本并重置撤销栈，通知预览区按新内容防抖渲染
         ReplaceDocumentRequested?.Invoke(newContent);
         EditorContentChanged?.Invoke(newContent);
+    }
+
+    /// <summary>
+    /// 应用批量修改写盘后的外部结果到②区编辑器：仅当相对路径与当前编辑文件匹配时，
+    /// 以已写盘的新内容刷新编辑器文本并复位脏标记为已保存（磁盘与编辑器一致），
+    /// 随后触发载入文档与预览渲染事件；相对路径不匹配时静默忽略（当前编辑文件未被批量修改）。
+    /// </summary>
+    /// <param name="relativePath">批量修改写盘的文件相对包根路径。</param>
+    /// <param name="content">批量修改写盘后的完整新文件内容。</param>
+    public void ApplyExternalWriteToCurrentFile(string relativePath, string content)
+    {
+        if (_currentFile is null
+            || !string.Equals(_currentFile.RelativeTemplatePath, relativePath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // 载入文本期间抑制置脏，随后以已写盘内容为基准复位脏标记为已保存，保证磁盘与编辑器一致
+        _isLoadingDocument = true;
+        try
+        {
+            EditorText = content;
+        }
+        finally
+        {
+            _isLoadingDocument = false;
+        }
+
+        _originalText = content;
+        IsDirty = false;
+
+        // 通知视图层载入已写盘文本并重置光标，通知预览区按新内容防抖渲染
+        LoadDocumentRequested?.Invoke(content);
+        EditorContentChanged?.Invoke(content);
+        _logger.LogInformation("批量修改写盘结果已应用到编辑器，相对路径 {RelativePath}。", relativePath);
     }
 
     /// <summary>
@@ -647,6 +685,157 @@ public sealed partial class TemplateViewModel : ObservableObject
     private bool CanDeleteTemplateFile() => SelectedPackage is not null && !SelectedPackage.IsBuiltin && SelectedFile is not null && !IsBusy;
 
     /// <summary>
+    /// 重命名当前用户包选中的模板文件：询问新相对路径后经服务物理改名并同步清单，
+    /// 成功后迁移该包勾选态/文件顺序/最近选中记忆中的旧路径为新路径，重建文件树并选中新路径文件。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRenameTemplateFile))]
+    private async Task RenameTemplateFileAsync()
+    {
+        if (SelectedPackage is null || SelectedFile is null)
+        {
+            return;
+        }
+
+        string packageName = SelectedPackage.Name;
+        string oldRelativePath = SelectedFile.RelativeTemplatePath;
+        bool isCurrentFile = _currentFile is not null
+            && string.Equals(_currentFile.RelativeTemplatePath, oldRelativePath, StringComparison.OrdinalIgnoreCase);
+
+        string? newRelativePath = await _promptDialogService.PromptAsync(
+            "重命名模板", $"为模板包“{packageName}”输入新相对路径（可含分组目录）：", oldRelativePath);
+        if (string.IsNullOrWhiteSpace(newRelativePath))
+        {
+            return;
+        }
+
+        // 重命名输入经包加载器规范化为正斜杠形式（用户可能输入反斜杠），
+        // 与服务侧规范化结果保持一致，后续记忆迁移与重启恢复均按同一路径形式匹配
+        string normalizedNew = TemplatePackageLoader.NormalizeRelativePath(newRelativePath.Trim());
+
+        // 重命名会重建文件树并切换当前文件，脏文档先经二次确认，取消则终止本次重命名
+        if (IsDirty)
+        {
+            bool canLeave = await ConfirmSaveBeforeSwitchAsync("重命名模板");
+            if (!canLeave)
+            {
+                return;
+            }
+        }
+
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.RenameTemplateFileAsync(
+                packageName, oldRelativePath, normalizedNew, CancellationToken.None);
+
+            if (result.Status != TemplatePackageOperationStatus.Succeeded || result.Package is null)
+            {
+                _dialogService.ShowError(result.Message ?? "重命名模板失败。");
+                return;
+            }
+
+            _currentPackage = result.Package;
+
+            // 迁移该包勾选态/文件顺序/最近选中记忆中的旧路径为新路径，随后重建文件树并选中新路径文件
+            MigrateFileMemoryPaths(packageName, oldRelativePath, normalizedNew);
+
+            _isApplyingRollback = true;
+            try
+            {
+                ReloadFiles();
+            }
+            finally
+            {
+                _isApplyingRollback = false;
+            }
+
+            if (isCurrentFile)
+            {
+                SelectFileAndLoad(normalizedNew);
+            }
+            else
+            {
+                // 重命名的不是当前编辑文件时，把选中与切换基线复位到当前编辑文件，防回退指向旧路径实例
+                TemplateFileInfo? target = _currentFile is null
+                    ? null
+                    : Files.FirstOrDefault(file =>
+                        string.Equals(file.RelativeTemplatePath, _currentFile.RelativeTemplatePath, StringComparison.OrdinalIgnoreCase));
+                SelectedFile = target;
+                _lastSelectedFile = target;
+                _fileBeforeSwitch = target;
+            }
+
+            _dialogService.ShowInfo($"已重命名模板“{oldRelativePath}”为“{normalizedNew}”。");
+            _logger.LogInformation(
+                "重命名模板成功，包 {PackageName}，旧路径 {OldPath}，新路径 {NewPath}。", packageName, oldRelativePath, normalizedNew);
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
+        {
+            _dialogService.ShowError($"重命名模板失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定重命名文件命令是否可执行：选中用户包文件且非繁忙，内置包只读禁止重命名。
+    /// </summary>
+    private bool CanRenameTemplateFile() => SelectedPackage is not null && !SelectedPackage.IsBuiltin && SelectedFile is not null && !IsBusy;
+
+    /// <summary>
+    /// 迁移指定包内模板文件重命名后的记忆路径：勾选态、文件顺序与最近选中文件中的旧路径替换为新路径，随后落盘。
+    /// 写盘失败仅记录警告日志，不打断重命名流程。
+    /// </summary>
+    /// <param name="packageName">目标模板包包名。</param>
+    /// <param name="oldPath">重命名前的相对路径。</param>
+    /// <param name="newPath">重命名后的相对路径。</param>
+    private void MigrateFileMemoryPaths(string packageName, string oldPath, string newPath)
+    {
+        AppConfig config = _configService.Current;
+
+        // 勾选态记忆中的旧路径替换为新路径，保持勾选结果不随重命名丢失
+        if (config.TemplateFileStates.TryGetValue(packageName, out List<TemplateFileState>? states) && states is not null)
+        {
+            foreach (TemplateFileState state in states)
+            {
+                if (state is not null && string.Equals(state.TemplatePath, oldPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.TemplatePath = newPath;
+                }
+            }
+        }
+
+        // 文件顺序记忆中的旧路径替换为新路径，保持展示顺序不随重命名丢失
+        if (config.TemplateFileOrder.TryGetValue(packageName, out List<string>? order) && order is not null)
+        {
+            for (int index = 0; index < order.Count; index++)
+            {
+                if (string.Equals(order[index], oldPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    order[index] = newPath;
+                }
+            }
+        }
+
+        // 最近选中文件记忆指向旧路径时同步为新路径，避免下次加载包时按旧路径定位失败
+        if (string.Equals(config.LastSelectedTemplateFile, oldPath, StringComparison.OrdinalIgnoreCase))
+        {
+            config.LastSelectedTemplateFile = newPath;
+        }
+
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "重命名模板后记忆迁移保存失败，包 {PackageName}。", packageName);
+        }
+    }
+
+    /// <summary>
     /// 按包名定位列表项并走正常选中流程加载该包，触发文件树重建与首文件自动载入。
     /// </summary>
     /// <param name="packageName">目标包名。</param>
@@ -761,17 +950,35 @@ public sealed partial class TemplateViewModel : ObservableObject
                 _isApplyingRollback = false;
             }
 
-            // 无历史选中或历史选中已失效但列表非空时，默认选中第一包并走真实选中事件触发包加载与首文件载入
+            // 无历史选中或历史选中已失效但列表非空时，优先按配置记忆的 LastSelectedPackage 定位包，
+            // 记忆命中的包被选中并走真实选中事件加载，未命中回退第一包
             if (defaultSelectFirstPackage && SelectedPackage is null && Packages.Count > 0)
             {
-                _lastSelectedPackage = Packages[0];
-                SelectedPackage = Packages[0];
+                TemplatePackageListItemViewModel? remembered = ResolveRememberedPackage();
+                _lastSelectedPackage = remembered ?? Packages[0];
+                SelectedPackage = _lastSelectedPackage;
             }
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
         {
             _dialogService.ShowError($"加载模板包列表失败：{exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// 按配置记忆的最近选中包名定位包列表项，记忆为空或包已不存在时返回 null。
+    /// </summary>
+    /// <returns>记忆命中的包列表项；未命中返回 null。</returns>
+    private TemplatePackageListItemViewModel? ResolveRememberedPackage()
+    {
+        string rememberedName = _configService.Current.LastSelectedPackage;
+        if (string.IsNullOrWhiteSpace(rememberedName))
+        {
+            return null;
+        }
+
+        return Packages.FirstOrDefault(item =>
+            string.Equals(item.Name, rememberedName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -844,11 +1051,14 @@ public sealed partial class TemplateViewModel : ObservableObject
             CloseCurrentDocument();
             StatusText = $"已加载模板包：{package.Name}（{package.Files.Count} 个模板文件）";
 
-            // 文件树非空时默认选中第一个文件并载入编辑器，让模板包加载即进入可编辑状态
+            // 包切换成功即写入最近选中包并落盘，失败仅记日志不打断加载
+            PersistLastSelectedPackage(package.Name);
+
+            // 文件树非空时优先按配置记忆的 LastSelectedTemplateFile 恢复选中文件，未命中默认第一个文件
             if (Files.Count > 0)
             {
-                _lastSelectedFile = Files[0];
-                SelectedFile = Files[0];
+                _lastSelectedFile = ResolveRememberedFile() ?? Files[0];
+                SelectedFile = _lastSelectedFile;
             }
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
@@ -859,6 +1069,68 @@ public sealed partial class TemplateViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 按配置记忆的最近选中模板文件路径定位文件树项，记忆为空或文件已不存在时返回 null。
+    /// </summary>
+    /// <returns>记忆命中的文件项；未命中返回 null。</returns>
+    private TemplateFileInfo? ResolveRememberedFile()
+    {
+        string rememberedPath = _configService.Current.LastSelectedTemplateFile;
+        if (string.IsNullOrWhiteSpace(rememberedPath))
+        {
+            return null;
+        }
+
+        return Files.FirstOrDefault(file =>
+            string.Equals(file.RelativeTemplatePath, rememberedPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 将最近选中的模板包名写入配置并保存，启动时据此恢复②区包下拉；写盘失败仅记日志不打断加载。
+    /// </summary>
+    /// <param name="packageName">目标包名。</param>
+    private void PersistLastSelectedPackage(string packageName)
+    {
+        AppConfig config = _configService.Current;
+        if (string.Equals(config.LastSelectedPackage, packageName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        config.LastSelectedPackage = packageName;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "模板包选择记忆保存失败，包 {PackageName}。", packageName);
+        }
+    }
+
+    /// <summary>
+    /// 将最近选中的模板文件相对路径写入配置并保存，包加载后据此恢复文件树选中；写盘失败仅记日志不打断加载。
+    /// </summary>
+    /// <param name="relativePath">目标文件相对包根路径。</param>
+    private void PersistLastSelectedTemplateFile(string relativePath)
+    {
+        AppConfig config = _configService.Current;
+        if (string.Equals(config.LastSelectedTemplateFile, relativePath, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        config.LastSelectedTemplateFile = relativePath;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "模板文件选择记忆保存失败，路径 {RelativePath}。", relativePath);
         }
     }
 
@@ -942,6 +1214,9 @@ public sealed partial class TemplateViewModel : ObservableObject
             EditorContentChanged?.Invoke(text);
             _logger.LogInformation(
                 "模板文件加载成功，包 {PackageName}，相对路径 {RelativePath}。", _currentPackage.Name, file.RelativeTemplatePath);
+
+            // 文件切换成功即写入最近选中文件并落盘，失败仅记日志不打断加载
+            PersistLastSelectedTemplateFile(file.RelativeTemplatePath);
         }
         catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException)
         {

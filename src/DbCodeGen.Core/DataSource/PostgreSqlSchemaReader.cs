@@ -11,12 +11,18 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
 {
     /// <summary>
     /// 表清单查询语句，只读当前 schema 基础表，默认按表名排序，首屏不含列。
-    /// 表注释经 pg_class 描述对象读取，schema 取当前 search_path 首段并以 public 兜底。
+    /// 表注释经 pg_class 描述对象读取，schema 取当前 search_path 首段并以 public 兜底；
+    /// 关联 pg_class 读取表 oid 作为"新建先后"排序键（同一数据库内新表 oid 更大）。
     /// </summary>
     private const string TableListSql =
         "SELECT t.table_name, t.table_schema, " +
-        "obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass, 'pg_class') AS table_comment " +
+        "obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass, 'pg_class') AS table_comment, " +
+        "c.oid::bigint AS table_oid " +
         "FROM information_schema.tables t " +
+        "JOIN pg_class c " +
+        "ON c.relname = t.table_name " +
+        "AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = t.table_schema) " +
+        "AND c.relkind IN ('r', 'p') " +
         "WHERE t.table_type = 'BASE TABLE' AND t.table_schema = COALESCE(current_schema(), 'public') " +
         "ORDER BY t.table_name";
 
@@ -39,6 +45,16 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
         "WHERE c.table_schema = COALESCE(current_schema(), 'public') AND c.table_name = @tableName " +
         "ORDER BY c.ordinal_position";
 
+    /// <summary>
+    /// 表元信息查询语句，按表名参数只读当前 schema 表注释，供表详情阶段补齐 comment；
+    /// 创建时间 PG 无可靠来源，保持 null 不查询。
+    /// </summary>
+    private const string TableMetaSql =
+        "SELECT t.table_schema, " +
+        "obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass, 'pg_class') AS table_comment " +
+        "FROM information_schema.tables t " +
+        "WHERE t.table_schema = COALESCE(current_schema(), 'public') AND t.table_name = @tableName";
+
     private readonly NpgsqlConnection _connection;
 
     /// <summary>
@@ -57,14 +73,15 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
         await using NpgsqlCommand command = _connection.CreateCommand();
         command.CommandText = TableListSql;
 
-        // 逐行读取表清单，仅组装表名/库名/注释，不触碰列元数据
+        // 逐行读取表清单，仅组装表名/库名/注释/oid 顺序键，不触碰列元数据
         await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
             string rawName = reader.GetString(reader.GetOrdinal("table_name"));
             string schemaName = reader.GetString(reader.GetOrdinal("table_schema"));
             string? comment = ReadNullableString(reader, "table_comment");
-            tables.Add(CreateTableSummary(rawName, schemaName, comment));
+            long creationOrder = reader.GetInt64(reader.GetOrdinal("table_oid"));
+            tables.Add(CreateTableSummary(rawName, schemaName, comment, creationOrder));
         }
 
         return tables;
@@ -77,24 +94,60 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
 
         var columns = new List<ColumnInfo>();
         string schemaName = string.Empty;
-        await using NpgsqlCommand command = _connection.CreateCommand();
-        command.CommandText = ColumnListSql;
-        command.Parameters.AddWithValue("@tableName", tableName);
 
-        // 逐行读取列元数据，库名取自首行数据行的 schema 列
-        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        // 逐行读取列元数据，库名取自首行数据行的 schema 列；读取器与命令限定在块内，读完即释放连接，
+        // 避免连接上残留未关闭读取器导致后续表元信息查询报"存在打开的 DataReader"
+        await using (NpgsqlCommand command = _connection.CreateCommand())
         {
-            if (schemaName.Length == 0)
+            command.CommandText = ColumnListSql;
+            command.Parameters.AddWithValue("@tableName", tableName);
+
+            await using (NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
-                schemaName = reader.GetString(reader.GetOrdinal("table_schema"));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    if (schemaName.Length == 0)
+                    {
+                        schemaName = reader.GetString(reader.GetOrdinal("table_schema"));
+                    }
+                    columns.Add(ReadColumnInfo(reader));
+                }
             }
-            columns.Add(ReadColumnInfo(reader));
         }
 
-        TableInfo table = CreateTableSummary(tableName, schemaName, null);
+        // 首个读取器已释放、连接空闲，再查表注释，补齐 comment（空列表时 schema 名同样取自表元信息）；PG 创建时间无可靠来源保持 null
+        (string? tableComment, string? metaSchema) = await ReadTableMetaAsync(tableName, ct);
+        if (schemaName.Length == 0 && !string.IsNullOrEmpty(metaSchema))
+        {
+            schemaName = metaSchema;
+        }
+
+        TableInfo table = CreateTableSummary(tableName, schemaName, tableComment);
         table.SetColumns(columns);
         return table;
+    }
+
+    /// <summary>
+    /// 读取单张表的注释元信息，供表详情阶段补齐；表不存在时返回空值。
+    /// </summary>
+    /// <param name="tableName">目标表名。</param>
+    /// <param name="ct">取消标记。</param>
+    /// <returns>表注释与 schema 名二元组，任一缺失时对应值为 null。</returns>
+    private async Task<(string? Comment, string? SchemaName)> ReadTableMetaAsync(string tableName, CancellationToken ct)
+    {
+        await using NpgsqlCommand command = _connection.CreateCommand();
+        command.CommandText = TableMetaSql;
+        command.Parameters.AddWithValue("@tableName", tableName);
+
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            return (null, null);
+        }
+
+        string? schemaName = ReadNullableString(reader, "table_schema");
+        string? comment = ReadNullableString(reader, "table_comment");
+        return (comment, schemaName);
     }
 
     /// <inheritdoc />
@@ -134,13 +187,14 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
     }
 
     /// <summary>
-    /// 构造表清单摘要实体，只含表名/库名/注释，类名与变量名按表名实时转换。
+    /// 构造表清单摘要实体，只含表名/库名/注释/新建顺序键，类名与变量名按表名实时转换。
     /// </summary>
     /// <param name="rawName">原始表名。</param>
     /// <param name="schemaName">所属 schema 名。</param>
     /// <param name="comment">表注释，可为空。</param>
+    /// <param name="creationOrder">新建先后顺序键（pg_class.oid），越大越新；表详情阶段不传保持 0。</param>
     /// <returns>不含列的表摘要实体。</returns>
-    private static TableInfo CreateTableSummary(string rawName, string schemaName, string? comment)
+    private static TableInfo CreateTableSummary(string rawName, string schemaName, string? comment, long creationOrder = 0)
     {
         return new TableInfo
         {
@@ -148,7 +202,8 @@ public sealed class PostgreSqlSchemaReader : ISchemaReader
             SchemaName = schemaName,
             ClassName = TableInfo.ToPascalCase(rawName),
             VariableName = TableInfo.ToCamelCase(rawName),
-            Comment = comment
+            Comment = comment,
+            CreationOrder = creationOrder
         };
     }
 

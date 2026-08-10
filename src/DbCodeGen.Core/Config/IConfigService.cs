@@ -30,9 +30,18 @@ public interface IConfigService
     AppConfig Current { get; }
 
     /// <summary>
-    /// 配置文件绝对路径，默认 %AppData%\DbCodeGen\config.json，供诊断与单元测试使用。
+    /// 配置文件绝对路径，默认 %AppData%\DbCodeGen\config.json；经数据目录切换后指向新目录下的 config.json。
     /// </summary>
     string ConfigFilePath { get; }
+
+    /// <summary>
+    /// 切换统一数据目录：校验目标目录可写后，将当前配置文件复制到新目录、迁移默认模板目录、
+    /// 更新内存 DataDirectory 与配置路径、写定位文件并落盘，使 config.json 与 Templates 集中到新目录。
+    /// </summary>
+    /// <param name="dataDirectory">目标数据目录绝对路径。</param>
+    /// <exception cref="ArgumentException">目录为空、非绝对路径、指向已存在文件或不可写时抛出。</exception>
+    /// <exception cref="ConfigSaveException">切换后落盘失败时抛出。</exception>
+    void ChangeDataDirectory(string dataDirectory);
 
     /// <summary>
     /// 获取批量代码生成使用的默认值快照，包含工作区根与最近相对输出根。

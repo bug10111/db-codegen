@@ -67,4 +67,25 @@ public class AppConfig
     /// 相对路径为正斜杠规范化（与 manifest files[].template 对应）；空集合视为默认排序（manifest files[] 声明顺序）。
     /// </summary>
     public Dictionary<string, List<string>> TemplateFileOrder { get; set; } = new();
+
+    /// <summary>
+    /// 最近一次选中的模板包名，启动时按此恢复②区包下拉选中项；模板包重命名后同步为最新名。
+    /// </summary>
+    public string LastSelectedPackage { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 最近一次选中的模板文件相对包根路径，模板包加载后按此恢复文件树选中项。
+    /// </summary>
+    public string LastSelectedTemplateFile { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 统一数据目录，集中存放 config.json 与 Templates 等数据；为空表示未设置，回退 %AppData%\DbCodeGen。
+    /// 由设置窗口数据目录功能切换，定位文件 config-location.json 引导配置所在地。
+    /// </summary>
+    public string DataDirectory { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 主窗口布局记忆，记录上区三栏列宽与纵向行高，供启动恢复与关闭回写。
+    /// </summary>
+    public MainLayoutState MainLayout { get; set; } = new();
 }

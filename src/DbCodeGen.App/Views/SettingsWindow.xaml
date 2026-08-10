@@ -37,6 +37,37 @@
                     </Grid>
                 </GroupBox>
 
+                <!-- 数据目录：统一存放 config.json 与 Templates，可指向百度网盘同步目录实现自动备份 -->
+                <GroupBox Header="数据目录" Padding="8" Margin="0,0,0,12">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding DataDirectory, UpdateSourceTrigger=PropertyChanged}"
+                                     VerticalContentAlignment="Center" />
+                            <Button Grid.Column="1"
+                                    Content="浏览..."
+                                    Margin="8,0,0,0"
+                                    Padding="14,4"
+                                    Command="{Binding BrowseDataDirectoryCommand}" />
+                            <Button Grid.Column="2"
+                                    Content="应用"
+                                    Margin="8,0,0,0"
+                                    Padding="14,4"
+                                    Command="{Binding ApplyDataDirectoryCommand}" />
+                        </Grid>
+                        <TextBlock Text="统一存放 config.json 与 Templates 等数据，可指向百度网盘同步目录实现自动备份；「应用」立即迁移并落盘，主「保存」会联动切换。"
+                                   FontSize="11"
+                                   Foreground="Gray"
+                                   TextWrapping="Wrap"
+                                   Margin="0,4,0,0" />
+                    </StackPanel>
+                </GroupBox>
+
                 <!-- LLM 配置：接口地址（OpenAI 兼容）、API Key（密码框）与模型名；API Key 留空保持原密文 -->
                 <GroupBox Header="LLM 配置" Padding="8" Margin="0,0,0,12">
                     <Grid>
@@ -114,7 +145,7 @@
                     </Grid>
                 </GroupBox>
 
-                <!-- AI 参考文件限制：数量/单文件/总大小上限，写模板与改模板上传参考文件时共用校验 -->
+                <!-- AI 参考文件限制：数量/单文件/总大小上限，写模板与改模板上传参考文件时共用校验；标签带单位、输入框短框收敛 -->
                 <GroupBox Header="AI 参考文件限制" Padding="8" Margin="0,0,0,12">
                     <Grid>
                         <Grid.RowDefinitions>
@@ -124,32 +155,39 @@
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="110" />
+                            <ColumnDefinition Width="120" />
+                            <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock Grid.Row="0" Grid.Column="0" Text="数量上限" VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="数量上限（个）" VerticalAlignment="Center" />
                         <TextBox Grid.Row="0" Grid.Column="1"
                                  Text="{Binding AiReferenceMaxFileCount, UpdateSourceTrigger=PropertyChanged}"
+                                 Width="72"
                                  Margin="0,0,0,4"
                                  VerticalContentAlignment="Center"
                                  ToolTip="参考文件数量上限，默认 20 个" />
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="个" VerticalAlignment="Center" Margin="6,0,0,4" />
 
-                        <TextBlock Grid.Row="1" Grid.Column="0" Text="单文件上限" VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="单文件上限（MB）" VerticalAlignment="Center" />
                         <TextBox Grid.Row="1" Grid.Column="1"
                                  Text="{Binding AiReferenceMaxSingleFileMb, UpdateSourceTrigger=PropertyChanged}"
+                                 Width="72"
                                  Margin="0,0,0,4"
                                  VerticalContentAlignment="Center"
                                  ToolTip="单文件大小上限（MB），默认 1 MB" />
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="MB" VerticalAlignment="Center" Margin="6,0,0,4" />
 
-                        <TextBlock Grid.Row="2" Grid.Column="0" Text="总大小上限" VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="总大小上限（MB）" VerticalAlignment="Center" />
                         <TextBox Grid.Row="2" Grid.Column="1"
                                  Text="{Binding AiReferenceMaxTotalMb, UpdateSourceTrigger=PropertyChanged}"
+                                 Width="72"
                                  Margin="0,0,0,4"
                                  VerticalContentAlignment="Center"
                                  ToolTip="参考文件总大小上限（MB），默认 10 MB" />
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="MB" VerticalAlignment="Center" Margin="6,0,0,4" />
 
-                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2"
+                        <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3"
                                    Text="上传参考文件时按此限制校验：数量上限为文件个数、单文件上限不得大于总大小上限；写模板与改模板共用此限制。"
                                    FontSize="11"
                                    Foreground="Gray"

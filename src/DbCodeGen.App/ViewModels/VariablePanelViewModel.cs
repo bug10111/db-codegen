@@ -171,6 +171,7 @@ public sealed partial class VariablePanelViewModel : ObservableObject
 
     /// <summary>
     /// 构建表变量分组节点，覆盖类名、变量名、原始表名、注释与常用工具函数调用。
+    /// 展示名统一为「中文名（英文全变量）」，括号内为可插入模板的完整表达式，用户所见即所插。
     /// </summary>
     /// <returns>表变量分组节点。</returns>
     private static VariableTreeNode BuildTableGroup()
@@ -179,22 +180,22 @@ public sealed partial class VariablePanelViewModel : ObservableObject
             "table", "表变量", "当前表元数据，直连 table 变量字段",
             null, VariableNodeKind.Table, new VariableTreeNode[]
             {
-                new("className", "类名（PascalCase）", "TableInfo.className", "{{ table.className }}", VariableNodeKind.Table),
-                new("variableName", "变量名（camelCase）", "TableInfo.variableName", "{{ table.variableName }}", VariableNodeKind.Table),
-                new("rawName", "原始表名", "TableInfo.rawName", "{{ table.rawName }}", VariableNodeKind.Table),
-                new("comment", "表注释", "TableInfo.comment", "{{ table.comment }}", VariableNodeKind.Table),
-                new("firstLowerCase", "首字母小写类名", "tool.firstLowerCase(table.className)", "{{ tool.firstLowerCase(table.className) }}", VariableNodeKind.Table),
-                new("firstUpperCase", "首字母大写类名", "tool.firstUpperCase(table.className)", "{{ tool.firstUpperCase(table.className) }}", VariableNodeKind.Table),
-                new("hump2Underline", "下划线表名", "tool.hump2Underline(table.className)", "{{ tool.hump2Underline(table.className) }}", VariableNodeKind.Table),
-                new("primaryKeys", "遍历主键列", "for pk in table.primaryKeys 遍历", "{{ for pk in table.primaryKeys }}...{{ end }}", VariableNodeKind.Table),
-                new("fullColumn", "遍历全量列", "for column in table.fullColumn 遍历", "{{ for column in table.fullColumn }}...{{ end }}", VariableNodeKind.Table),
-                new("otherColumn", "遍历非主键列", "for column in table.otherColumn 遍历", "{{ for column in table.otherColumn }}...{{ end }}", VariableNodeKind.Table)
+                new("className", "类名（table.className）", "TableInfo.className", "{{ table.className }}", VariableNodeKind.Table),
+                new("variableName", "变量名（table.variableName）", "TableInfo.variableName", "{{ table.variableName }}", VariableNodeKind.Table),
+                new("rawName", "原始表名（table.rawName）", "TableInfo.rawName", "{{ table.rawName }}", VariableNodeKind.Table),
+                new("comment", "表注释（table.comment）", "TableInfo.comment", "{{ table.comment }}", VariableNodeKind.Table),
+                new("firstLowerCase", "首字母小写类名（tool.firstLowerCase(table.className)）", "tool.firstLowerCase(table.className)", "{{ tool.firstLowerCase(table.className) }}", VariableNodeKind.Table),
+                new("firstUpperCase", "首字母大写类名（tool.firstUpperCase(table.className)）", "tool.firstUpperCase(table.className)", "{{ tool.firstUpperCase(table.className) }}", VariableNodeKind.Table),
+                new("hump2Underline", "下划线表名（tool.hump2Underline(table.className)）", "tool.hump2Underline(table.className)", "{{ tool.hump2Underline(table.className) }}", VariableNodeKind.Table),
+                new("primaryKeys", "遍历主键列（table.primaryKeys）", "for pk in table.primaryKeys 遍历", "{{ for pk in table.primaryKeys }}...{{ end }}", VariableNodeKind.Table),
+                new("fullColumn", "遍历全量列（table.fullColumn）", "for column in table.fullColumn 遍历", "{{ for column in table.fullColumn }}...{{ end }}", VariableNodeKind.Table),
+                new("otherColumn", "遍历非主键列（table.otherColumn）", "for column in table.otherColumn 遍历", "{{ for column in table.otherColumn }}...{{ end }}", VariableNodeKind.Table)
             });
     }
 
     /// <summary>
     /// 构建列变量分组节点，覆盖属性名、原始列名、注释、类型与标记字段。
-    /// 列表达式通常在表变量的列遍历循环内使用。
+    /// 展示名统一为「中文名（英文全变量）」，列表达式通常在表变量的列遍历循环内使用。
     /// </summary>
     /// <returns>列变量分组节点。</returns>
     private static VariableTreeNode BuildColumnGroup()
@@ -203,18 +204,19 @@ public sealed partial class VariablePanelViewModel : ObservableObject
             "column", "列变量", "列字段，在列遍历循环内使用，直连 column 变量字段",
             null, VariableNodeKind.Column, new VariableTreeNode[]
             {
-                new("propertyName", "属性名（camelCase）", "ColumnInfo.propertyName", "{{ column.propertyName }}", VariableNodeKind.Column),
-                new("rawName", "原始列名", "ColumnInfo.rawName", "{{ column.rawName }}", VariableNodeKind.Column),
-                new("comment", "列注释", "ColumnInfo.comment", "{{ column.comment }}", VariableNodeKind.Column),
-                new("rawDbType", "原始 DB 类型", "ColumnInfo.rawDbType", "{{ column.rawDbType }}", VariableNodeKind.Column),
-                new("mappedType", "映射后类型（当前包 typeMap）", "tool.type(column.rawDbType)", "{{ tool.type(column.rawDbType) }}", VariableNodeKind.Column),
-                new("isPrimaryKey", "是否主键", "ColumnInfo.isPrimaryKey", "{{ column.isPrimaryKey }}", VariableNodeKind.Column),
-                new("autoIncrement", "是否自增", "ColumnInfo.autoIncrement", "{{ column.autoIncrement }}", VariableNodeKind.Column)
+                new("propertyName", "属性名（column.propertyName）", "ColumnInfo.propertyName", "{{ column.propertyName }}", VariableNodeKind.Column),
+                new("rawName", "原始列名（column.rawName）", "ColumnInfo.rawName", "{{ column.rawName }}", VariableNodeKind.Column),
+                new("comment", "列注释（column.comment）", "ColumnInfo.comment", "{{ column.comment }}", VariableNodeKind.Column),
+                new("rawDbType", "原始 DB 类型（column.rawDbType）", "ColumnInfo.rawDbType", "{{ column.rawDbType }}", VariableNodeKind.Column),
+                new("mappedType", "映射后类型（tool.type(column.rawDbType)）", "tool.type(column.rawDbType)", "{{ tool.type(column.rawDbType) }}", VariableNodeKind.Column),
+                new("isPrimaryKey", "是否主键（column.isPrimaryKey）", "ColumnInfo.isPrimaryKey", "{{ column.isPrimaryKey }}", VariableNodeKind.Column),
+                new("autoIncrement", "是否自增（column.autoIncrement）", "ColumnInfo.autoIncrement", "{{ column.autoIncrement }}", VariableNodeKind.Column)
             });
     }
 
     /// <summary>
-    /// 构建工具函数分组节点，覆盖字符串处理与类型映射函数，表达式可直接插入使用。
+    /// 构建工具函数分组节点，覆盖字符串处理与类型映射函数。
+    /// 展示名按「中文名（表达式）」对齐，hump3Underline 名称与说明随其 kebab-case 行为同步更新。
     /// </summary>
     /// <returns>工具函数分组节点。</returns>
     private static VariableTreeNode BuildToolGroup()
@@ -223,16 +225,17 @@ public sealed partial class VariablePanelViewModel : ObservableObject
             "tool", "工具函数", "模板渲染侧 tool 函数集",
             null, VariableNodeKind.Tool, new VariableTreeNode[]
             {
-                new("firstLowerCase", "首字母小写", "tool.firstLowerCase(值)", "{{ tool.firstLowerCase(table.className) }}", VariableNodeKind.Tool),
-                new("firstUpperCase", "首字母大写", "tool.firstUpperCase(值)", "{{ tool.firstUpperCase(table.className) }}", VariableNodeKind.Tool),
-                new("hump2Underline", "驼峰转下划线", "tool.hump2Underline(值)", "{{ tool.hump2Underline(table.className) }}", VariableNodeKind.Tool),
-                new("hump3Underline", "下划线转大写", "tool.hump3Underline(值)", "{{ tool.hump3Underline(table.className) }}", VariableNodeKind.Tool),
-                new("type", "类型映射", "tool.type(column.rawDbType)", "{{ tool.type(column.rawDbType) }}", VariableNodeKind.Tool)
+                new("firstLowerCase", "首字母小写（tool.firstLowerCase(值)）", "tool.firstLowerCase(值)", "{{ tool.firstLowerCase(table.className) }}", VariableNodeKind.Tool),
+                new("firstUpperCase", "首字母大写（tool.firstUpperCase(值)）", "tool.firstUpperCase(值)", "{{ tool.firstUpperCase(table.className) }}", VariableNodeKind.Tool),
+                new("hump2Underline", "驼峰转下划线（tool.hump2Underline(值)）", "tool.hump2Underline(值)", "{{ tool.hump2Underline(table.className) }}", VariableNodeKind.Tool),
+                new("hump3Underline", "驼峰转短横线（tool.hump3Underline(值)）", "kebab-case（如 sys-project-client）", "{{ tool.hump3Underline(table.className) }}", VariableNodeKind.Tool),
+                new("type", "类型映射（tool.type(column.rawDbType)）", "tool.type(column.rawDbType)", "{{ tool.type(column.rawDbType) }}", VariableNodeKind.Tool)
             });
     }
 
     /// <summary>
     /// 构建包变量分组节点，覆盖 manifest 注入的基础包名与包名。
+    /// 展示名统一为「中文名（英文全变量）」。
     /// </summary>
     /// <returns>包变量分组节点。</returns>
     private static VariableTreeNode BuildPackageGroup()
@@ -241,8 +244,8 @@ public sealed partial class VariablePanelViewModel : ObservableObject
             "package", "包变量", "模板包上下文，manifest 注入",
             null, VariableNodeKind.Package, new VariableTreeNode[]
             {
-                new("basePackage", "基础包名", "manifest basePackage（可含完整包路径，如 com.example.common）", "{{ package.basePackage }}", VariableNodeKind.Package),
-                new("name", "包名", "manifest name", "{{ package.name }}", VariableNodeKind.Package)
+                new("basePackage", "基础包名（package.basePackage）", "manifest basePackage（可含完整包路径，如 com.example.common）", "{{ package.basePackage }}", VariableNodeKind.Package),
+                new("name", "包名（package.name）", "manifest name", "{{ package.name }}", VariableNodeKind.Package)
             });
     }
 }

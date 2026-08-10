@@ -14,7 +14,7 @@ using DbCodeGen.Core.Security;
 namespace DbCodeGen.App.ViewModels;
 
 /// <summary>
-/// 设置窗口视图模型，承载工作区根、LLM 配置、模板搜索目录、最近相对输出根与 AI 参考文件限制五项配置的加载、校验与保存。
+/// 设置窗口视图模型，承载工作区根、数据目录、LLM 配置、模板搜索目录、最近相对输出根与 AI 参考文件限制配置的加载、校验与保存。
 /// </summary>
 public sealed partial class SettingsViewModel : ObservableObject
 {
@@ -120,6 +120,14 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string? _selectedTemplateDirectory;
 
     /// <summary>
+    /// 统一数据目录，集中存放 config.json 与 Templates；为空表示未设置，回退 %AppData%\DbCodeGen。
+    /// 「应用」立即切换并迁移，「保存」联动切换。
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ApplyDataDirectoryCommand))]
+    private string _dataDirectory = string.Empty;
+
+    /// <summary>
     /// 保存成功后触发，设置窗口据此关闭自身。
     /// </summary>
     public event EventHandler? SaveCompleted;
@@ -189,6 +197,63 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             WorkspaceRoot = selected;
         }
+    }
+
+    /// <summary>
+    /// 弹出目录选择框并回填数据目录。
+    /// </summary>
+    [RelayCommand]
+    private async Task BrowseDataDirectoryAsync()
+    {
+        string? selected = await _folderPickerService.PickFolderAsync(DataDirectory, "选择数据目录");
+        if (!string.IsNullOrWhiteSpace(selected))
+        {
+            DataDirectory = selected;
+        }
+    }
+
+    /// <summary>
+    /// 立即切换数据目录：经配置服务迁移 config.json 与 Templates 到新目录并写定位文件，
+    /// 成功后重新加载表单刷新生效值，失败弹出可读错误。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanApplyDataDirectory))]
+    private void ApplyDataDirectory()
+    {
+        try
+        {
+            _configService.ChangeDataDirectory(DataDirectory);
+        }
+        catch (ArgumentException exception)
+        {
+            _dialogService.ShowError(exception.Message);
+            return;
+        }
+        catch (ConfigSaveException exception)
+        {
+            _dialogService.ShowError($"数据目录切换失败：{exception.Message}");
+            return;
+        }
+
+        // 切换成功后重新加载表单，使工作区根、模板目录等生效值随新配置刷新
+        _dialogService.ShowInfo("数据目录已切换，config.json 与 Templates 已迁移到新目录。");
+        LoadFromConfig();
+    }
+
+    /// <summary>
+    /// 判定数据目录应用命令是否可执行：表单值与当前生效值不同且非空时可用。
+    /// </summary>
+    private bool CanApplyDataDirectory()
+    {
+        if (string.IsNullOrWhiteSpace(DataDirectory))
+        {
+            return false;
+        }
+
+        string current = _configService.Current.DataDirectory;
+        return !string.Equals(
+            NormalizeDirectoryPath(DataDirectory),
+            string.IsNullOrWhiteSpace(current) ? string.Empty : NormalizeDirectoryPath(current),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -390,7 +455,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 校验表单并保存配置：写入配置快照后落盘，成功后提示并触发窗口关闭。
+    /// 校验表单并保存配置：数据目录变化时先切换，再写入配置快照后落盘，成功后提示并触发窗口关闭。
     /// </summary>
     [RelayCommand]
     private void Save()
@@ -401,6 +466,26 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
+        // 数据目录与当前生效值不同时先切换，config.json 与 Templates 迁移后其余字段在后续 Save 中写入新位置
+        bool dataDirectoryChanged = CanApplyDataDirectory();
+        if (dataDirectoryChanged)
+        {
+            try
+            {
+                _configService.ChangeDataDirectory(DataDirectory);
+            }
+            catch (ArgumentException exception)
+            {
+                _dialogService.ShowError(exception.Message);
+                return;
+            }
+            catch (ConfigSaveException exception)
+            {
+                _dialogService.ShowError($"数据目录切换失败：{exception.Message}");
+                return;
+            }
+        }
+
         // 将表单值写入配置快照；apiKey 留空保持原密文，输入新值则重新加密覆盖
         AppConfig config = _configService.Current;
         config.WorkspaceRoot = WorkspaceRoot;
@@ -408,7 +493,13 @@ public sealed partial class SettingsViewModel : ObservableObject
         config.Llm.BaseUrl = LlmBaseUrl.Trim();
         config.Llm.Model = LlmModel.Trim();
         config.Llm.TimeoutSeconds = LlmTimeoutSeconds;
-        config.TemplateSearchDirectories = BuildDeduplicatedTemplateDirectories();
+
+        // 数据目录未变化时按表单写入模板搜索目录；变化时切换已写入迁移后的正确搜索目录，
+        // 跳过表单覆盖，避免以切换前加载的陈旧目录冲掉迁移结果导致模板包扫描失效
+        if (!dataDirectoryChanged)
+        {
+            config.TemplateSearchDirectories = BuildDeduplicatedTemplateDirectories();
+        }
 
         // AI 参考文件限制：MB×1024×1024 换算字节写入配置快照，以 long 运算防溢出
         config.AiReferenceFileLimits.MaxFileCount = AiReferenceMaxFileCount;
@@ -444,6 +535,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         AppConfig config = _configService.Load();
 
         WorkspaceRoot = config.WorkspaceRoot;
+        DataDirectory = config.DataDirectory;
         LlmBaseUrl = config.Llm.BaseUrl;
         LlmModel = config.Llm.Model;
         LlmTimeoutSeconds = config.Llm.TimeoutSeconds;
@@ -632,10 +724,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 将目录路径规范化为绝对路径并去除末尾目录分隔符，用于列表去重比较。
+    /// 将目录路径规范化为绝对路径并去除末尾目录分隔符，用于列表去重与数据目录比较。
+    /// 空或空白路径返回空串，畸形路径无法规范化时原样返回。
     /// </summary>
     private static string NormalizeDirectoryPath(string path)
     {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return string.Empty;
+        }
+
         try
         {
             return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));

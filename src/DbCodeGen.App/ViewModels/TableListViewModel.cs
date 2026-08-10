@@ -156,11 +156,16 @@ public sealed partial class TableListViewModel : ObservableObject
         _logger = logger;
         _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
 
-        // 过滤排序视图：默认按表名升序，过滤谓词随搜索文本实时生效
+        // 过滤排序视图：默认按创建时间倒序（MySQL 真实时间）、新建顺序键倒序（PostgreSQL 无时间时近似新表优先）、
+        // 表名升序（创建时间与顺序键均缺失的兜底），过滤谓词随搜索文本实时生效
         _tableView = new ListCollectionView(TableRows)
         {
             Filter = FilterTableRow
         };
+        _tableView.SortDescriptions.Add(
+            new SortDescription(nameof(TableRowViewModel.CreatedTime), ListSortDirection.Descending));
+        _tableView.SortDescriptions.Add(
+            new SortDescription(nameof(TableRowViewModel.CreationOrder), ListSortDirection.Descending));
         _tableView.SortDescriptions.Add(
             new SortDescription(nameof(TableRowViewModel.RawName), ListSortDirection.Ascending));
 

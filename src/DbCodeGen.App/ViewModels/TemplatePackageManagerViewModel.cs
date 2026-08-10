@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
 using DbCodeGen.Core.Config;
+using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
 
@@ -68,7 +69,7 @@ public sealed class TemplatePackageListItemViewModel
 }
 
 /// <summary>
-/// 模板包管理窗口视图模型，承载模板包列表加载、zip/文件夹导入、复制、导出与删除。
+/// 模板包管理窗口视图模型，承载模板包列表加载、zip/文件夹导入、复制、重命名、导出与删除。
 /// 内置包只读边界由服务契约保证：删除与同名覆盖在界面层对内置包禁用，服务层对同名覆盖返回只读拒绝。
 /// 同名用户包覆盖前必须二次确认，取消确认则本次操作终止。
 /// </summary>
@@ -99,6 +100,7 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(BeginCopyCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RenamePackageCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteCommand))]
     [NotifyCanExecuteChangedFor(nameof(MovePackageUpCommand))]
@@ -135,6 +137,7 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(ImportZipCommand))]
     [NotifyCanExecuteChangedFor(nameof(ImportFolderCommand))]
     [NotifyCanExecuteChangedFor(nameof(BeginCopyCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RenamePackageCommand))]
     [NotifyCanExecuteChangedFor(nameof(ConfirmCopyCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelCopyCommand))]
     [NotifyCanExecuteChangedFor(nameof(ExportCommand))]
@@ -421,6 +424,118 @@ public sealed partial class TemplatePackageManagerViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 重命名选中的用户模板包：询问新包名后经服务物理改目录并同步清单，
+    /// 成功后迁移配置记忆中的包名键与最近选中包名，刷新列表并选中新包。
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRenamePackage))]
+    private async Task RenamePackageAsync()
+    {
+        if (SelectedPackage is null || SelectedPackage.IsBuiltin)
+        {
+            return;
+        }
+
+        string packageName = SelectedPackage.Name;
+        string? newName = await _promptDialogService.PromptAsync(
+            "重命名模板包", "请输入新包名（字母/数字/中划线/下划线）：", packageName);
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return;
+        }
+
+        string normalizedNew = newName.Trim();
+        IsBusy = true;
+        try
+        {
+            TemplatePackageOperationResult result = await _packageService.RenamePackageAsync(
+                packageName, normalizedNew, CancellationToken.None);
+
+            if (result.Status == TemplatePackageOperationStatus.Succeeded && result.Package is not null)
+            {
+                // 迁移配置记忆中的包名键（勾选态/文件顺序/展示顺序/最近选中），随后刷新列表并选中新包
+                MigratePackageMemory(packageName, result.Package.Name);
+                await ReloadPackagesAsync();
+                SelectedPackage = Packages.FirstOrDefault(package =>
+                    string.Equals(package.Name, result.Package.Name, StringComparison.OrdinalIgnoreCase));
+                _dialogService.ShowInfo($"已重命名模板包“{packageName}”为“{result.Package.Name}”。");
+            }
+            else if (result.Status == TemplatePackageOperationStatus.BuiltinConflict
+                     || result.Status == TemplatePackageOperationStatus.NameConflict
+                     || result.Status == TemplatePackageOperationStatus.Invalid)
+            {
+                // 内置包同名只读拒绝、用户包同名冲突与包名校验失败统一展示服务消息，不进入覆盖流程
+                _dialogService.ShowError(result.Message ?? "重命名模板包失败。");
+            }
+            else
+            {
+                _dialogService.ShowError($"重命名模板包失败：{result.Message}");
+            }
+        }
+        catch (Exception exception) when (exception is TemplatePackageException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            _dialogService.ShowError($"重命名模板包失败：{exception.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 判定重命名命令是否可执行：选中用户包（非内置）且非繁忙，内置包只读禁止重命名。
+    /// </summary>
+    private bool CanRenamePackage() => SelectedPackage is not null && !SelectedPackage.IsBuiltin && !IsBusy;
+
+    /// <summary>
+    /// 迁移模板包重命名后的配置记忆：勾选态/文件顺序按新包名重键、包展示顺序与最近选中包名同步为新名，随后落盘。
+    /// 写盘失败仅记录警告日志，不打断重命名流程。
+    /// </summary>
+    /// <param name="oldName">重命名前的包名。</param>
+    /// <param name="newName">重命名后的包名。</param>
+    private void MigratePackageMemory(string oldName, string newName)
+    {
+        AppConfig config = _configService.Current;
+
+        // 勾选态记忆按包名重键：旧包名键迁移到新包名键，勾选结果不随重命名丢失
+        if (config.TemplateFileStates.TryGetValue(oldName, out List<TemplateFileState>? states) && states is not null)
+        {
+            config.TemplateFileStates.Remove(oldName);
+            config.TemplateFileStates[newName] = states;
+        }
+
+        // 文件顺序记忆按包名重键：旧包名键迁移到新包名键，展示顺序不随重命名丢失
+        if (config.TemplateFileOrder.TryGetValue(oldName, out List<string>? order) && order is not null)
+        {
+            config.TemplateFileOrder.Remove(oldName);
+            config.TemplateFileOrder[newName] = order;
+        }
+
+        // 包展示顺序记忆中的旧包名替换为新包名，保持包列表排序不随重命名丢失
+        for (int index = 0; index < config.TemplatePackageOrder.Count; index++)
+        {
+            if (string.Equals(config.TemplatePackageOrder[index], oldName, StringComparison.OrdinalIgnoreCase))
+            {
+                config.TemplatePackageOrder[index] = newName;
+            }
+        }
+
+        // 最近选中包记忆指向旧包名时同步为新包名，避免下次启动按旧名定位失败
+        if (string.Equals(config.LastSelectedPackage, oldName, StringComparison.OrdinalIgnoreCase))
+        {
+            config.LastSelectedPackage = newName;
+        }
+
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "重命名模板包后记忆迁移保存失败，旧包 {OldName}。", oldName);
         }
     }
 

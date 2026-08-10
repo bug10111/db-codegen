@@ -330,7 +330,9 @@
                       DataContext="{Binding ModifyTabViewModel}">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
@@ -346,8 +348,55 @@
                                    TextWrapping="Wrap" />
                     </Border>
 
+                    <!-- 选择要修改的模板面板：勾选当前包内文件，默认勾选②区当前文件，多选时批量修改并直接保存 -->
+                    <Border Grid.Row="1"
+                            Background="#FAFAFA"
+                            BorderBrush="#D0D0D0"
+                            BorderThickness="1"
+                            CornerRadius="3"
+                            Padding="8,6"
+                            Margin="0,10,0,0">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,4">
+                                <TextBlock Text="选择要修改的模板"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding SelectionInfoText}"
+                                           Foreground="Gray"
+                                           VerticalAlignment="Center"
+                                           Margin="8,0,0,0" />
+                                <StackPanel DockPanel.Dock="Right"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Right">
+                                    <Button Content="全选"
+                                            Command="{Binding SelectAllCommand}"
+                                            Padding="10,2"
+                                            Margin="0,0,6,0" />
+                                    <Button Content="清空"
+                                            Command="{Binding ClearSelectionCommand}"
+                                            Padding="10,2" />
+                                </StackPanel>
+                            </DockPanel>
+                            <ListBox ItemsSource="{Binding SelectableFiles}"
+                                     Height="110"
+                                     BorderThickness="1"
+                                     BorderBrush="#D0D0D0">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
+                                                  Content="{Binding RelativePath}" />
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                            <TextBlock Text="勾选多个文件时批量修改并直接保存；仅勾选当前文件时保持单文件预览-应用流程。"
+                                       FontSize="11"
+                                       Foreground="Gray"
+                                       Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
+
                     <!-- 对话消息列表：用户指令与 AI 结果气泡按加入顺序滚动展示 -->
-                    <ScrollViewer Grid.Row="1"
+                    <ScrollViewer Grid.Row="2"
                                   VerticalScrollBarVisibility="Auto"
                                   Margin="0,10,0,0">
                         <ItemsControl ItemsSource="{Binding Messages}">
@@ -421,8 +470,23 @@
                         </ItemsControl>
                     </ScrollViewer>
 
+                    <!-- 发送中提示块：在途调用 LLM 时展示等待文案与不确定进度条，发送完成后消失回结果面板或空闲态 -->
+                    <StackPanel Grid.Row="3"
+                                Orientation="Horizontal"
+                                Margin="0,8,0,0"
+                                Visibility="{Binding IsSending, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <ProgressBar IsIndeterminate="True"
+                                     Width="120"
+                                     Height="6"
+                                     VerticalAlignment="Center" />
+                        <TextBlock Text="正在修改模板，请稍候…"
+                                   Foreground="Gray"
+                                   Margin="8,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+
                     <!-- 指令输入区：多行输入 + 灰字占位提示 + 停止/发送按钮 -->
-                    <Grid Grid.Row="2" Margin="0,10,0,0">
+                    <Grid Grid.Row="4" Margin="0,10,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />

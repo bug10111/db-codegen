@@ -70,7 +70,7 @@
         </Border>
 
         <!-- 主区四区布局骨架：上区三栏为表列表区/模板区/预览区，下区为生成栏，两区之间可拖动调整高度比例 -->
-        <Grid Margin="12">
+        <Grid Margin="12" x:Name="MainGrid">
             <Grid.RowDefinitions>
                 <RowDefinition Height="2*" MinHeight="300" />
                 <RowDefinition Height="Auto" />
@@ -91,12 +91,14 @@
                           ShowsPreview="True"
                           ToolTip="拖动调整上下区域高度比例" />
 
-            <!-- 上区三栏布局 -->
-            <Grid Grid.Row="0">
+            <!-- 上区三栏布局：①表列表区固定像素起始、②模板区与③预览区按星号均分，列间纵向分隔条可拖动 -->
+            <Grid Grid.Row="0" x:Name="TopColumnsGrid">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="300" />
-                    <ColumnDefinition Width="2*" />
-                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="300" MinWidth="250" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="2*" MinWidth="250" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="2*" MinWidth="250" />
                 </Grid.ColumnDefinitions>
 
                 <!-- 表列表区：数据源表清单、搜索过滤与多选勾选 -->
@@ -162,8 +164,22 @@
                     </Grid>
                 </GroupBox>
 
+                <!-- 上区三栏纵向拖拽分隔条：拖动调整①表列表区与②模板区的宽度比例 -->
+                <GridSplitter Grid.Column="1"
+                              Width="6"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              Background="#E0E0E0"
+                              BorderBrush="#DDDDDD"
+                              BorderThickness="0,0,1,0"
+                              Cursor="SizeWE"
+                              ResizeDirection="Columns"
+                              ResizeBehavior="PreviousAndNext"
+                              ShowsPreview="True"
+                              ToolTip="拖动调整①表列表区与②模板区宽度" />
+
                 <!-- 模板区：模板包与文件树 + AvalonEdit 编辑器 + 变量面板入口 -->
-                <GroupBox Grid.Column="1" x:Name="TemplatePanel" Header="② 模板区" Margin="0,0,4,0">
+                <GroupBox Grid.Column="2" x:Name="TemplatePanel" Header="② 模板区" Margin="4,0,4,0">
                     <Grid Margin="4" IsEnabled="{Binding IsIdle}">
                         <Grid.InputBindings>
                             <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveCommand}" />
@@ -197,12 +213,17 @@
                             </StackPanel>
                         </ContentControl>
 
-                        <!-- 文件工具条：新增/删除模板，仅用户包可用；AI 入口按钮随②区整体繁忙禁用 -->
+                        <!-- 文件工具条：新增/重命名/删除模板，仅用户包可用；AI 入口按钮随②区整体繁忙禁用 -->
                         <ContentControl Grid.Row="1" Style="{StaticResource DashedGroupBox}" Margin="0,0,0,4">
                             <StackPanel Orientation="Horizontal">
                                 <Button Content="新增模板"
                                         Command="{Binding AddTemplateFileCommand}"
                                         VerticalContentAlignment="Center" />
+                                <Button Content="重命名"
+                                        Command="{Binding RenameTemplateFileCommand}"
+                                        Margin="4,0,0,0"
+                                        VerticalContentAlignment="Center"
+                                        ToolTip="重命名选中的模板文件相对路径，内置包只读不可重命名" />
                                 <Button Content="删除模板"
                                         Command="{Binding DeleteTemplateFileCommand}"
                                         Margin="4,0,0,0"
@@ -264,6 +285,7 @@
                             <ListView.ContextMenu>
                                 <ContextMenu>
                                     <MenuItem Header="新增模板" Command="{Binding AddTemplateFileCommand}" />
+                                    <MenuItem Header="重命名模板" Command="{Binding RenameTemplateFileCommand}" />
                                     <MenuItem Header="删除模板" Command="{Binding DeleteTemplateFileCommand}" />
                                 </ContextMenu>
                             </ListView.ContextMenu>
@@ -323,8 +345,22 @@
                     </Grid>
                 </GroupBox>
 
+                <!-- 上区三栏纵向拖拽分隔条：拖动调整②模板区与③预览区的宽度比例 -->
+                <GridSplitter Grid.Column="3"
+                              Width="6"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              Background="#E0E0E0"
+                              BorderBrush="#DDDDDD"
+                              BorderThickness="0,0,1,0"
+                              Cursor="SizeWE"
+                              ResizeDirection="Columns"
+                              ResizeBehavior="PreviousAndNext"
+                              ShowsPreview="True"
+                              ToolTip="拖动调整②模板区与③预览区宽度" />
+
                 <!-- 预览区：预览表下拉 + 渲染代码展示 -->
-                <GroupBox Grid.Column="2" x:Name="PreviewPanel" Header="③ 预览区">
+                <GroupBox Grid.Column="4" x:Name="PreviewPanel" Header="③ 预览区">
                     <Grid Margin="4">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -347,7 +383,7 @@
                                        VerticalAlignment="Center" />
                         </StackPanel>
 
-                        <!-- 渲染真实代码展示，只读 -->
+                        <!-- 渲染真实代码展示，只读；悬停时滚轮滚动经 PreviewMouseWheel 接管 -->
                         <avalonedit:TextEditor x:Name="PreviewEditor"
                                                Grid.Row="1"
                                                FontFamily="Consolas"
@@ -355,7 +391,8 @@
                                                IsReadOnly="True"
                                                ShowLineNumbers="True"
                                                HorizontalScrollBarVisibility="Auto"
-                                               VerticalScrollBarVisibility="Auto" />
+                                               VerticalScrollBarVisibility="Auto"
+                                               PreviewMouseWheel="OnRegionMouseWheel" />
 
                         <!-- 预览状态：渲染耗时或结构化错误定位 -->
                         <TextBlock Grid.Row="2"
@@ -369,13 +406,13 @@
 
             <!-- 生成栏：输出根配置、预览待写/生成、待写清单、结果统计与生成日志 -->
             <GroupBox Grid.Row="2" x:Name="GenerationPanel" Header="④ 生成栏" Margin="0,8,0,0">
-                <Grid Margin="4" IsEnabled="{Binding IsIdle}">
+                <Grid Margin="4" IsEnabled="{Binding IsIdle}" x:Name="GenerationInnerGrid">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="2*" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <!-- 路径配置行：工作区根与代码目录配套使用，紧挨一行横排 -->
@@ -461,8 +498,9 @@
                                    Foreground="#2E7D32"
                                    FontWeight="SemiBold" />
 
-                        <!-- 生成日志：只读多行展示，纵向滚动，随面板拖拽调整高度 -->
+                        <!-- 生成日志：只读多行展示，纵向滚动，随面板拖拽调整高度；新日志到达时按需自动滚动到底部；悬停时滚轮滚动经 PreviewMouseWheel 接管 -->
                         <TextBox Grid.Row="2"
+                                 x:Name="LogTextBox"
                                  Text="{Binding LogText, Mode=OneWay}"
                                  IsReadOnly="True"
                                  FontFamily="Consolas"
@@ -471,7 +509,9 @@
                                  Background="#FAFAFA"
                                  VerticalScrollBarVisibility="Auto"
                                  HorizontalScrollBarVisibility="Auto"
-                                 TextWrapping="NoWrap" />
+                                 TextWrapping="NoWrap"
+                                 TextChanged="OnLogTextChanged"
+                                 PreviewMouseWheel="OnRegionMouseWheel" />
                     </Grid>
                 </Grid>
             </GroupBox>

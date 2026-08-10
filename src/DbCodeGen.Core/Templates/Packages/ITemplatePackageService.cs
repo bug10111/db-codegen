@@ -1,9 +1,9 @@
 namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
-/// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、导出、删除，
-/// 以及新建包、新增模板文件、批量追加模板文件与删除模板文件。
-/// 变更操作（导入/复制/删除/新建/增删文件/批量追加）在实现内部经串行门互斥，读操作不加锁。
+/// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、重命名、导出、删除，
+/// 以及新建包、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名。
+/// 变更操作（导入/复制/重命名/删除/新建/增删文件/批量追加）在实现内部经串行门互斥，读操作不加锁。
 /// </summary>
 public interface ITemplatePackageService
 {
@@ -65,6 +65,30 @@ public interface ITemplatePackageService
     /// <returns>导出后的 zip 绝对路径。</returns>
     /// <exception cref="TemplatePackageException">包不存在、加载失败或目标路径为空时抛出。</exception>
     Task<string> ExportToZipAsync(string packageName, string targetZipPath, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 重命名用户模板包：物理改包目录名并同步重写清单包名后重新校验。
+    /// 内置包只读拒绝；新名与内置包同名只读拒绝；与用户包同名返回 NameConflict；
+    /// 新旧同名视为成功原样返回。配置记忆键迁移由调用方完成。
+    /// </summary>
+    /// <param name="packageName">当前模板包包名。</param>
+    /// <param name="newName">新模板包包名，须符合目录名规则。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>重命名操作结果，成功时 Package 携带更新后的包信息。</returns>
+    Task<TemplatePackageOperationResult> RenamePackageAsync(string packageName, string newName, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 重命名用户模板包内的一个模板文件：物理改名文件并同步更新清单对应条目后重写。
+    /// 内置包只读拒绝；旧文件不存在或新文件已存在返回失败；
+    /// 新旧路径相同视为成功原样返回。勾选态/排序记忆路径迁移由调用方完成。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="templateRelativePath">当前模板文件相对包根路径。</param>
+    /// <param name="newRelativePath">新模板文件相对包根路径，须防目录穿越安全。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>重命名操作结果，成功时 Package 携带更新后的包信息。</returns>
+    Task<TemplatePackageOperationResult> RenameTemplateFileAsync(
+        string packageName, string templateRelativePath, string newRelativePath, CancellationToken cancellationToken);
 
     /// <summary>
     /// 删除用户模板包；内置包只读禁止删除，包不存在时抛出异常。删除前的用户确认由调用方负责。

@@ -35,6 +35,18 @@ public class TableInfo
     public string? Comment { get; set; }
 
     /// <summary>
+    /// 表创建时间；数据库无法可靠提供（如 PostgreSQL）时为 null。
+    /// 表清单阶段按库查询填充，表详情阶段随注释一并读取补齐。
+    /// </summary>
+    public DateTime? CreatedTime { get; set; }
+
+    /// <summary>
+    /// 新建先后顺序键，越大表示表越新，供无创建时间的数据库（如 PostgreSQL）近似"新表优先"排序。
+    /// PostgreSQL 取 pg_class.oid（同一数据库内随建表递增）；MySQL 有真实创建时间时不依赖本字段，保持 0。
+    /// </summary>
+    public long CreationOrder { get; set; }
+
+    /// <summary>
     /// 所属数据库类型，由表元数据服务读取时打标；null 表示未知，类型映射解析时仅命中通用条目。
     /// 供类型映射按数据库类型分桶匹配，保证 MySQL 与 PostgreSQL 各自的类型名互不串用。
     /// </summary>

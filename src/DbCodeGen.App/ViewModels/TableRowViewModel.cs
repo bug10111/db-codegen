@@ -42,6 +42,16 @@ public sealed partial class TableRowViewModel : ObservableObject
     public string? Comment => Table.Comment;
 
     /// <summary>
+    /// 表创建时间，DataGrid 创建时间列绑定源，数据库无法提供时为 null。
+    /// </summary>
+    public DateTime? CreatedTime => Table.CreatedTime;
+
+    /// <summary>
+    /// 新建先后顺序键，无创建时间的数据库（PostgreSQL）按此近似"新表优先"排序。
+    /// </summary>
+    public long CreationOrder => Table.CreationOrder;
+
+    /// <summary>
     /// 是否勾选参与生成，单行勾选与批量操作共用，作用于全部已加载表。
     /// </summary>
     [ObservableProperty]

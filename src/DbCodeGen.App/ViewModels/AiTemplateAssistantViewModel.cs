@@ -10,6 +10,7 @@ using DbCodeGen.Core.Ai;
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
+using DbCodeGen.Core.Templates;
 using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.App.ViewModels;
@@ -305,6 +306,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
     /// <param name="settingsWindowFactory">设置窗口工厂，供未配置 LLM 时跳转设置页。</param>
     /// <param name="templateManagerWindowFactory">模板包管理窗口工厂，供生成成功后跳转查看新包。</param>
     /// <param name="templateViewModel">②区模板编辑器视图模型，改模板 Tab 目标展示与应用入口的事实源。</param>
+    /// <param name="templateFileWriter">模板文件读写服务，改模板 Tab 批量修改读盘与写盘保存。</param>
     /// <param name="templateAiModifier">AI 改模板对话服务，供改模板 Tab 调用。</param>
     /// <param name="modifyTabLogger">改模板 Tab 视图模型日志器，日志不记录模板正文、指令与参考文件内容。</param>
     /// <param name="logger">宿主视图模型日志器，日志不输出 apiKey、LLM 原始输出与参考文件内容。</param>
@@ -321,6 +323,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         Func<SettingsWindow> settingsWindowFactory,
         Func<TemplatePackageManagerWindow> templateManagerWindowFactory,
         TemplateViewModel templateViewModel,
+        TemplateFileWriter templateFileWriter,
         ITemplateAiModifier templateAiModifier,
         ILogger<AiTemplateModifyTabViewModel> modifyTabLogger,
         ILogger<AiTemplateAssistantViewModel> logger)
@@ -336,6 +339,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(settingsWindowFactory);
         ArgumentNullException.ThrowIfNull(templateManagerWindowFactory);
         ArgumentNullException.ThrowIfNull(templateViewModel);
+        ArgumentNullException.ThrowIfNull(templateFileWriter);
         ArgumentNullException.ThrowIfNull(templateAiModifier);
         ArgumentNullException.ThrowIfNull(modifyTabLogger);
         ArgumentNullException.ThrowIfNull(logger);
@@ -358,6 +362,7 @@ public sealed partial class AiTemplateAssistantViewModel : ObservableObject
         ModifyTabViewModel = new AiTemplateModifyTabViewModel(
             templateAiModifier,
             templateViewModel,
+            templateFileWriter,
             configService,
             dialogService,
             confirmDialogService,

@@ -112,10 +112,11 @@ public static class ToolFunctions
     }
 
     /// <summary>
-    /// 将驼峰命名转为下划线全大写命名（常量风格），空串或 null 返回空串。
+    /// 将驼峰命名转为短横线小写命名（kebab-case），空串或 null 返回空串。
+    /// 先经下划线小写转换再替换分隔符为短横线，与 hump2Underline 共享同一断词规则。
     /// </summary>
     /// <param name="value">驼峰命名字符串，如 SysUser。</param>
-    /// <returns>下划线全大写命名，如 SYS_USER。</returns>
+    /// <returns>短横线小写命名，如 sys-user。</returns>
     public static string Hump3Underline(string? value)
     {
         if (string.IsNullOrEmpty(value))
@@ -123,7 +124,7 @@ public static class ToolFunctions
             return string.Empty;
         }
 
-        return Hump2Underline(value).ToUpperInvariant();
+        return Hump2Underline(value).Replace('_', '-');
     }
 
     /// <summary>

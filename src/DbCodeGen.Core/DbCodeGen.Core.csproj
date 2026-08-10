@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\..\docs\TEMPLATE_SPEC.md" Link="Resources\TEMPLATE_SPEC.md" />
+    <EmbeddedResource Include="Resources\TEMPLATE_SPEC.md" />
   </ItemGroup>
 
 </Project>

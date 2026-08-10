@@ -11,12 +11,21 @@ public sealed class MySqlSchemaReader : ISchemaReader
 {
     /// <summary>
     /// 表清单查询语句，只读当前库基础表，默认按表名排序，首屏不含列。
+    /// 创建时间随清单一并读取，供①区列表展示与默认排序。
     /// </summary>
     private const string TableListSql =
-        "SELECT TABLE_NAME, TABLE_SCHEMA, TABLE_COMMENT " +
+        "SELECT TABLE_NAME, TABLE_SCHEMA, TABLE_COMMENT, CREATE_TIME " +
         "FROM information_schema.TABLES " +
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' " +
         "ORDER BY TABLE_NAME";
+
+    /// <summary>
+    /// 表元信息查询语句，按表名参数只读当前库表注释与创建时间，供表详情阶段补齐 comment 与 createdTime。
+    /// </summary>
+    private const string TableMetaSql =
+        "SELECT TABLE_SCHEMA, TABLE_COMMENT, CREATE_TIME " +
+        "FROM information_schema.TABLES " +
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = @tableName";
 
     /// <summary>
     /// 列元数据查询语句，按表名参数只读当前库列，含主键标记、自增标记、默认值与长度精度。
@@ -47,14 +56,15 @@ public sealed class MySqlSchemaReader : ISchemaReader
         await using MySqlCommand command = _connection.CreateCommand();
         command.CommandText = TableListSql;
 
-        // 逐行读取表清单，仅组装表名/库名/注释，不触碰列元数据
+        // 逐行读取表清单，仅组装表名/库名/注释/创建时间，不触碰列元数据
         await using MySqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await reader.ReadAsync(ct).ConfigureAwait(false))
         {
             string rawName = reader.GetString(reader.GetOrdinal("TABLE_NAME"));
             string schemaName = reader.GetString(reader.GetOrdinal("TABLE_SCHEMA"));
             string? comment = ReadNullableString(reader, "TABLE_COMMENT");
-            tables.Add(CreateTableSummary(rawName, schemaName, comment));
+            DateTime? createdTime = ReadNullableDateTime(reader, "CREATE_TIME");
+            tables.Add(CreateTableSummary(rawName, schemaName, comment, createdTime));
         }
 
         return tables;
@@ -67,24 +77,61 @@ public sealed class MySqlSchemaReader : ISchemaReader
 
         var columns = new List<ColumnInfo>();
         string schemaName = string.Empty;
-        await using MySqlCommand command = _connection.CreateCommand();
-        command.CommandText = ColumnListSql;
-        command.Parameters.AddWithValue("@tableName", tableName);
 
-        // 逐行读取列元数据，库名取自首行数据行的库列
-        await using MySqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        // 逐行读取列元数据，库名取自首行数据行的库列；读取器与命令限定在块内，读完即释放连接，
+        // 避免连接上残留未关闭读取器导致后续表元信息查询报"连接正忙"
+        await using (MySqlCommand command = _connection.CreateCommand())
         {
-            if (schemaName.Length == 0)
+            command.CommandText = ColumnListSql;
+            command.Parameters.AddWithValue("@tableName", tableName);
+
+            await using (MySqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
-                schemaName = reader.GetString(reader.GetOrdinal("TABLE_SCHEMA"));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    if (schemaName.Length == 0)
+                    {
+                        schemaName = reader.GetString(reader.GetOrdinal("TABLE_SCHEMA"));
+                    }
+                    columns.Add(ReadColumnInfo(reader));
+                }
             }
-            columns.Add(ReadColumnInfo(reader));
         }
 
-        TableInfo table = CreateTableSummary(tableName, schemaName, null);
+        // 首个读取器已释放、连接空闲，再查表注释与创建时间，补齐 comment/createdTime（空列表时库名同样取自表元信息）
+        (string? tableComment, DateTime? createdTime, string? metaSchema) = await ReadTableMetaAsync(tableName, ct);
+        if (schemaName.Length == 0 && !string.IsNullOrEmpty(metaSchema))
+        {
+            schemaName = metaSchema;
+        }
+
+        TableInfo table = CreateTableSummary(tableName, schemaName, tableComment, createdTime);
         table.SetColumns(columns);
         return table;
+    }
+
+    /// <summary>
+    /// 读取单张表的注释与创建时间元信息，供表详情阶段补齐；表不存在时返回空值。
+    /// </summary>
+    /// <param name="tableName">目标表名。</param>
+    /// <param name="ct">取消标记。</param>
+    /// <returns>表注释、创建时间与库名三元组，任一缺失时对应值为 null。</returns>
+    private async Task<(string? Comment, DateTime? CreatedTime, string? SchemaName)> ReadTableMetaAsync(string tableName, CancellationToken ct)
+    {
+        await using MySqlCommand command = _connection.CreateCommand();
+        command.CommandText = TableMetaSql;
+        command.Parameters.AddWithValue("@tableName", tableName);
+
+        await using MySqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            return (null, null, null);
+        }
+
+        string? schemaName = ReadNullableString(reader, "TABLE_SCHEMA");
+        string? comment = ReadNullableString(reader, "TABLE_COMMENT");
+        DateTime? tableCreatedTime = ReadNullableDateTime(reader, "CREATE_TIME");
+        return (comment, tableCreatedTime, schemaName);
     }
 
     /// <inheritdoc />
@@ -125,13 +172,14 @@ public sealed class MySqlSchemaReader : ISchemaReader
     }
 
     /// <summary>
-    /// 构造表清单摘要实体，只含表名/库名/注释，类名与变量名按表名实时转换。
+    /// 构造表清单摘要实体，只含表名/库名/注释/创建时间，类名与变量名按表名实时转换。
     /// </summary>
     /// <param name="rawName">原始表名。</param>
     /// <param name="schemaName">所属库名。</param>
     /// <param name="comment">表注释，可为空。</param>
+    /// <param name="createdTime">表创建时间，可为空。</param>
     /// <returns>不含列的表摘要实体。</returns>
-    private static TableInfo CreateTableSummary(string rawName, string schemaName, string? comment)
+    private static TableInfo CreateTableSummary(string rawName, string schemaName, string? comment, DateTime? createdTime = null)
     {
         return new TableInfo
         {
@@ -139,7 +187,8 @@ public sealed class MySqlSchemaReader : ISchemaReader
             SchemaName = schemaName,
             ClassName = TableInfo.ToPascalCase(rawName),
             VariableName = TableInfo.ToCamelCase(rawName),
-            Comment = comment
+            Comment = comment,
+            CreatedTime = createdTime
         };
     }
 
@@ -153,6 +202,18 @@ public sealed class MySqlSchemaReader : ISchemaReader
     {
         int ordinal = reader.GetOrdinal(columnName);
         return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+    }
+
+    /// <summary>
+    /// 读取可空日期时间列，数据库 NULL 返回空值。
+    /// </summary>
+    /// <param name="reader">数据读取器。</param>
+    /// <param name="columnName">目标列名。</param>
+    /// <returns>列值，数据库 NULL 时为 null。</returns>
+    private static DateTime? ReadNullableDateTime(MySqlDataReader reader, string columnName)
+    {
+        int ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? null : reader.GetDateTime(ordinal);
     }
 
     /// <summary>

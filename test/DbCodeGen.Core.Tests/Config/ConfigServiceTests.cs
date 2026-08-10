@@ -685,4 +685,276 @@ public sealed class ConfigServiceTests : IDisposable
 
         Assert.Equal(300, config.Llm.TimeoutSeconds);
     }
+
+    /// <summary>
+    /// 在指定配置路径与 AppData 根上创建配置服务并登记到清理列表，供数据目录测试隔离真实 %AppData%。
+    /// </summary>
+    /// <param name="configPath">配置文件绝对路径，可为空走定位解析。</param>
+    /// <param name="defaultTemplatesDirectory">默认模板目录，可为空回退 AppData 根下 DbCodeGen\Templates。</param>
+    /// <param name="appDataRootOverride">AppData 根目录，可为空取系统 ApplicationData。</param>
+    /// <returns>配置服务实例。</returns>
+    private ConfigService CreateServiceWithOverrides(string? configPath, string? defaultTemplatesDirectory, string? appDataRootOverride)
+    {
+        ConfigService service = new(
+            _protector,
+            NullLogger<ConfigService>.Instance,
+            configPath,
+            defaultTemplatesDirectory,
+            appDataRootOverride);
+        _services.Add(service);
+        return service;
+    }
+
+    /// <summary>
+    /// 合法数据目录切换应迁移配置与默认模板目录到新目录、更新配置路径与 DataDirectory、写定位文件，并可被新服务重新加载。
+    /// </summary>
+    [Fact]
+    public void ChangeDataDirectory_ValidDirectory_MigratesConfigAndTemplates()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string defaultTemplates = Path.Combine(appDataRoot, "DbCodeGen", "Templates");
+        Directory.CreateDirectory(defaultTemplates);
+        File.WriteAllText(Path.Combine(defaultTemplates, "marker.txt"), "keep");
+
+        string oldConfigPath = Path.Combine(_tempRoot, "old", "config.json");
+        ConfigService service = CreateServiceWithOverrides(oldConfigPath, defaultTemplates, appDataRoot);
+        AppConfig config = service.Load();
+        config.WorkspaceRoot = @"C:\gen\root";
+        config.LastSelectedPackage = "my-pkg";
+        service.Save();
+
+        string newDataDir = Path.Combine(_tempRoot, "newdata");
+        service.ChangeDataDirectory(newDataDir);
+
+        // 新配置路径生效且内存数据目录指向新目录
+        Assert.Equal(Path.Combine(newDataDir, "config.json"), service.ConfigFilePath);
+        Assert.Equal(newDataDir, service.Current.DataDirectory);
+
+        // 新目录下 config.json 存在且保留切换前的全部设置
+        Assert.True(File.Exists(Path.Combine(newDataDir, "config.json")));
+        ConfigService reloaded = CreateService(Path.Combine(newDataDir, "config.json"));
+        Assert.Equal(@"C:\gen\root", reloaded.Load().WorkspaceRoot);
+        Assert.Equal("my-pkg", reloaded.Load().LastSelectedPackage);
+
+        // 默认模板目录物理迁移到新数据目录下 Templates，内容完整保留
+        Assert.False(Directory.Exists(defaultTemplates));
+        Assert.True(File.Exists(Path.Combine(newDataDir, "Templates", "marker.txt")));
+
+        // 模板搜索目录移除默认模板目录并加入新数据目录下 Templates
+        Assert.Contains(Path.Combine(newDataDir, "Templates"), reloaded.Current.TemplateSearchDirectories);
+        Assert.DoesNotContain(defaultTemplates, reloaded.Current.TemplateSearchDirectories);
+    }
+
+    /// <summary>
+    /// 数据目录切换后写入定位文件，新建的空路径服务应经定位解析到新数据目录并加载到迁移后的配置。
+    /// </summary>
+    [Fact]
+    public void ChangeDataDirectory_ThenNewServiceResolvesFromLocationFile()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string oldConfigPath = Path.Combine(_tempRoot, "old", "config.json");
+        ConfigService service = CreateServiceWithOverrides(oldConfigPath, null, appDataRoot);
+        service.Load();
+
+        string newDataDir = Path.Combine(_tempRoot, "newdata");
+        service.ChangeDataDirectory(newDataDir);
+
+        // 新服务以空 configPath 构造，应经定位文件解析到新数据目录下 config.json 且文件已迁移存在
+        ConfigService reloaded = CreateServiceWithOverrides(null, null, appDataRoot);
+        Assert.Equal(Path.Combine(newDataDir, "config.json"), reloaded.ConfigFilePath);
+        Assert.True(File.Exists(reloaded.ConfigFilePath));
+    }
+
+    /// <summary>
+    /// 数据目录为空、空白或非绝对路径时切换应抛参数异常，不产生任何目录迁移。
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("relative/path")]
+    public void ChangeDataDirectory_InvalidDirectory_ThrowsArgumentException(string dataDirectory)
+    {
+        ConfigService service = CreateServiceInNewDirectory(out _);
+        service.Load();
+
+        Assert.Throws<ArgumentException>(() => service.ChangeDataDirectory(dataDirectory));
+    }
+
+    /// <summary>
+    /// 数据目录指向已存在文件时切换应抛参数异常。
+    /// </summary>
+    [Fact]
+    public void ChangeDataDirectory_PointsToExistingFile_ThrowsArgumentException()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out _);
+        service.Load();
+        string blockerFile = Path.Combine(_tempRoot, "blocker.txt");
+        File.WriteAllText(blockerFile, "x");
+
+        Assert.Throws<ArgumentException>(() => service.ChangeDataDirectory(blockerFile));
+    }
+
+    /// <summary>
+    /// 连续两次切换数据目录时，模板目录应从首个数据目录持续迁移到第二个数据目录，
+    /// 配置模板搜索目录不残留首个数据目录的 Templates 陈旧条目。
+    /// </summary>
+    [Fact]
+    public void ChangeDataDirectory_SecondSwitch_MigratesTemplatesToNewLocation()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string defaultTemplates = Path.Combine(appDataRoot, "DbCodeGen", "Templates");
+        Directory.CreateDirectory(defaultTemplates);
+        File.WriteAllText(Path.Combine(defaultTemplates, "marker.txt"), "keep");
+
+        string oldConfigPath = Path.Combine(_tempRoot, "old", "config.json");
+        ConfigService service = CreateServiceWithOverrides(oldConfigPath, defaultTemplates, appDataRoot);
+        service.Load();
+
+        string firstDir = Path.Combine(_tempRoot, "first-data");
+        string secondDir = Path.Combine(_tempRoot, "second-data");
+        service.ChangeDataDirectory(firstDir);
+        Assert.True(File.Exists(Path.Combine(firstDir, "Templates", "marker.txt")));
+
+        service.ChangeDataDirectory(secondDir);
+
+        // 模板目录二次迁移到新数据目录，首个数据目录下不再残留模板
+        Assert.False(Directory.Exists(Path.Combine(firstDir, "Templates")));
+        Assert.True(File.Exists(Path.Combine(secondDir, "Templates", "marker.txt")));
+
+        // 模板搜索目录指向新数据目录 Templates，不残留首个数据目录的陈旧条目
+        Assert.Contains(Path.Combine(secondDir, "Templates"), service.Current.TemplateSearchDirectories);
+        Assert.DoesNotContain(Path.Combine(firstDir, "Templates"), service.Current.TemplateSearchDirectories);
+
+        // 新实例经定位文件解析到第二个数据目录，配置加载后搜索目录不含陈旧条目
+        ConfigService reloaded = CreateServiceWithOverrides(null, null, appDataRoot);
+        Assert.Equal(Path.Combine(secondDir, "config.json"), reloaded.ConfigFilePath);
+        Assert.Contains(Path.Combine(secondDir, "Templates"), reloaded.Current.TemplateSearchDirectories);
+        Assert.DoesNotContain(Path.Combine(firstDir, "Templates"), reloaded.Current.TemplateSearchDirectories);
+    }
+
+    /// <summary>
+    /// 切换到与当前生效数据目录相同的目录应直接返回：配置路径不变、不写定位文件。
+    /// </summary>
+    [Fact]
+    public void ChangeDataDirectory_SameAsCurrent_ReturnsWithoutChange()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string oldConfigPath = Path.Combine(_tempRoot, "old", "config.json");
+        ConfigService service = CreateServiceWithOverrides(oldConfigPath, null, appDataRoot);
+        AppConfig config = service.Load();
+        string dataDir = Path.Combine(_tempRoot, "data");
+        config.DataDirectory = dataDir;
+        service.Save();
+
+        string originalPath = service.ConfigFilePath;
+        service.ChangeDataDirectory(dataDir);
+
+        Assert.Equal(originalPath, service.ConfigFilePath);
+        Assert.Equal(dataDir, service.Current.DataDirectory);
+        Assert.False(File.Exists(Path.Combine(appDataRoot, "DbCodeGen", "config-location.json")));
+    }
+
+    /// <summary>
+    /// 定位文件指向有效数据目录时，空路径构造的配置服务应解析到该数据目录下 config.json。
+    /// </summary>
+    [Fact]
+    public void Constructor_WithLocationFile_ResolvesDataDirectoryConfig()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string dataDir = Path.Combine(_tempRoot, "location-data");
+        Directory.CreateDirectory(dataDir);
+        string locationFile = Path.Combine(appDataRoot, "DbCodeGen", "config-location.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(locationFile)!);
+        File.WriteAllText(locationFile, JsonSerializer.Serialize(new { dataDirectory = dataDir }));
+
+        ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
+
+        Assert.Equal(Path.Combine(dataDir, "config.json"), service.ConfigFilePath);
+    }
+
+    /// <summary>
+    /// 定位文件指向已存在文件（非法数据目录）时，空路径构造的配置服务应回退默认 AppData 配置路径。
+    /// </summary>
+    [Fact]
+    public void Constructor_WithLocationFilePointingToFile_FallsBackToDefaultPath()
+    {
+        Directory.CreateDirectory(_tempRoot);
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string blockerFile = Path.Combine(_tempRoot, "blocker.txt");
+        File.WriteAllText(blockerFile, "x");
+        string locationFile = Path.Combine(appDataRoot, "DbCodeGen", "config-location.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(locationFile)!);
+        File.WriteAllText(locationFile, JsonSerializer.Serialize(new { dataDirectory = blockerFile }));
+
+        ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
+
+        Assert.Equal(Path.Combine(appDataRoot, "DbCodeGen", "config.json"), service.ConfigFilePath);
+    }
+
+    /// <summary>
+    /// 定位文件 JSON 结构损坏时，空路径构造的配置服务应回退默认 AppData 配置路径，不崩溃。
+    /// </summary>
+    [Fact]
+    public void Constructor_WithCorruptLocationFile_FallsBackToDefaultPath()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string locationFile = Path.Combine(appDataRoot, "DbCodeGen", "config-location.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(locationFile)!);
+        File.WriteAllText(locationFile, "{ not valid json");
+
+        ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
+
+        Assert.Equal(Path.Combine(appDataRoot, "DbCodeGen", "config.json"), service.ConfigFilePath);
+    }
+
+    /// <summary>
+    /// 包选择记忆、最近选中文件、数据目录与主窗口布局记忆应完整落盘并还原，验证读写幂等。
+    /// </summary>
+    [Fact]
+    public void Save_ThenNewServiceLoads_RoundTripsSelectionAndLayoutFields()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        AppConfig config = service.Load();
+
+        config.LastSelectedPackage = "my-pkg";
+        config.LastSelectedTemplateFile = "entity/pojo.java.scriban";
+        config.DataDirectory = @"C:\sync\dbcodegen";
+        config.MainLayout.TableColumnWidth = 360;
+        config.MainLayout.TemplateColumnWidth = 520;
+        config.MainLayout.TopRowHeight = 480;
+        config.MainLayout.LogPanelHeight = 120;
+        service.Save();
+
+        ConfigService reloaded = CreateService(configPath);
+        AppConfig loaded = reloaded.Load();
+
+        Assert.Equal("my-pkg", loaded.LastSelectedPackage);
+        Assert.Equal("entity/pojo.java.scriban", loaded.LastSelectedTemplateFile);
+        Assert.Equal(@"C:\sync\dbcodegen", loaded.DataDirectory);
+        Assert.NotNull(loaded.MainLayout);
+        Assert.Equal(360, loaded.MainLayout.TableColumnWidth);
+        Assert.Equal(520, loaded.MainLayout.TemplateColumnWidth);
+        Assert.Equal(480, loaded.MainLayout.TopRowHeight);
+        Assert.Equal(120, loaded.MainLayout.LogPanelHeight);
+    }
+
+    /// <summary>
+    /// 不含新增字段的旧配置文件反序列化后，包选择记忆/数据目录应兜底为空串、布局记忆兜底为默认实例，下游读取不抛空引用。
+    /// </summary>
+    [Fact]
+    public void Load_JsonWithoutSelectionAndLayoutFields_NormalizesToDefaults()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+        File.WriteAllText(configPath, """{"version":3,"workspaceRoot":"","lastRelativeOutputRoot":""}""");
+
+        AppConfig config = service.Load();
+
+        Assert.Equal(string.Empty, config.LastSelectedPackage);
+        Assert.Equal(string.Empty, config.LastSelectedTemplateFile);
+        Assert.Equal(string.Empty, config.DataDirectory);
+        Assert.NotNull(config.MainLayout);
+        Assert.Null(config.MainLayout.TableColumnWidth);
+        Assert.Null(config.MainLayout.TemplateColumnWidth);
+    }
 }

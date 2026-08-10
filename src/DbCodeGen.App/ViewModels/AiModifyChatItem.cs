@@ -78,6 +78,7 @@ public sealed partial class AiModifyChatItem : ObservableObject
 
     /// <summary>
     /// 摘要文本：AI 成功消息展示行数统计摘要，其余展示原文截断预览，便于气泡内快速核对。
+    /// AI 结果（批量摘要/错误清单）可能含多行逐文件明细，预览上限放宽避免关键失败信息被截断。
     /// </summary>
     public string SummaryText
     {
@@ -90,7 +91,7 @@ public sealed partial class AiModifyChatItem : ObservableObject
                 return $"已按指令修改，共 {lineCount} 行";
             }
 
-            return BuildPreview(Content, 300);
+            return BuildPreview(Content, IsAiMessage ? 10000 : 300);
         }
     }
 

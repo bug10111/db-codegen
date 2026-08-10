@@ -3,12 +3,15 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
 using DbCodeGen.App.Services;
 using DbCodeGen.App.ViewModels;
 using DbCodeGen.App.Views;
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
+using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Highlighting;
 using Microsoft.Extensions.Logging;
@@ -47,6 +50,21 @@ public partial class MainWindow : Window
     /// 加载文档期间抑制编辑器 TextChanged 置脏，避免载入文本被误判为用户编辑。
     /// </summary>
     private bool _isLoadingDocument;
+
+    /// <summary>
+    /// 上区三栏各列恢复宽度的下限，防止记忆值过小导致列不可用。
+    /// </summary>
+    private const double MinColumnWidth = 250;
+
+    /// <summary>
+    /// 上区三栏整体行高恢复下限，与 XAML 三栏网格 MinHeight 对齐。
+    /// </summary>
+    private const double MinTopRowHeight = 300;
+
+    /// <summary>
+    /// ④生成栏底部日志面板高度恢复下限，与 XAML 面板 MinHeight 对齐。
+    /// </summary>
+    private const double MinLogPanelHeight = 64;
 
     /// <summary>
     /// 使用配置服务、当前连接服务、对话框服务、数据源管理窗口工厂、设置窗口工厂、AI 模板助手窗口宿主服务、
@@ -140,6 +158,9 @@ public partial class MainWindow : Window
         _configService.Load();
         _currentDataSourceService.CurrentChanged += OnCurrentChanged;
         ReloadDataSourceComboBox();
+
+        // 首次布局完成后恢复上次保存的三栏列宽与纵向行高
+        Loaded += OnMainWindowLoaded;
 
         // 异步加载模板包列表，失败由视图模型内部提示不中断主窗口
         _ = _templateViewModel.InitializeAsync();
@@ -615,7 +636,210 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// 生成日志文本变化时按需滚动到底部：仅当用户已处于底部附近时自动跟随最新日志，
+    /// 向上翻阅旧日志时不被新日志打断。布局尚未完成时滚动量可能过期，延后到后台优先级再执行。
+    /// </summary>
+    /// <param name="sender">事件源，为生成日志文本框。</param>
+    /// <param name="e">文本变化事件参数。</param>
+    private void OnLogTextChanged(object sender, TextChangedEventArgs e)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // 用户已处于底部附近（或日志未超出视口）才滚动到底部，避免打断向上翻阅
+            if (LogTextBox.VerticalOffset + LogTextBox.ViewportHeight >= LogTextBox.ExtentHeight - 1)
+            {
+                LogTextBox.ScrollToEnd();
+            }
+        }), DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// 预览编辑器与生成日志的滚轮滚动接管：悬停即滚，按系统滚轮行数逐行滚动并标记事件已处理，
+    /// 解决 AvalonEdit 与只读 TextBox 在未聚焦时滚轮无响应的问题。
+    /// </summary>
+    /// <param name="sender">事件源，为预览编辑器或日志文本框。</param>
+    /// <param name="e">滚轮事件参数。</param>
+    private void OnRegionMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (sender is TextEditor editor)
+        {
+            ScrollTextEditorByWheel(editor, e.Delta);
+            e.Handled = true;
+            return;
+        }
+
+        if (sender is TextBox textBox)
+        {
+            ScrollTextBoxByWheel(textBox, e.Delta);
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// 按滚轮增量滚动 AvalonEdit 编辑器：以默认行高换算像素偏移后定位到新垂直偏移。
+    /// 增量按 120 的分数换算，高分辨率触控板产生的小增量也能滚动，避免悬停滚轮无响应。
+    /// </summary>
+    /// <param name="editor">目标编辑器。</param>
+    /// <param name="delta">滚轮增量，正数为向上滚动。</param>
+    private static void ScrollTextEditorByWheel(TextEditor editor, int delta)
+    {
+        // 默认行高取文本视图实际值，非法时回退固定行高，保证滚动步长稳定
+        double lineHeight = editor.TextArea.TextView.DefaultLineHeight;
+        if (lineHeight <= 0)
+        {
+            lineHeight = 15;
+        }
+
+        int linesPerNotch = SystemParameters.WheelScrollLines;
+        if (linesPerNotch <= 0)
+        {
+            linesPerNotch = 3;
+        }
+
+        double notches = delta / 120.0;
+        double targetOffset = editor.VerticalOffset - notches * linesPerNotch * lineHeight;
+        editor.ScrollToVerticalOffset(targetOffset);
+    }
+
+    /// <summary>
+    /// 按滚轮增量滚动只读文本框：沿可视树查找内部 ScrollViewer 并逐行滚动。
+    /// 增量按 120 的分数换算，任意非零增量至少滚动一行，兼容高分辨率触控板的小增量事件。
+    /// </summary>
+    /// <param name="textBox">目标文本框。</param>
+    /// <param name="delta">滚轮增量，正数为向上滚动。</param>
+    private static void ScrollTextBoxByWheel(TextBox textBox, int delta)
+    {
+        ScrollViewer? viewer = FindVisualChild<ScrollViewer>(textBox);
+        if (viewer is null)
+        {
+            return;
+        }
+
+        int linesPerNotch = SystemParameters.WheelScrollLines;
+        if (linesPerNotch <= 0)
+        {
+            linesPerNotch = 3;
+        }
+
+        int totalLines = (int)Math.Round(delta / 120.0 * linesPerNotch);
+
+        // 非零增量但行数换算后为零时兜底滚动一行，防止高分辨率触控板小增量被忽略
+        if (totalLines == 0 && delta != 0)
+        {
+            totalLines = Math.Sign(delta);
+        }
+
+        if (totalLines > 0)
+        {
+            for (int index = 0; index < totalLines; index++)
+            {
+                viewer.LineUp();
+            }
+        }
+        else if (totalLines < 0)
+        {
+            for (int index = 0; index < -totalLines; index++)
+            {
+                viewer.LineDown();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 沿可视树深度优先查找指定类型的子元素，未找到返回 null。
+    /// </summary>
+    /// <typeparam name="T">目标元素类型。</typeparam>
+    /// <param name="parent">查找起点。</param>
+    /// <returns>命中的子元素；未命中返回 null。</returns>
+    private static T? FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        int childCount = VisualTreeHelper.GetChildrenCount(parent);
+        for (int index = 0; index < childCount; index++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match)
+            {
+                return match;
+            }
+
+            T? nested = FindVisualChild<T>(child);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 首次布局完成后恢复上次保存的主窗口布局：按配置记忆回填三栏列宽与纵向行高，并对记忆值做下限钳制。
+    /// </summary>
+    private void OnMainWindowLoaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnMainWindowLoaded;
+        RestoreMainLayout();
+    }
+
+    /// <summary>
+    /// 从配置恢复主窗口布局：①列宽、②列宽、上区行高与④日志面板高度，非法记忆值按下限钳制跳过。
+    /// </summary>
+    private void RestoreMainLayout()
+    {
+        MainLayoutState layout = _configService.Current.MainLayout ?? new MainLayoutState();
+
+        // ①列宽按像素记忆恢复，低于下限时保持默认起始宽度
+        if (layout.TableColumnWidth is double tableWidth && tableWidth >= MinColumnWidth)
+        {
+            TopColumnsGrid.ColumnDefinitions[0].Width = new GridLength(tableWidth);
+        }
+
+        // ②列宽按像素记忆恢复，低于下限时保持星号均分
+        if (layout.TemplateColumnWidth is double templateWidth && templateWidth >= MinColumnWidth)
+        {
+            TopColumnsGrid.ColumnDefinitions[2].Width = new GridLength(templateWidth);
+        }
+
+        // 上区整体行高按像素记忆恢复，低于下限时保持默认比例
+        if (layout.TopRowHeight is double topHeight && topHeight >= MinTopRowHeight)
+        {
+            MainGrid.RowDefinitions[0].Height = new GridLength(topHeight);
+        }
+
+        // ④日志面板行高按像素记忆恢复，低于下限时保持默认比例（日志面板为可拉伸行，行高即其实际高度）
+        if (layout.LogPanelHeight is double logHeight && logHeight >= MinLogPanelHeight)
+        {
+            GenerationInnerGrid.RowDefinitions[4].Height = new GridLength(logHeight);
+        }
+    }
+
+    /// <summary>
+    /// 窗口关闭时回写主窗口布局到配置：三栏列宽、上区行高与④日志面板高度，写盘失败仅记日志不阻塞关闭。
+    /// </summary>
+    private void PersistMainLayout()
+    {
+        AppConfig config = _configService.Current;
+        MainLayoutState layout = config.MainLayout ??= new MainLayoutState();
+
+        // 回写各维度的实际布局值，保证下次启动恢复用户调整后的布局
+        layout.TableColumnWidth = TopColumnsGrid.ColumnDefinitions[0].ActualWidth;
+        layout.TemplateColumnWidth = TopColumnsGrid.ColumnDefinitions[2].ActualWidth;
+        layout.TopRowHeight = MainGrid.RowDefinitions[0].ActualHeight;
+        layout.LogPanelHeight = GenerationInnerGrid.RowDefinitions[4].ActualHeight;
+
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            _logger.LogWarning(exception, "主窗口布局记忆回写失败。");
+        }
+    }
+
+    /// <summary>
     /// 窗口关闭前检查未保存修改：存在脏文档时阻止关闭并经二次确认，确认后可关闭。
+    /// 确认关闭前回写主窗口布局记忆，保证下次启动恢复用户调整后的布局。
     /// </summary>
     /// <param name="e">关闭事件参数。</param>
     protected override async void OnClosing(CancelEventArgs e)
@@ -627,12 +851,14 @@ public partial class MainWindow : Window
             bool canClose = await _templateViewModel.ConfirmCloseAsync();
             if (canClose)
             {
+                PersistMainLayout();
                 Close();
             }
 
             return;
         }
 
+        PersistMainLayout();
         base.OnClosing(e);
     }
 

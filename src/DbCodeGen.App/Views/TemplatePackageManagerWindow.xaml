@@ -19,7 +19,7 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 工具栏：新增模板包 / 导入 zip / 导入文件夹 / 复制 / 导出 / 删除 / 刷新 -->
+        <!-- 工具栏：新增模板包 / 导入 zip / 导入文件夹 / 复制 / 重命名 / 导出 / 删除 / 刷新 -->
         <ContentControl Grid.Row="0" Style="{StaticResource DashedGroupBox}" Margin="0,0,0,10">
             <StackPanel Orientation="Horizontal">
                 <Button Content="新增模板包" Command="{Binding CreatePackageCommand}" />
@@ -28,6 +28,7 @@
                 <Button Content="导入文件夹" Command="{Binding ImportFolderCommand}" Margin="4,0,0,0" />
                 <Rectangle Style="{StaticResource ToolbarSeparator}" />
                 <Button Content="复制为…" Command="{Binding BeginCopyCommand}" />
+                <Button Content="重命名" Command="{Binding RenamePackageCommand}" Margin="4,0,0,0" ToolTip="重命名选中的用户模板包，内置包只读不可重命名" />
                 <Button Content="导出 ZIP" Command="{Binding ExportCommand}" Margin="4,0,0,0" />
                 <Button Content="删除" Command="{Binding DeleteCommand}" Margin="4,0,0,0" />
                 <Rectangle Style="{StaticResource ToolbarSeparator}" />

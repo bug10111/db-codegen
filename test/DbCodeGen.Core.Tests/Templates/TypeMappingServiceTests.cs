@@ -284,6 +284,12 @@ public sealed class TypeMappingServiceTests
 
         /// <inheritdoc />
         public string? GetLlmApiKey() => null;
+
+        /// <inheritdoc />
+        public void ChangeDataDirectory(string dataDirectory)
+        {
+            throw new NotSupportedException("测试替身不支持切换数据目录。");
+        }
     }
 
     /// <summary>

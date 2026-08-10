@@ -1,4 +1,5 @@
 using System.Runtime.Versioning;
+using System.Security;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -30,29 +31,61 @@ public sealed class ConfigService : IConfigService, IDisposable
     };
 
     /// <summary>
+    /// 默认模板目录，数据目录切换时物理迁移的来源；测试可注入临时目录避免触碰真实 %AppData%。
+    /// </summary>
+    private readonly string _defaultTemplatesDirectory;
+
+    /// <summary>
+    /// AppData 根目录，定位文件与默认配置路径的基准；测试可注入临时目录避免读写真实 %AppData%。
+    /// </summary>
+    private readonly string _appDataRoot;
+
+    /// <summary>
     /// 使用指定凭据保护器与日志器创建配置服务实例。
+    /// configFilePath 为空时按定位文件 config-location.json 解析数据目录：
+    /// 定位文件存在且 dataDirectory 有效时配置路径为数据目录下 config.json，否则回退 %AppData%\DbCodeGen\config.json。
     /// </summary>
     /// <param name="credentialProtector">Windows DPAPI 凭据加解密器，用于 apiKey 的密文转换。</param>
     /// <param name="logger">配置服务日志器，日志不得输出明文密钥。</param>
-    /// <param name="configFilePath">配置文件绝对路径；为空时默认 %AppData%\DbCodeGen\config.json。</param>
+    /// <param name="configFilePath">配置文件绝对路径；为空时经定位文件解析或回退默认路径（测试显式传路径不触发定位解析）。</param>
     /// <exception cref="ArgumentNullException">credentialProtector 或 logger 为 null 时抛出。</exception>
     public ConfigService(
         CredentialProtector credentialProtector,
         ILogger<ConfigService> logger,
         string? configFilePath = null)
+        : this(credentialProtector, logger, configFilePath, defaultTemplatesDirectory: null, appDataRootOverride: null)
+    {
+    }
+
+    /// <summary>
+    /// 使用指定凭据保护器、日志器、配置路径、默认模板目录与 AppData 根创建配置服务实例；
+    /// 默认模板目录与 AppData 根仅供测试注入隔离真实用户数据。
+    /// </summary>
+    /// <param name="credentialProtector">Windows DPAPI 凭据加解密器，用于 apiKey 的密文转换。</param>
+    /// <param name="logger">配置服务日志器，日志不得输出明文密钥。</param>
+    /// <param name="configFilePath">配置文件绝对路径；为空时经定位文件解析或回退默认路径。</param>
+    /// <param name="defaultTemplatesDirectory">默认模板目录，为空时回退 AppData 根下 DbCodeGen\Templates。</param>
+    /// <param name="appDataRootOverride">AppData 根目录，为空时取系统 ApplicationData。</param>
+    internal ConfigService(
+        CredentialProtector credentialProtector,
+        ILogger<ConfigService> logger,
+        string? configFilePath,
+        string? defaultTemplatesDirectory,
+        string? appDataRootOverride)
     {
         ArgumentNullException.ThrowIfNull(credentialProtector);
         ArgumentNullException.ThrowIfNull(logger);
         _protector = credentialProtector;
         _logger = logger;
-        ConfigFilePath = configFilePath ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "DbCodeGen",
-            "config.json");
+        _appDataRoot = appDataRootOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        _defaultTemplatesDirectory = defaultTemplatesDirectory ?? Path.Combine(_appDataRoot, "DbCodeGen", "Templates");
+        ConfigFilePath = configFilePath is null
+            ? ResolveEffectiveConfigPath(_appDataRoot)
+            : configFilePath;
     }
 
     /// <inheritdoc />
-    public string ConfigFilePath { get; }
+    public string ConfigFilePath { get; private set; }
 
     /// <inheritdoc />
     public AppConfig Load()
@@ -149,6 +182,267 @@ public sealed class ConfigService : IConfigService, IDisposable
         }
     }
 
+    /// <inheritdoc />
+    public void ChangeDataDirectory(string dataDirectory)
+    {
+        _gate.Wait();
+        try
+        {
+            EnsureLoadedLocked();
+            ChangeDataDirectoryCoreLocked(dataDirectory);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        // 切换成功后触发变化通知，供依赖配置的消费方感知数据目录与配置路径变更
+        ConfigChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// 在锁内执行数据目录切换：校验目录、复制配置、迁移模板目录、更新内存路径与数据目录并落盘到新位置。
+    /// </summary>
+    /// <param name="dataDirectory">目标数据目录绝对路径。</param>
+    /// <exception cref="ArgumentException">目录非法或不可写时抛出。</exception>
+    /// <exception cref="ConfigSaveException">切换后落盘失败时抛出。</exception>
+    private void ChangeDataDirectoryCoreLocked(string dataDirectory)
+    {
+        string normalizedNew = ValidateDataDirectory(dataDirectory);
+
+        // 与当前生效数据目录相同则直接返回，避免重复迁移与无意义落盘
+        string currentEffective = NormalizeDirForCompare(
+            string.IsNullOrWhiteSpace(_current!.DataDirectory)
+                ? Path.Combine(_appDataRoot, "DbCodeGen")
+                : _current.DataDirectory);
+        if (string.Equals(NormalizeDirForCompare(normalizedNew), currentEffective, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            // 新配置路径与当前路径不同且当前配置存在时，先把当前配置原样复制到新路径，保证全部设置随目录迁移
+            string newConfigPath = Path.Combine(normalizedNew, "config.json");
+            string currentPath = ConfigFilePath;
+            if (File.Exists(currentPath)
+                && !string.Equals(Path.GetFullPath(currentPath), Path.GetFullPath(newConfigPath), StringComparison.OrdinalIgnoreCase))
+            {
+                Directory.CreateDirectory(normalizedNew);
+                File.Copy(currentPath, newConfigPath, overwrite: true);
+            }
+
+            MigrateDefaultTemplatesDirectory(normalizedNew);
+
+            // 更新内存数据目录与配置路径，随后写定位文件并落盘到新位置，使内存与磁盘一致指向新目录
+            _current.DataDirectory = normalizedNew;
+            ConfigFilePath = newConfigPath;
+            WriteLocationFile(normalizedNew);
+            SaveToDiskAsync(_current).GetAwaiter().GetResult();
+        }
+        catch (Exception exception) when (exception is not ArgumentException and not ConfigSaveException)
+        {
+            // 复制或迁移阶段出现 IO/权限异常时收敛为结构化保存异常，调用方统一按保存失败处理，避免原生异常逃逸到 UI 层
+            throw new ConfigSaveException($"数据目录切换失败：{exception.Message}", exception);
+        }
+    }
+
+    /// <summary>
+    /// 校验数据目录合法性：非空、绝对路径、非已存在文件、目录可创建且可写，非法抛参数异常。
+    /// </summary>
+    /// <param name="dataDirectory">待校验的数据目录。</param>
+    /// <returns>规范化后的绝对路径。</returns>
+    /// <exception cref="ArgumentException">目录为空、非绝对路径、指向已存在文件或不可写时抛出。</exception>
+    private static string ValidateDataDirectory(string dataDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            throw new ArgumentException("数据目录不能为空。", nameof(dataDirectory));
+        }
+
+        string trimmed = dataDirectory.Trim();
+        if (!Path.IsPathRooted(trimmed))
+        {
+            throw new ArgumentException("数据目录必须为绝对路径。", nameof(dataDirectory));
+        }
+
+        string normalized;
+        try
+        {
+            normalized = Path.GetFullPath(trimmed);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("数据目录路径不合法。", nameof(dataDirectory));
+        }
+
+        if (File.Exists(normalized))
+        {
+            throw new ArgumentException("数据目录指向一个已存在文件，请选择目录。", nameof(dataDirectory));
+        }
+
+        // 目录不存在时先创建，再以写入探测文件验证真实可写，避免仅按存在性误判
+        try
+        {
+            Directory.CreateDirectory(normalized);
+            string probeFile = Path.Combine(normalized, $".write_probe_{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(probeFile, string.Empty);
+            File.Delete(probeFile);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException or SecurityException or ArgumentException)
+        {
+            throw new ArgumentException("数据目录不存在或不可写，请重新选择。", nameof(dataDirectory));
+        }
+
+        return normalized;
+    }
+
+    /// <summary>
+    /// 迁移默认模板目录：从模板搜索目录移除旧生效模板目录（含默认模板目录）并加入新数据目录下 Templates，
+    /// 旧生效模板目录存在且新目录不存在时物理移动目录，移动失败或旧目录不存在时确保新目录可建。
+    /// 二次切换数据目录时旧生效目录为上次数据目录下 Templates，保证模板目录随连续切换持续迁移不孤立。
+    /// </summary>
+    /// <param name="newDataDirectory">新数据目录绝对路径。</param>
+    private void MigrateDefaultTemplatesDirectory(string newDataDirectory)
+    {
+        string newTemplatesDir = Path.Combine(newDataDirectory, "Templates");
+
+        // 当前生效的旧模板目录：已设置数据目录时为旧数据目录下 Templates，否则为默认模板目录，
+        // 连续切换时物理迁移与搜索条目清理均以该旧目录为准，避免二次切换遗留上个数据目录的模板
+        string oldEffectiveTemplates = string.IsNullOrWhiteSpace(_current!.DataDirectory)
+            ? _defaultTemplatesDirectory
+            : Path.Combine(NormalizeDirForCompare(_current.DataDirectory), "Templates");
+
+        // 模板搜索目录移除旧默认模板目录与旧生效模板目录并加入新目录，保证模板包管理扫描位置随数据目录迁移
+        List<string> directories = _current.TemplateSearchDirectories;
+        directories.RemoveAll(directory =>
+            string.Equals(NormalizeDirForCompare(directory), NormalizeDirForCompare(_defaultTemplatesDirectory), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(NormalizeDirForCompare(directory), NormalizeDirForCompare(oldEffectiveTemplates), StringComparison.OrdinalIgnoreCase));
+        if (!directories.Any(directory =>
+                string.Equals(NormalizeDirForCompare(directory), NormalizeDirForCompare(newTemplatesDir), StringComparison.OrdinalIgnoreCase)))
+        {
+            directories.Add(newTemplatesDir);
+        }
+
+        // 旧生效模板目录存在且新目录不存在时物理移动，移动失败或旧目录不存在时创建空目录保持搜索目录有效
+        if (Directory.Exists(oldEffectiveTemplates) && !Directory.Exists(newTemplatesDir))
+        {
+            try
+            {
+                Directory.Move(oldEffectiveTemplates, newTemplatesDir);
+                return;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(exception, "模板目录迁移失败，将保留原目录并在新数据目录重建空目录。");
+            }
+        }
+
+        Directory.CreateDirectory(newTemplatesDir);
+    }
+
+    /// <summary>
+    /// 将目录路径规范化为绝对路径并去除末尾目录分隔符，用于模板搜索目录去重比较。
+    /// </summary>
+    /// <param name="path">待规范化路径。</param>
+    /// <returns>规范化绝对路径；畸形路径无法规范化时原样返回。</returns>
+    private static string NormalizeDirForCompare(string path)
+    {
+        try
+        {
+            return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return path;
+        }
+    }
+
+    /// <summary>
+    /// 解析生效配置路径：读定位文件 config-location.json，dataDirectory 有效时使用数据目录下 config.json，否则回退默认路径。
+    /// </summary>
+    /// <param name="appDataRoot">AppData 根目录，定位文件与默认配置路径的基准。</param>
+    /// <returns>生效配置文件绝对路径。</returns>
+    private static string ResolveEffectiveConfigPath(string appDataRoot)
+    {
+        string defaultPath = Path.Combine(appDataRoot, "DbCodeGen", "config.json");
+
+        string locationFilePath = Path.Combine(appDataRoot, "DbCodeGen", "config-location.json");
+        string? dataDirectory = TryReadLocationFile(locationFilePath);
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            return defaultPath;
+        }
+
+        string trimmed = dataDirectory.Trim();
+        if (!Path.IsPathRooted(trimmed) || File.Exists(trimmed))
+        {
+            return defaultPath;
+        }
+
+        try
+        {
+            return Path.Combine(Path.GetFullPath(trimmed), "config.json");
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // 定位文件指向畸形路径时回退默认配置路径，保证应用可启动
+            return defaultPath;
+        }
+    }
+
+    /// <summary>
+    /// 读取定位文件中的 dataDirectory 字段；文件缺失、解析失败或字段非字符串时返回 null。
+    /// </summary>
+    /// <param name="locationFilePath">定位文件绝对路径。</param>
+    /// <returns>定位的数据目录；无效时返回 null。</returns>
+    private static string? TryReadLocationFile(string locationFilePath)
+    {
+        try
+        {
+            if (!File.Exists(locationFilePath))
+            {
+                return null;
+            }
+
+            string json = File.ReadAllText(locationFilePath);
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (document.RootElement.TryGetProperty("dataDirectory", out JsonElement property)
+                && property.ValueKind == JsonValueKind.String)
+            {
+                return property.GetString();
+            }
+
+            return null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // 定位文件不可读或结构损坏时按未定位处理，回退默认路径
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 将当前数据目录写入定位文件 config-location.json，作为配置所在地的引导指针；
+    /// 写失败记录警告不阻断切换，但下次启动可能回退默认路径。
+    /// </summary>
+    /// <param name="dataDirectory">数据目录绝对路径。</param>
+    private void WriteLocationFile(string dataDirectory)
+    {
+        string locationFilePath = Path.Combine(_appDataRoot, "DbCodeGen", "config-location.json");
+        try
+        {
+            string directory = Path.GetDirectoryName(locationFilePath)!;
+            Directory.CreateDirectory(directory);
+            string json = JsonSerializer.Serialize(new { dataDirectory }, JsonOptions);
+            File.WriteAllText(locationFilePath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(exception, "数据目录定位文件写失败：{LocationFile}。", locationFilePath);
+        }
+    }
+
     /// <summary>
     /// 释放信号量锁等非托管资源。
     /// </summary>
@@ -241,7 +535,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// </summary>
     private async Task<AppConfig> CreateDefaultAndPersistAsync()
     {
-        AppConfig defaults = BuildDefaultConfig();
+        AppConfig defaults = BuildDefaultConfig(_appDataRoot);
         try
         {
             await SaveToDiskAsync(defaults).ConfigureAwait(false);
@@ -260,7 +554,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     private async Task<AppConfig> RebuildFromCorruptAsync()
     {
         string backupPath = BackupCorruptFile();
-        AppConfig defaults = BuildDefaultConfig();
+        AppConfig defaults = BuildDefaultConfig(_appDataRoot);
         try
         {
             await SaveToDiskAsync(defaults).ConfigureAwait(false);
@@ -347,11 +641,13 @@ public sealed class ConfigService : IConfigService, IDisposable
 
     /// <summary>
     /// 构造首次启动的默认配置：默认 DashScope 兼容端点、qwen-plus 模型与默认模板搜索目录。
+    /// 模板搜索目录基于注入的 AppData 根，测试注入临时根时默认配置同样指向隔离目录。
     /// </summary>
-    private static AppConfig BuildDefaultConfig()
+    /// <param name="appDataRoot">AppData 根目录，默认模板搜索目录的基准。</param>
+    private static AppConfig BuildDefaultConfig(string appDataRoot)
     {
         string templatesDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            appDataRoot,
             "DbCodeGen",
             "Templates");
 
@@ -443,6 +739,12 @@ public sealed class ConfigService : IConfigService, IDisposable
 
             paths.RemoveAll(path => string.IsNullOrWhiteSpace(path));
         }
+
+        // 包/文件选择记忆与数据目录兜底为空串，主窗口布局记忆兜底为默认实例，防止下游读取空引用
+        config.LastSelectedPackage ??= string.Empty;
+        config.LastSelectedTemplateFile ??= string.Empty;
+        config.DataDirectory ??= string.Empty;
+        config.MainLayout ??= new MainLayoutState();
 
         // 旧版本配置升级：映射模型 v3 引入按数据库类型分桶（通用/MySQL/PostgreSQL），
         // 迁移时保留用户已有条目，仅追加按库默认集中尚未覆盖的条目，避免覆盖用户自定义映射

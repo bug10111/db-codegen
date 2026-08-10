@@ -1441,4 +1441,242 @@ public sealed class TemplatePackageServiceTests : IDisposable
             File.SetAttributes(manifestPath, FileAttributes.Normal);
         }
     }
+
+    /// <summary>
+    /// 重命名用户包应物理改目录名并重写清单包名，重新加载后新名生效且模板文件完整。
+    /// </summary>
+    [Fact]
+    public async Task RenamePackageAsync_UserPackage_SucceedsAndRewritesManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("old-pkg", "说明", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("old-pkg", "new-pkg", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.Equal("new-pkg", result.Package!.Name);
+        Assert.False(result.Package.IsBuiltin);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "new-pkg", TemplatePackageLoader.ManifestFileName)));
+        Assert.True(File.Exists(Path.Combine(userLibrary, "new-pkg", "main.tpl")));
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "old-pkg")));
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("new-pkg", CancellationToken.None);
+        Assert.Equal("new-pkg", reloaded.Name);
+        Assert.Equal("main.tpl", Assert.Single(reloaded.Files).RelativeTemplatePath);
+    }
+
+    /// <summary>
+    /// 内置包重命名应只读拒绝，原目录保持不变。
+    /// </summary>
+    [Fact]
+    public async Task RenamePackageAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("builtin-pkg", "renamed", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.True(Directory.Exists(Path.Combine(builtinRoot, "builtin-pkg")));
+    }
+
+    /// <summary>
+    /// 新包名非法应返回 Invalid，原包目录保持不变。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil")]
+    [InlineData("a/b")]
+    [InlineData("a b")]
+    [InlineData("")]
+    public async Task RenamePackageAsync_InvalidNewName_ReturnsInvalid(string newName)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("old-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("old-pkg", newName, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.True(Directory.Exists(Path.Combine(userLibrary, "old-pkg")));
+    }
+
+    /// <summary>
+    /// 新包名与内置包同名应只读拒绝，原包目录保持不变。
+    /// </summary>
+    [Fact]
+    public async Task RenamePackageAsync_NewNameMatchesBuiltin_ReturnsBuiltinConflict()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("old-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("old-pkg", "builtin-pkg", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.True(Directory.Exists(Path.Combine(userLibrary, "old-pkg")));
+    }
+
+    /// <summary>
+    /// 新包名与用户包同名应返回 NameConflict，两个包目录均保持不变。
+    /// </summary>
+    [Fact]
+    public async Task RenamePackageAsync_NewNameMatchesUser_ReturnsNameConflict()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("old-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+        await service.CreatePackageAsync("existing", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("old-pkg", "existing", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.NameConflict, result.Status);
+        Assert.True(Directory.Exists(Path.Combine(userLibrary, "old-pkg")));
+        Assert.True(Directory.Exists(Path.Combine(userLibrary, "existing")));
+    }
+
+    /// <summary>
+    /// 新旧同名重命名应视为成功原样返回，包目录与清单不变。
+    /// </summary>
+    [Fact]
+    public async Task RenamePackageAsync_SameName_ReturnsSuccessWithoutChanges()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("same-pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenamePackageAsync("same-pkg", "same-pkg", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "same-pkg", TemplatePackageLoader.ManifestFileName)));
+    }
+
+    /// <summary>
+    /// 重命名模板文件应物理改名并同步清单条目，重新加载后新路径生效、旧路径消失，输出路径保持不变。
+    /// </summary>
+    [Fact]
+    public async Task RenameTemplateFileAsync_UserPackage_SucceedsAndSyncsManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "entity/main.tpl", "entity/main.java", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "pkg", "entity/main.tpl", "entity/renamed.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "entity", "renamed.tpl")));
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "entity", "main.tpl")));
+        TemplateFileInfo file = Assert.Single(result.Package!.Files);
+        Assert.Equal("entity/renamed.tpl", file.RelativeTemplatePath);
+        Assert.Equal("entity/main.java", file.OutputPath);
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("pkg", CancellationToken.None);
+        Assert.Equal("entity/renamed.tpl", Assert.Single(reloaded.Files).RelativeTemplatePath);
+    }
+
+    /// <summary>
+    /// 内置包重命名模板文件应只读拒绝，原文件保持不变。
+    /// </summary>
+    [Fact]
+    public async Task RenameTemplateFileAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "builtin-pkg", "entity.java.scriban", "entity.java.scriban2", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.True(File.Exists(Path.Combine(builtinRoot, "builtin-pkg", "entity.java.scriban")));
+    }
+
+    /// <summary>
+    /// 重命名不存在的旧文件应返回失败，不产生新文件。
+    /// </summary>
+    [Fact]
+    public async Task RenameTemplateFileAsync_MissingOldFile_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "pkg", "missing.tpl", "new.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "new.tpl")));
+    }
+
+    /// <summary>
+    /// 重命名目标已存在文件应返回失败，源文件与目标文件均不改动。
+    /// </summary>
+    [Fact]
+    public async Task RenameTemplateFileAsync_TargetExists_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+        await service.AddTemplateFileAsync("pkg", "target.tpl", "target.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "pkg", "main.tpl", "target.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "main.tpl")));
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "target.tpl")));
+    }
+
+    /// <summary>
+    /// 重命名路径含目录穿越、绝对路径或非法文件名字符应返回 Invalid，不改动任何文件。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.tpl")]
+    [InlineData("a/../../evil.tpl")]
+    [InlineData("C:\\windows\\main.tpl")]
+    [InlineData("main|bad.tpl")]
+    public async Task RenameTemplateFileAsync_InvalidPath_ReturnsInvalid(string newPath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "pkg", "main.tpl", newPath, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "main.tpl")));
+    }
+
+    /// <summary>
+    /// 新旧路径相同重命名应视为成功原样返回，文件与清单不变。
+    /// </summary>
+    [Fact]
+    public async Task RenameTemplateFileAsync_SamePath_ReturnsSuccessWithoutChanges()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.RenameTemplateFileAsync(
+            "pkg", "main.tpl", "main.tpl", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "main.tpl")));
+    }
 }

@@ -21,7 +21,7 @@ DbCodeGen.sln
 └─ test/DbCodeGen.Core.Tests  xUnit 单元测试
 ```
 
-详细规范见 `docs/TEMPLATE_SPEC.md`。
+详细规范见 `src/DbCodeGen.Core/Resources/TEMPLATE_SPEC.md`（内嵌进 `DbCodeGen.Core.dll` 供 AI 模板生成/修改使用）。
 
 ## 构建
 

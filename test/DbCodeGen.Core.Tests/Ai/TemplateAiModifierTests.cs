@@ -11,7 +11,8 @@ namespace DbCodeGen.Core.Tests.Ai;
 
 /// <summary>
 /// TemplateAiModifier AI 改模板对话服务单元测试，使用 FakeHttpMessageHandler mock LLM 端点，
-/// 覆盖代码围栏剥离、内容非空校验、参考文件段落注入、多轮历史回放与鉴权端点等验收要点。
+/// 覆盖代码围栏剥离、内容非空校验、参考文件段落注入、多轮历史回放、鉴权端点与
+/// 批量单次调用 #FILE# 标记解析等验收要点。
 /// 目标守卫（目标文件比对 + 内容一致性确认）由改模板 Tab VM（T10）承载并单测，本测试不承载守卫逻辑。
 /// </summary>
 [SupportedOSPlatform("windows")]
@@ -106,6 +107,29 @@ public sealed class TemplateAiModifierTests : IDisposable
             CurrentTemplateContent = "class {{table.className}} {\n  private Long id;\n}",
             ModificationInstruction = "给 id 字段加 @TableId 主键注解"
         };
+    }
+
+    /// <summary>
+    /// 构造批量修改请求，按参数组装待修改文件清单并携带共享修改指令。
+    /// </summary>
+    /// <param name="files">待修改文件的相对路径与内容快照对。</param>
+    /// <returns>批量修改请求实例。</returns>
+    private static AiModifyMultipleRequest BuildMultipleRequest(params (string Path, string Content)[] files)
+    {
+        var request = new AiModifyMultipleRequest
+        {
+            PackageName = "test-package",
+            ModificationInstruction = "给 id 字段加 @TableId 主键注解"
+        };
+
+        var fileItems = new List<AiModifyFileItem>(files.Length);
+        foreach ((string path, string content) in files)
+        {
+            fileItems.Add(new AiModifyFileItem { RelativePath = path, Content = content });
+        }
+
+        request.Files = fileItems;
+        return request;
     }
 
     /// <summary>
@@ -465,6 +489,421 @@ public sealed class TemplateAiModifierTests : IDisposable
         using JsonDocument document = JsonDocument.Parse(body);
         Assert.False(document.RootElement.TryGetProperty("max_tokens", out _));
         Assert.Equal(TestModel, document.RootElement.GetProperty("model").GetString());
+    }
+
+    /// <summary>
+    /// 批量修改所有文件均成功时，单次调用应按 #FILE# 标记切分各文件块，返回剥离分隔标记后的完整新文件。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_AllFilesSucceed_ParsesFileMarkers()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass {{table.className}} {\n}\n#FILE# mapper.xml.scriban\n<mapper></mapper>";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.True(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.All(result.FileResults, item => Assert.True(item.IsSuccess));
+        Assert.Equal("class {{table.className}} {\n}", result.FileResults[0].NewContent);
+        Assert.Equal("<mapper></mapper>", result.FileResults[1].NewContent);
+        Assert.Equal(1, handler.CallCount);
+        Assert.Empty(result.Errors);
+    }
+
+    /// <summary>
+    /// LLM 以整段代码围栏包裹批量响应时，应先剥离外层围栏再按 #FILE# 标记切分各文件块。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_FenceWrappedWholeResponse_StripsOuterFence()
+    {
+        ConfigService config = CreateConfigService();
+        string fenced = "```\n#FILE# entity.java.scriban\nclass A {}\n#FILE# mapper.xml.scriban\n<mapper></mapper>\n```";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(fenced)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.True(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.Equal("class A {}", result.FileResults[0].NewContent);
+        Assert.Equal("<mapper></mapper>", result.FileResults[1].NewContent);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 响应使用 CRLF 换行且末块无结尾换行时，应按行切分并保留原始换行风格解析各文件块。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_ResponseWithCrlfAndNoTrailingNewline_ParsesCorrectly()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\r\nclass A {\r\n}\r\n#FILE# mapper.xml.scriban\r\n<mapper></mapper>";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.True(result.IsAllSucceeded);
+        Assert.Equal("class A {\r\n}", result.FileResults[0].NewContent);
+        Assert.Equal("<mapper></mapper>", result.FileResults[1].NewContent);
+    }
+
+    /// <summary>
+    /// 响应含不带路径的 #FILE# 标记行时，该标记应视为无效且其后的内容被丢弃，有效块正常解析。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_MarkerWithoutPath_IsIgnored()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE#\nclass A {}\n#FILE# entity.java.scriban\nclass B {}\n";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.True(result.FileResults[0].IsSuccess);
+        Assert.Equal("class B {}", result.FileResults[0].NewContent);
+        Assert.False(result.FileResults[1].IsSuccess);
+        Assert.Contains("未在 AI 响应中", result.FileResults[1].Error);
+    }
+
+    /// <summary>
+    /// 响应含重复路径的多个块时，应按首个匹配块作为该文件修改结果。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_DuplicatePath_UsesFirstBlock()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass FIRST {}\n#FILE# entity.java.scriban\nclass SECOND {}\n";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.True(result.FileResults[0].IsSuccess);
+        Assert.Equal("class FIRST {}", result.FileResults[0].NewContent);
+        Assert.False(result.FileResults[1].IsSuccess);
+        Assert.Contains("未在 AI 响应中", result.FileResults[1].Error);
+    }
+
+    /// <summary>
+    /// 响应缺少某文件的 #FILE# 块时，该文件单独记失败、其余文件正常成功，不中断批量处理。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_MissingFileInResponse_FailsThatFileOnly()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass A {}\n";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.True(result.FileResults[0].IsSuccess);
+        Assert.Equal("class A {}", result.FileResults[0].NewContent);
+        Assert.False(result.FileResults[1].IsSuccess);
+        Assert.Contains("未在 AI 响应中", result.FileResults[1].Error);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 响应不含任何 #FILE# 标记时解析不出文件块，全部文件标记失败并给出统一解析错误。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_NoFileMarkers_AllFilesFail()
+    {
+        ConfigService config = CreateConfigService();
+        string plain = "class {{table.className}} {\n}\n";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(plain)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.All(result.FileResults, item => Assert.False(item.IsSuccess));
+        Assert.All(result.FileResults, item => Assert.Contains("未能解析批量修改结果", item.Error));
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 文件清单为空应批量级失败，不发起任何网络请求。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_EmptyFileList_FailsWithoutRequest()
+    {
+        ConfigService config = CreateConfigService();
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("class A {}")));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest();
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Empty(result.FileResults);
+        Assert.Contains(result.Errors, error => error.Contains("至少选择一个模板文件"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 修改指令为空应批量级失败，不发起任何网络请求。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_EmptyInstruction_FailsWithoutRequest()
+    {
+        ConfigService config = CreateConfigService();
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("class A {}")));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(("entity.java.scriban", "class A {}"));
+        request.ModificationInstruction = "   ";
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Contains(result.Errors, error => error.Contains("修改指令不能为空"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 单个文件内容为空应只标记该文件失败，其余文件正常参与单次调用，不中断批量。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_EmptyFileContent_FailsThatFileOnly()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass A {}\n";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "   "));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Equal(2, result.FileResults.Count);
+        Assert.True(result.FileResults[0].IsSuccess);
+        Assert.Equal("class A {}", result.FileResults[0].NewContent);
+        Assert.False(result.FileResults[1].IsSuccess);
+        Assert.Contains("内容为空", result.FileResults[1].Error);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    /// <summary>
+    /// LLM apiKey 未配置应批量级失败，不发起任何网络请求。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_ApiKeyNotConfigured_FailsWithoutRequest()
+    {
+        ConfigService config = CreateConfigService();
+        config.Load().Llm.ApiKeyEncrypted = string.Empty;
+        config.Save();
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody("class A {}")));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(("entity.java.scriban", "class A {}"));
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsAllSucceeded);
+        Assert.Contains(result.Errors, error => error.Contains("LLM 未配置"));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    /// <summary>
+    /// 批量请求携带多轮历史时，消息列表应为 system + 历史全量回放 + 单条含全部文件的 user 提示词。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_WithHistory_ReplaysHistoryInSinglePrompt()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass A {}\n#FILE# mapper.xml.scriban\n<mapper></mapper>";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+        request.HistoryMessages = new List<LlmChatMessage>
+        {
+            new() { Role = "user", Content = "第一轮指令：调整包名" },
+            new() { Role = "assistant", Content = "第一轮结果：包名已调整" }
+        };
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.True(result.IsAllSucceeded);
+        Assert.Single(handler.RequestBodies);
+
+        // 单次调用仅一个请求体：system + 两条历史 + 本轮单条 user 提示词，共 4 条消息
+        List<(string Role, string Content)> messages = GetMessagesFromRequestBody(Assert.Single(handler.RequestBodies));
+        Assert.Equal(4, messages.Count);
+        Assert.Equal("system", messages[0].Role);
+        Assert.Equal("第一轮指令：调整包名", messages[1].Content);
+        Assert.Equal("第一轮结果：包名已调整", messages[2].Content);
+        Assert.Equal("user", messages[3].Role);
+
+        // 单条 user 提示词应同时列出全部文件路径与内容，并携带共享修改指令
+        string userPrompt = messages[3].Content;
+        Assert.Contains("### entity.java.scriban", userPrompt);
+        Assert.Contains("class A {}", userPrompt);
+        Assert.Contains("### mapper.xml.scriban", userPrompt);
+        Assert.Contains("<mapper></mapper>", userPrompt);
+        Assert.Contains("修改指令：", userPrompt);
+    }
+
+    /// <summary>
+    /// 批量请求携带参考文件时，单条 user 提示词应注入参考文件段落与文件名标记。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_WithReferenceFiles_InjectsMarkedContentInSinglePrompt()
+    {
+        ConfigService config = CreateConfigService();
+        string response = "#FILE# entity.java.scriban\nclass A {}\n#FILE# mapper.xml.scriban\n<mapper></mapper>";
+        FakeHttpMessageHandler handler = new(_ => CreateJsonResponse(HttpStatusCode.OK, BuildLlmSuccessBody(response)));
+        TemplateAiModifier modifier = CreateModifier(config, handler, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+        request.ReferenceFiles = new List<AiReferenceFileItem>
+        {
+            new("CommonMapper.cs", 42, "namespace Demo; class CommonMapper { }")
+        };
+
+        AiModifyMultipleResult result = await modifier.ModifyMultipleAsync(request, CancellationToken.None);
+
+        Assert.True(result.IsAllSucceeded);
+        Assert.Single(handler.RequestBodies);
+
+        // 单条 user 提示词应同时含全部待修改文件标记与参考文件段落
+        string userPrompt = GetUserPromptFromRequestBody(Assert.Single(handler.RequestBodies));
+        Assert.Contains("### entity.java.scriban", userPrompt);
+        Assert.Contains("### mapper.xml.scriban", userPrompt);
+        Assert.Contains("### CommonMapper.cs", userPrompt);
+        Assert.Contains("namespace Demo; class CommonMapper { }", userPrompt);
+        Assert.Contains("输出格式", userPrompt);
+    }
+
+    /// <summary>
+    /// 单次调用取消应抛 OperationCanceledException 由调用方捕获处理，不再保留部分结果语义。
+    /// </summary>
+    [Fact]
+    public async Task ModifyMultipleAsync_CancelledDuringCall_ThrowsOperationCanceled()
+    {
+        ConfigService config = CreateConfigService();
+        using CancellationTokenSource cts = new();
+        SingleCallCancellingLlmClient llmClient = new(cts);
+        TemplateAiModifier modifier = new(llmClient, config, NullLogger<TemplateAiModifier>.Instance, TemplateSpec);
+
+        AiModifyMultipleRequest request = BuildMultipleRequest(
+            ("entity.java.scriban", "class A {}"),
+            ("mapper.xml.scriban", "<mapper></mapper>"));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => modifier.ModifyMultipleAsync(request, cts.Token));
+        Assert.Equal(1, llmClient.CallCount);
+    }
+
+    /// <summary>
+    /// mock ILlmClient：首次调用即取消令牌并抛取消异常，用于验证批量单次调用取消时抛 OperationCanceledException。
+    /// </summary>
+    private sealed class SingleCallCancellingLlmClient : ILlmClient
+    {
+        private readonly CancellationTokenSource _cts;
+        private int _callCount;
+
+        /// <summary>
+        /// 使用取消源构造客户端，首次调用时置位取消并抛出。
+        /// </summary>
+        /// <param name="cts">取消源，首次调用时取消并抛出。</param>
+        public SingleCallCancellingLlmClient(CancellationTokenSource cts)
+        {
+            _cts = cts;
+        }
+
+        /// <summary>
+        /// 对话调用次数。
+        /// </summary>
+        public int CallCount => _callCount;
+
+        /// <summary>
+        /// 首次调用置位取消并同步抛取消异常（由调用方捕获处理），验证单次调用取消契约。
+        /// </summary>
+        /// <param name="request">对话请求。</param>
+        /// <param name="options">调用配置。</param>
+        /// <param name="cancellationToken">取消标记。</param>
+        /// <returns>取消异常。</returns>
+        public Task<LlmChatResponse> ChatCompletionAsync(
+            LlmChatRequest request,
+            LlmClientOptions options,
+            CancellationToken cancellationToken)
+        {
+            _callCount++;
+            _cts.Cancel();
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        /// <summary>
+        /// 测试连接，本夹具不支持。
+        /// </summary>
+        /// <param name="options">调用配置。</param>
+        /// <param name="cancellationToken">取消标记。</param>
+        /// <returns>不支持时抛异常。</returns>
+        public Task<LlmChatResponse> TestConnectionAsync(LlmClientOptions options, CancellationToken cancellationToken)
+        {
+            throw new NotImplementedException();
+        }
+
+        /// <summary>
+        /// 读取模型列表，本夹具不支持。
+        /// </summary>
+        /// <param name="options">调用配置。</param>
+        /// <param name="cancellationToken">取消标记。</param>
+        /// <returns>不支持时抛异常。</returns>
+        public Task<IReadOnlyList<string>> ListModelsAsync(LlmClientOptions options, CancellationToken cancellationToken)
+        {
+            throw new NotImplementedException();
+        }
     }
 
     /// <summary>
