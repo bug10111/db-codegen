@@ -80,6 +80,7 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Equal(3, config.Version);
         Assert.Equal(string.Empty, config.WorkspaceRoot);
         Assert.Equal(string.Empty, config.LastRelativeOutputRoot);
+        Assert.Equal(DuplicateFileStrategy.Overwrite, config.DuplicateFileStrategy);
         Assert.Equal("https://dashscope.aliyuncs.com/compatible-mode/v1", config.Llm.BaseUrl);
         Assert.Equal("qwen-plus", config.Llm.Model);
         Assert.Equal(string.Empty, config.Llm.ApiKeyEncrypted);
@@ -399,6 +400,23 @@ public sealed class ConfigServiceTests : IDisposable
 
         Assert.Equal(@"C:\gen\root", defaults.WorkspaceRoot);
         Assert.Equal("src/main/resources", defaults.LastRelativeOutputRoot);
+    }
+
+    /// <summary>
+    /// 同名文件处理策略应随配置持久化：改为跳过并保存后，新服务实例加载仍为跳过。
+    /// </summary>
+    [Fact]
+    public void DuplicateFileStrategy_SetToSkip_AfterReloadRestored()
+    {
+        ConfigService service = CreateServiceInNewDirectory(out string configPath);
+        AppConfig config = service.Load();
+        config.DuplicateFileStrategy = DuplicateFileStrategy.Skip;
+        service.Save();
+
+        ConfigService reloaded = CreateService(configPath);
+        AppConfig reloadedConfig = reloaded.Load();
+
+        Assert.Equal(DuplicateFileStrategy.Skip, reloadedConfig.DuplicateFileStrategy);
     }
 
     /// <summary>

@@ -9,8 +9,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace DbCodeGen.Core.Tests.Generation;
 
 /// <summary>
-/// 批量生成服务单元测试，覆盖 dry-run 分类（新增/跳过/覆盖）、行尾归一化、防目录穿越、
-/// 渲染失败整单失败、覆盖确认安全线、内部重算 dry-run、进度报告与最近输出根回写。
+/// 批量生成服务单元测试，覆盖 dry-run 分类（新增/跳过/覆盖）、同名文件策略（覆盖/跳过）、行尾归一化、
+/// 防目录穿越、渲染失败整单失败、内部重算 dry-run、进度报告与最近输出根回写。
 /// </summary>
 public sealed class CodeGeneratorTests : IDisposable
 {
@@ -303,7 +303,7 @@ public sealed class CodeGeneratorTests : IDisposable
         };
         (CodeGenerator generator, FakeConfigService configService) = CreateGenerator();
 
-        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, null, CancellationToken.None);
+        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None);
 
         Assert.Equal(1, result.Generated);
         Assert.Equal(1, result.Skipped);
@@ -318,10 +318,10 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
-    /// 覆盖项经确认回调确认后应写盘覆盖，计数为覆盖。
+    /// 默认覆盖策略下内容不同的既有文件应无确认弹窗直接覆盖写盘，计数为覆盖。
     /// </summary>
     [Fact]
-    public async Task GenerateAsync_OverwriteConfirmed_WritesOverwrite()
+    public async Task GenerateAsync_OverwriteStrategy_OverwritesExisting()
     {
         (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
         (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
@@ -331,29 +331,19 @@ public sealed class CodeGeneratorTests : IDisposable
         var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
-        bool confirmInvoked = false;
-        GenerationResult result = await generator.GenerateAsync(
-            CreateRequest(package, workspaceRoot, "gen", files),
-            entries =>
-            {
-                confirmInvoked = true;
-                Assert.Contains(entries, entry => entry.Action == GenerationAction.Overwrite);
-                return Task.FromResult(true);
-            },
-            null,
-            CancellationToken.None);
+        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None);
 
-        Assert.True(confirmInvoked);
         Assert.Equal(1, result.Overwritten);
+        Assert.Equal(0, result.Generated);
         Assert.False(result.IsCancelled);
         Assert.Equal("public class SysUser {}\n", await File.ReadAllTextAsync(target));
     }
 
     /// <summary>
-    /// 覆盖项经确认回调拒绝后应整单取消，不写任何文件。
+    /// 跳过策略下内容不同的既有文件应分类为跳过，dry-run 只保留新增与跳过计数。
     /// </summary>
     [Fact]
-    public async Task GenerateAsync_OverwriteCancelled_NoWrite()
+    public async Task BuildPreviewAsync_SkipStrategy_ExistingDifferentClassifiesSkip()
     {
         (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
         (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
@@ -363,36 +353,67 @@ public sealed class CodeGeneratorTests : IDisposable
         var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
-        GenerationResult result = await generator.GenerateAsync(
-            CreateRequest(package, workspaceRoot, "gen", files),
-            _ => Task.FromResult(false),
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            CreateRequest(package, workspaceRoot, "gen", files, DuplicateFileStrategy.Skip),
             null,
             CancellationToken.None);
 
-        Assert.True(result.IsCancelled);
-        Assert.Equal(0, result.Generated);
-        Assert.Equal(0, result.Overwritten);
-        Assert.Equal("OLD CONTENT", await File.ReadAllTextAsync(target));
+        Assert.Equal(1, preview.SkipCount);
+        Assert.Equal(0, preview.OverwriteCount);
+        Assert.Equal(0, preview.NewCount);
+        Assert.Equal(GenerationAction.Skip, Assert.Single(preview.Entries).Action);
     }
 
     /// <summary>
-    /// 存在覆盖项但未提供确认回调应整单取消，保证覆盖动作必经确认的安全线。
+    /// 跳过策略下生成应只写新增文件，内容不同的既有文件原样保留不被覆盖。
     /// </summary>
     [Fact]
-    public async Task GenerateAsync_NoConfirmCallbackWithOverwrite_Cancelled()
+    public async Task GenerateAsync_SkipStrategy_ExistingUntouchedOnlyNewWritten()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        string existingTarget = Path.Combine(outputRoot, "out", "sysUser.java");
+        Directory.CreateDirectory(Path.GetDirectoryName(existingTarget)!);
+        await File.WriteAllTextAsync(existingTarget, "OLD CONTENT");
+        var files = new[]
+        {
+            new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true),
+            new TemplateFileSelection("mapper.xml.scriban", "out/{{table.variableName}}.xml", true)
+        };
+        (CodeGenerator generator, _) = CreateGenerator();
+
+        GenerationResult result = await generator.GenerateAsync(
+            CreateRequest(package, workspaceRoot, "gen", files, DuplicateFileStrategy.Skip),
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(1, result.Generated);
+        Assert.Equal(1, result.Skipped);
+        Assert.Equal(0, result.Overwritten);
+        Assert.False(result.IsCancelled);
+        Assert.Equal("OLD CONTENT", await File.ReadAllTextAsync(existingTarget));
+        Assert.True(File.Exists(Path.Combine(outputRoot, "out", "sysUser.xml")));
+    }
+
+    /// <summary>
+    /// 覆盖策略下内容相同的既有文件应分类为跳过，不做无意义写盘。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_OverwriteStrategy_ExistingSameContentClassifiesSkip()
     {
         (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
         (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
         string target = Path.Combine(outputRoot, "out", "sysUser.java");
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        await File.WriteAllTextAsync(target, "OLD CONTENT");
+        await File.WriteAllTextAsync(target, "public class SysUser {}\n");
         var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
-        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, null, CancellationToken.None);
+        GenerationPreview preview = await generator.BuildPreviewAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None);
 
-        Assert.True(result.IsCancelled);
-        Assert.Equal("OLD CONTENT", await File.ReadAllTextAsync(target));
+        Assert.Equal(1, preview.SkipCount);
+        Assert.Equal(0, preview.OverwriteCount);
+        Assert.Equal(GenerationAction.Skip, Assert.Single(preview.Entries).Action);
     }
 
     /// <summary>
@@ -406,7 +427,7 @@ public sealed class CodeGeneratorTests : IDisposable
         var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
-        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, null, CancellationToken.None);
+        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None);
 
         Assert.Equal(1, result.Generated);
         Assert.False(result.IsCancelled);
@@ -426,7 +447,7 @@ public sealed class CodeGeneratorTests : IDisposable
         var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
         (CodeGenerator generator, _) = CreateGenerator();
 
-        await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, progress, CancellationToken.None);
+        await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), progress, CancellationToken.None);
 
         Assert.Contains(progressValues, value => value.Stage == GenerationStage.Rendering);
         Assert.Contains(progressValues, value => value.Stage == GenerationStage.Previewing);
@@ -463,7 +484,7 @@ public sealed class CodeGeneratorTests : IDisposable
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, null, cts.Token);
+        GenerationResult result = await generator.GenerateAsync(CreateRequest(package, workspaceRoot, "gen", files), null, cts.Token);
 
         Assert.True(result.IsCancelled);
         Assert.Equal(0, result.Generated);
@@ -557,14 +578,18 @@ public sealed class CodeGeneratorTests : IDisposable
     /// <param name="workspaceRoot">工作区根。</param>
     /// <param name="relativeOutputRoot">相对输出根。</param>
     /// <param name="files">勾选模板文件集合。</param>
+    /// <param name="duplicateFileStrategy">同名文件处理策略，默认覆盖。</param>
     /// <returns>生成请求。</returns>
     private static GenerationRequest CreateRequest(
         TemplatePackageInfo package,
         string workspaceRoot,
         string relativeOutputRoot,
-        IReadOnlyList<TemplateFileSelection> files)
+        IReadOnlyList<TemplateFileSelection> files,
+        DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite)
     {
-        return new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, relativeOutputRoot);
+        return new GenerationRequest(
+            package, new[] { CreateTable() }, files, workspaceRoot, relativeOutputRoot,
+            duplicateFileStrategy: duplicateFileStrategy);
     }
 
     /// <summary>

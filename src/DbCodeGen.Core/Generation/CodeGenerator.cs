@@ -9,8 +9,8 @@ using Microsoft.Extensions.Logging;
 namespace DbCodeGen.Core.Generation;
 
 /// <summary>
-/// 批量代码生成服务实现：表与模板文件笛卡尔积渲染，dry-run 分类，覆盖确认后经文件写盘服务落盘。
-/// 安全线：写盘前必走 dry-run 重算，覆盖项必经确认回调，渲染后相对路径做防目录穿越校验。
+/// 批量代码生成服务实现：表与模板文件笛卡尔积渲染，dry-run 分类，按同名文件策略覆盖/跳过并经文件写盘服务落盘。
+/// 安全线：写盘前必走 dry-run 重算，同名文件处理策略由请求指定（无确认弹窗），渲染后相对路径做防目录穿越校验。
 /// </summary>
 public sealed class CodeGenerator : ICodeGenerator
 {
@@ -72,7 +72,6 @@ public sealed class CodeGenerator : ICodeGenerator
     /// <inheritdoc />
     public async Task<GenerationResult> GenerateAsync(
         GenerationRequest request,
-        Func<IReadOnlyList<GenerationFileEntry>, Task<bool>>? confirmOverwriteAsync,
         IProgress<GenerationProgress>? progress,
         CancellationToken cancellationToken)
     {
@@ -80,27 +79,26 @@ public sealed class CodeGenerator : ICodeGenerator
 
         try
         {
-            // 取消、渲染、覆盖确认与写盘任一环节取消都统一转换为取消结果返回
-            return await GenerateCoreAsync(request, confirmOverwriteAsync, progress, cancellationToken).ConfigureAwait(false);
+            // 取消、渲染与写盘任一环节取消都统一转换为取消结果返回
+            return await GenerateCoreAsync(request, progress, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            // 渲染/确认/写盘任一环节取消，返回带取消日志的结果供底栏展示
+            // 渲染或写盘任一环节取消，返回带取消日志的结果供底栏展示
             return new GenerationResult(0, 0, 0, 0, isCancelled: true, BuildCancelLogs("批量生成已取消。"));
         }
     }
 
     /// <summary>
-    /// 生成写盘核心流程：内部重算 dry-run、覆盖确认、逐文件写盘、统计与日志合并、回写最近生成路径。
+    /// 生成写盘核心流程：内部重算 dry-run、逐文件写盘、统计与日志合并、回写最近生成路径。
+    /// 同名文件覆盖/跳过按请求策略在 dry-run 分类阶段决定，写盘阶段无确认弹窗。
     /// </summary>
-    /// <param name="request">生成请求。</param>
-    /// <param name="confirmOverwriteAsync">覆盖确认回调。</param>
+    /// <param name="request">生成请求，含同名文件处理策略。</param>
     /// <param name="progress">进度推送。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>写盘结果统计与生成日志。</returns>
     private async Task<GenerationResult> GenerateCoreAsync(
         GenerationRequest request,
-        Func<IReadOnlyList<GenerationFileEntry>, Task<bool>>? confirmOverwriteAsync,
         IProgress<GenerationProgress>? progress,
         CancellationToken cancellationToken)
     {
@@ -109,34 +107,16 @@ public sealed class CodeGenerator : ICodeGenerator
         // 内部先重算 dry-run（同一渲染管线），保证安全线不因调用方绕过预览而失效
         GenerationPreview preview = await BuildPreviewCoreAsync(request, progress, cancellationToken).ConfigureAwait(false);
 
-        // 待写条目为新增与覆盖，跳过条目仅计数不进入写盘
+        // 待写条目为新增与覆盖（分类已按请求同名文件策略），跳过条目仅计数不进入写盘
         List<GenerationFileEntry> writeEntries = preview.Entries
             .Where(entry => entry.Action != GenerationAction.Skip)
             .ToList();
-        List<GenerationFileEntry> overwriteEntries = writeEntries
-            .Where(entry => entry.Action == GenerationAction.Overwrite)
-            .ToList();
-
-        if (overwriteEntries.Count > 0)
-        {
-            // 覆盖动作必经用户确认；未提供回调或用户取消均整单不写任何文件
-            if (confirmOverwriteAsync is null)
-            {
-                return new GenerationResult(0, 0, 0, 0, isCancelled: true, BuildCancelLogs("覆盖确认回调未提供，已整单取消。"));
-            }
-
-            bool confirmed = await confirmOverwriteAsync(overwriteEntries).ConfigureAwait(false);
-            if (!confirmed)
-            {
-                return new GenerationResult(0, 0, 0, 0, isCancelled: true, BuildCancelLogs("用户取消覆盖确认，已整单取消。"));
-            }
-        }
 
         // 逐文件写盘，单文件失败由写盘服务独立兜底后继续其余文件（部分失败）
         GenerationResult writeResult = await _fileWriter.WriteFilesAsync(writeEntries, progress, cancellationToken).ConfigureAwait(false);
 
         // 跳过日志与写盘日志合并为最终日志，跳过计数并入最终统计
-        List<GenerationLogEntry> mergedLogs = BuildSkipLogs(preview);
+        List<GenerationLogEntry> mergedLogs = BuildSkipLogs(preview, request.DuplicateFileStrategy);
         mergedLogs.AddRange(writeResult.Logs);
 
         if (!writeResult.IsCancelled)
@@ -213,8 +193,8 @@ public sealed class CodeGenerator : ICodeGenerator
 
                 progress?.Report(new GenerationProgress(GenerationStage.Previewing, completed, total, renderedRelativePath));
 
-                // dry-run 分类：不存在为新增，存在且内容相同为跳过，否则为覆盖
-                GenerationAction action = await ClassifyTargetAsync(absolutePath, renderResult.Output, cancellationToken).ConfigureAwait(false);
+                // dry-run 分类：目标不存在为新增，其余按请求同名文件策略覆盖/跳过
+                GenerationAction action = await ClassifyTargetAsync(absolutePath, renderResult.Output, request.DuplicateFileStrategy, cancellationToken).ConfigureAwait(false);
                 entries.Add(new GenerationFileEntry(table.RawName, renderedRelativePath, absolutePath, action, renderResult.Output, null));
             }
         }
@@ -370,20 +350,33 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 按目标文件状态做 dry-run 分类：不存在为新增，存在且内容相同为跳过，否则为覆盖。
+    /// 按目标文件状态与同名文件处理策略做 dry-run 分类：目标不存在为新增；
+    /// 跳过策略下同名目标一律跳过；覆盖策略下内容相同跳过、内容不同覆盖，非 UTF-8 遗留文件按覆盖处理。
     /// </summary>
     /// <param name="absolutePath">目标文件绝对路径。</param>
     /// <param name="content">渲染后的文件内容。</param>
+    /// <param name="strategy">同名文件处理策略。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>分类动作。</returns>
-    private static async Task<GenerationAction> ClassifyTargetAsync(string absolutePath, string content, CancellationToken cancellationToken)
+    private static async Task<GenerationAction> ClassifyTargetAsync(
+        string absolutePath,
+        string content,
+        DuplicateFileStrategy strategy,
+        CancellationToken cancellationToken)
     {
+        // 目标不存在始终为新增
         if (!File.Exists(absolutePath))
         {
             return GenerationAction.New;
         }
 
-        // 读取既有文件内容（UTF-8 去 BOM），与渲染内容做行尾归一化后比较，避免 CRLF/LF 差异误判为覆盖
+        // 跳过策略：同名目标一律不写盘，无论内容是否相同
+        if (strategy == DuplicateFileStrategy.Skip)
+        {
+            return GenerationAction.Skip;
+        }
+
+        // 覆盖策略：读取既有文件内容（UTF-8 去 BOM），与渲染内容做行尾归一化后比较，避免 CRLF/LF 差异误判为覆盖
         string existing;
         try
         {
@@ -411,18 +404,21 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 生成跳过条目的日志，供最终日志合并展示。
+    /// 生成跳过条目的日志，供最终日志合并展示；跳过原因文案随同名文件策略区分
+    /// （覆盖策略下内容相同跳过，跳过策略下同名已存在跳过）。
     /// </summary>
     /// <param name="preview">dry-run 清单。</param>
+    /// <param name="strategy">同名文件处理策略，决定跳过原因文案。</param>
     /// <returns>跳过条目日志列表。</returns>
-    private static List<GenerationLogEntry> BuildSkipLogs(GenerationPreview preview)
+    private static List<GenerationLogEntry> BuildSkipLogs(GenerationPreview preview, DuplicateFileStrategy strategy)
     {
         var logs = new List<GenerationLogEntry>();
+        string skipReason = strategy == DuplicateFileStrategy.Skip ? "已跳过（同名文件已存在）" : "已跳过（内容相同）";
         foreach (GenerationFileEntry entry in preview.Entries)
         {
             if (entry.Action == GenerationAction.Skip)
             {
-                logs.Add(GenerationLogEntry.Info($"已跳过（内容相同）：{entry.RelativePath}"));
+                logs.Add(GenerationLogEntry.Info($"{skipReason}：{entry.RelativePath}"));
             }
         }
 

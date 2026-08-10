@@ -2,7 +2,7 @@ namespace DbCodeGen.Core.Model;
 
 /// <summary>
 /// 批量生成写盘结果统计，承载生成/覆盖/跳过/失败四计数、取消标记与生成日志。
-/// 生成等于新增成功写盘文件数，覆盖等于覆盖成功文件数，跳过等于内容相同未写文件数，失败等于写盘异常文件数。
+/// 生成等于新增成功写盘文件数，覆盖等于覆盖成功文件数，跳过等于未写盘文件数（覆盖策略内容相同或跳过策略同名已存在），失败等于写盘异常文件数。
 /// </summary>
 public sealed class GenerationResult
 {
@@ -42,7 +42,7 @@ public sealed class GenerationResult
     public int Overwritten { get; }
 
     /// <summary>
-    /// 跳过未写文件数，内容与目标文件相同。
+    /// 跳过未写文件数，覆盖策略下内容相同或跳过策略下同名已存在。
     /// </summary>
     public int Skipped { get; }
 
@@ -52,7 +52,7 @@ public sealed class GenerationResult
     public int Failed { get; }
 
     /// <summary>
-    /// 是否被用户取消，覆盖确认取消或渲染/写盘过程取消时为 true。
+    /// 是否被用户取消，渲染或写盘过程取消时为 true。
     /// </summary>
     public bool IsCancelled { get; }
 

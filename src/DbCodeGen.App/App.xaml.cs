@@ -173,6 +173,11 @@ public partial class App : Application
         services.AddTransient<Func<MigrationWindow>>(provider =>
             () => provider.GetRequiredService<MigrationWindow>());
 
+        // 关于窗口，供帮助菜单“关于 DbCodeGen…”入口按需创建
+        services.AddTransient<AboutWindow>();
+        services.AddTransient<Func<AboutWindow>>(provider =>
+            () => provider.GetRequiredService<AboutWindow>());
+
         // 主窗口与应用同生命周期，作为组合根承载四区布局与工具栏
         services.AddSingleton<MainWindow>();
 

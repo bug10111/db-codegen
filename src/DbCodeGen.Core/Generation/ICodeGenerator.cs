@@ -3,8 +3,8 @@ using DbCodeGen.Core.Model;
 namespace DbCodeGen.Core.Generation;
 
 /// <summary>
-/// 批量代码生成服务统一接口，承载 dry-run 预览与确认后写盘两个阶段。
-/// 安全线：写盘前必走 dry-run 重算，覆盖项必经 confirmOverwriteAsync 回调确认后方可写盘。
+/// 批量代码生成服务统一接口，承载 dry-run 预览与按策略写盘两个阶段。
+/// 安全线：写盘前必走 dry-run 重算；同名文件处理策略由请求指定（覆盖/跳过），无确认弹窗。
 /// </summary>
 public interface ICodeGenerator
 {
@@ -25,12 +25,10 @@ public interface ICodeGenerator
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// 确认后写盘：内部先重算 dry-run（安全线），存在覆盖项时经确认回调，
-    /// 确认后逐文件写盘并统计；取消返回取消结果，生成完成后回写最近相对输出根。
+    /// 按请求策略写盘：内部先重算 dry-run（安全线），按请求中同名文件策略（覆盖/跳过）分类后
+    /// 逐文件写盘并统计，无确认弹窗；取消返回取消结果，生成完成后回写最近相对输出根。
     /// </summary>
-    /// <param name="request">生成请求，含勾选表集合、勾选模板文件集合与输出根路径。</param>
-    /// <param name="confirmOverwriteAsync">覆盖确认回调，由应用层注入以包装确认对话框；
-    /// 存在覆盖项且回调返回 false 或未提供回调时整单取消不写任何文件。</param>
+    /// <param name="request">生成请求，含勾选表集合、勾选模板文件集合、输出根路径与同名文件处理策略。</param>
     /// <param name="progress">进度推送，报告 Rendering、Previewing 与 Writing 阶段。</param>
     /// <param name="cancellationToken">取消标记，取消时返回取消结果并携带已完成统计。</param>
     /// <returns>写盘结果统计与生成日志。</returns>
@@ -38,7 +36,6 @@ public interface ICodeGenerator
     /// <exception cref="GenerationException">模板渲染失败、输出路径模板渲染失败或路径越界时抛出。</exception>
     Task<GenerationResult> GenerateAsync(
         GenerationRequest request,
-        Func<IReadOnlyList<GenerationFileEntry>, Task<bool>>? confirmOverwriteAsync,
         IProgress<GenerationProgress>? progress,
         CancellationToken cancellationToken);
 }

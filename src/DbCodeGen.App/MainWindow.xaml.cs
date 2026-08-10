@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private readonly Func<MigrationWindow> _migrationWindowFactory;
     private readonly Func<TypeMappingWindow> _typeMappingWindowFactory;
     private readonly Func<TemplatePackageManagerWindow> _templateManagerWindowFactory;
+    private readonly Func<AboutWindow> _aboutWindowFactory;
     private readonly TableListViewModel _tableListViewModel;
     private readonly TemplateViewModel _templateViewModel;
     private readonly PreviewViewModel _previewViewModel;
@@ -81,6 +82,7 @@ public partial class MainWindow : Window
     /// <param name="migrationWindowFactory">迁移窗口工厂，供“工具”菜单“备份/恢复…”入口按需创建。</param>
     /// <param name="typeMappingWindowFactory">类型映射窗口工厂，供“工具”菜单“类型映射…”入口按需创建。</param>
     /// <param name="templateManagerWindowFactory">模板包管理窗口工厂，供“工具”菜单“模板包管理…”入口按需创建。</param>
+    /// <param name="aboutWindowFactory">关于窗口工厂，供“帮助”菜单“关于 DbCodeGen…”入口按需创建。</param>
     /// <param name="tableListViewModel">表列表区视图模型，承载表清单加载与多选勾选。</param>
     /// <param name="templateViewModel">模板编辑器视图模型，承载②模板区文件树、编辑器与保存。</param>
     /// <param name="previewViewModel">预览视图模型，承载③预览区选表渲染与错误定位。</param>
@@ -99,6 +101,7 @@ public partial class MainWindow : Window
         Func<MigrationWindow> migrationWindowFactory,
         Func<TypeMappingWindow> typeMappingWindowFactory,
         Func<TemplatePackageManagerWindow> templateManagerWindowFactory,
+        Func<AboutWindow> aboutWindowFactory,
         TableListViewModel tableListViewModel,
         TemplateViewModel templateViewModel,
         PreviewViewModel previewViewModel,
@@ -116,6 +119,7 @@ public partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(migrationWindowFactory);
         ArgumentNullException.ThrowIfNull(typeMappingWindowFactory);
         ArgumentNullException.ThrowIfNull(templateManagerWindowFactory);
+        ArgumentNullException.ThrowIfNull(aboutWindowFactory);
         ArgumentNullException.ThrowIfNull(tableListViewModel);
         ArgumentNullException.ThrowIfNull(templateViewModel);
         ArgumentNullException.ThrowIfNull(previewViewModel);
@@ -134,6 +138,7 @@ public partial class MainWindow : Window
         _migrationWindowFactory = migrationWindowFactory;
         _typeMappingWindowFactory = typeMappingWindowFactory;
         _templateManagerWindowFactory = templateManagerWindowFactory;
+        _aboutWindowFactory = aboutWindowFactory;
         _tableListViewModel = tableListViewModel;
         _templateViewModel = templateViewModel;
         _previewViewModel = previewViewModel;
@@ -255,17 +260,22 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 点击菜单“关于 DbCodeGen…”展示应用名称、版本与简介。
+    /// 点击菜单“关于 DbCodeGen…”打开关于窗口，展示应用名称、版本、功能简介、开源地址与作者；
+    /// 窗口创建或展示失败时给用户可读提示，不中断主窗口运行。
     /// </summary>
     private void OnAboutClick(object sender, RoutedEventArgs e)
     {
-        // 版本号由程序集版本派生，避免展示硬编码文案与实际发布版本漂移
-        string version = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "1.0";
-        _dialogService.ShowInfo(
-            "DbCodeGen 代码生成器\n\n数据库驱动代码生成工具：连接 MySQL/PostgreSQL，读取表元数据，\n"
-            + "多选表 × 模板包（勾选到层）→ 渲染 → dry-run 预览 → 安全写盘。\n"
-            + "内置模板编辑与实时预览、AI 模板生成、SQL 执行面板。\n\n版本：v" + version,
-            "关于 DbCodeGen");
+        try
+        {
+            AboutWindow window = _aboutWindowFactory();
+            window.Owner = this;
+            window.ShowDialog();
+        }
+        catch (Exception exception)
+        {
+            // 窗口创建或展示失败时给用户可读提示，不中断主窗口运行
+            _dialogService.ShowError($"打开关于窗口失败：{exception.Message}");
+        }
     }
 
     /// <summary>

@@ -1,0 +1,78 @@
+<Window x:Class="DbCodeGen.App.Views.AboutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="关于 DbCodeGen"
+        Width="580"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="#FFFFFF">
+    <StackPanel Margin="20">
+
+        <!-- 应用标题行：应用名 + 程序集版本号 -->
+        <StackPanel Orientation="Horizontal">
+            <TextBlock Text="DbCodeGen"
+                       FontSize="26"
+                       FontWeight="Bold"
+                       Foreground="#1565C0"
+                       VerticalAlignment="Center" />
+            <TextBlock x:Name="VersionText"
+                       FontSize="13"
+                       Foreground="Gray"
+                       Margin="10,3,0,0"
+                       VerticalAlignment="Center" />
+        </StackPanel>
+        <TextBlock Text="数据库驱动的智能代码生成工具"
+                   FontSize="14"
+                   Foreground="#444444"
+                   Margin="0,2,0,0" />
+
+        <Separator Margin="0,12" />
+
+        <!-- 项目功能简介：点出多数据源/多项目/多模板组/AI 写改模板/AI 迁移等核心能力 -->
+        <TextBlock Text="核心特性"
+                   FontWeight="SemiBold"
+                   FontSize="14"
+                   Margin="0,0,0,4" />
+        <TextBlock FontSize="13"
+                   Foreground="#333333"
+                   LineHeight="21"
+                   TextWrapping="Wrap"
+                   Text="· 多数据源：MySQL / PostgreSQL，连接加密保存、一键切换&#x0a;· 多项目、多模板组：工作区根 + 代码目录双配置，模板包导入导出、拖拽排序&#x0a;· 实时预览与批量生成：多选表 × 模板包 → dry-run 预览 → 安全写盘&#x0a;· AI 写模板 / 改模板：一句话生成整套模板，对话式修改当前模板&#x0a;· AI 迁移模板：上传其他生成器（EasyCode 等）Velocity / FreeMarker 模板，AI 自动翻译为 Scriban，零配置迁移&#x0a;· SQL 执行面板、类型映射、备份恢复" />
+
+        <Separator Margin="0,12" />
+
+        <!-- 开源信息：项目开源地址（点击经系统浏览器打开）与作者 -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="开源地址：" VerticalAlignment="Center" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Center">
+                <Hyperlink NavigateUri="https://github.com/bug10111/db-codegen"
+                           RequestNavigate="OnRepositoryLinkRequestNavigate"
+                           ToolTip="点击在浏览器中打开项目主页">
+                    https://github.com/bug10111/db-codegen
+                </Hyperlink>
+            </TextBlock>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="作者：" Margin="0,8,0,0" VerticalAlignment="Center" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="bug10111" Margin="6,8,0,0" VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- 关闭按钮：Esc 或点击关闭 -->
+        <Button Content="关闭"
+                IsCancel="True"
+                HorizontalAlignment="Right"
+                MinWidth="90"
+                Padding="20,6"
+                Margin="0,18,0,0" />
+    </StackPanel>
+</Window>

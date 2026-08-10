@@ -2,7 +2,7 @@ namespace DbCodeGen.Core.Model;
 
 /// <summary>
 /// dry-run 单个待写条目的目标文件动作分类：新增 / 覆盖 / 跳过。
-/// 目标不存在为新增，存在且内容相同为跳过，存在且内容不同为覆盖。
+/// 目标不存在为新增；覆盖策略下内容相同为跳过、内容不同为覆盖；跳过策略下同名目标一律跳过。
 /// </summary>
 public enum GenerationAction
 {
@@ -12,12 +12,12 @@ public enum GenerationAction
     New,
 
     /// <summary>
-    /// 目标文件存在且内容与渲染结果不同，写盘时覆盖。
+    /// 覆盖策略下目标文件存在且内容与渲染结果不同，写盘时替换。
     /// </summary>
     Overwrite,
 
     /// <summary>
-    /// 目标文件存在且内容与渲染结果相同，写盘时跳过。
+    /// 覆盖策略下内容相同或跳过策略下同名目标已存在，均不写盘。
     /// </summary>
     Skip
 }

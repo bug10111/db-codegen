@@ -433,7 +433,7 @@
                                  ToolTip="package（如 com.example.common），用于 package 声明与 import；代码实际落盘在 工作区根/src/main/java/&lt;包名目录&gt;/…" />
                     </StackPanel>
 
-                    <!-- 操作行：预览待写/生成按钮 + 待写清单摘要 -->
+                    <!-- 操作行：预览待写/生成按钮 + 同名文件处理策略下拉 + 待写清单摘要 -->
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,4">
                         <Button Content="预览待写"
                                 Command="{Binding PreviewCommand}"
@@ -442,6 +442,17 @@
                                 Command="{Binding GenerateCommand}"
                                 Margin="8,0,0,0"
                                 VerticalContentAlignment="Center" />
+                        <TextBlock Text="同名文件："
+                                   Margin="16,0,0,0"
+                                   VerticalAlignment="Center" />
+                        <ComboBox ItemsSource="{Binding DuplicateFileOptions}"
+                                  SelectedValuePath="Value"
+                                  SelectedValue="{Binding DuplicateFileStrategy}"
+                                  DisplayMemberPath="Label"
+                                  Width="76"
+                                  Margin="4,0,0,0"
+                                  VerticalContentAlignment="Center"
+                                  ToolTip="同名目标文件已存在时的处理：覆盖=内容不同的同名文件直接替换（无弹窗）；跳过=只写新增文件" />
                         <TextBlock Text="{Binding PreviewSummaryText}"
                                    Margin="12,0,0,0"
                                    VerticalAlignment="Center"

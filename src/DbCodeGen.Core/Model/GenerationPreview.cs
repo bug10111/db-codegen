@@ -2,7 +2,7 @@ namespace DbCodeGen.Core.Model;
 
 /// <summary>
 /// dry-run 清单结果，承载全部待写条目与按动作分类的计数。
-/// 覆盖计数大于 0 时，生成阶段必经用户确认后才可写盘。
+/// 同名文件按请求策略分类为覆盖或跳过，生成写盘无确认弹窗。
 /// </summary>
 public sealed class GenerationPreview
 {
@@ -11,7 +11,7 @@ public sealed class GenerationPreview
     /// </summary>
     /// <param name="entries">全部待写条目。</param>
     /// <param name="newCount">新增条目数。</param>
-    /// <param name="overwriteCount">覆盖条目数，大于 0 时生成须确认。</param>
+    /// <param name="overwriteCount">覆盖条目数，覆盖策略下内容不同的同名文件写盘时替换。</param>
     /// <param name="skipCount">跳过条目数。</param>
     /// <exception cref="ArgumentNullException">entries 为 null 时抛出。</exception>
     public GenerationPreview(
@@ -28,7 +28,7 @@ public sealed class GenerationPreview
     /// </summary>
     /// <param name="entries">全部待写条目。</param>
     /// <param name="newCount">新增条目数。</param>
-    /// <param name="overwriteCount">覆盖条目数，大于 0 时生成须确认。</param>
+    /// <param name="overwriteCount">覆盖条目数，覆盖策略下内容不同的同名文件写盘时替换。</param>
     /// <param name="skipCount">跳过条目数。</param>
     /// <param name="unmappedTypes">生成预检发现的未映射类型清单，可为空。</param>
     /// <exception cref="ArgumentNullException">entries 或 unmappedTypes 为 null 时抛出。</exception>
@@ -59,12 +59,12 @@ public sealed class GenerationPreview
     public int NewCount { get; }
 
     /// <summary>
-    /// 覆盖条目数，大于 0 时生成阶段必经用户确认。
+    /// 覆盖条目数，覆盖策略下内容不同的同名文件写盘时替换。
     /// </summary>
     public int OverwriteCount { get; }
 
     /// <summary>
-    /// 跳过条目数，内容相同未写盘。
+    /// 跳过条目数，覆盖策略下内容相同或跳过策略下同名已存在，均不写盘。
     /// </summary>
     public int SkipCount { get; }
 

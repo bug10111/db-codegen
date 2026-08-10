@@ -25,6 +25,11 @@ public class AppConfig
     public string LastRelativeOutputRoot { get; set; } = string.Empty;
 
     /// <summary>
+    /// 同名目标文件处理策略，默认覆盖；由④生成栏操作行下拉记忆，dry-run 分类与写盘均按此策略执行。
+    /// </summary>
+    public DuplicateFileStrategy DuplicateFileStrategy { get; set; } = DuplicateFileStrategy.Overwrite;
+
+    /// <summary>
     /// LLM 配置，包含 OpenAI 兼容端点、apiKey 密文与模型名。
     /// </summary>
     public LlmConfig Llm { get; set; } = new();

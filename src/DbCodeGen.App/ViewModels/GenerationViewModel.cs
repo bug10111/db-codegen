@@ -64,21 +64,15 @@ public sealed partial class GenerationEntryRowViewModel : ObservableObject
 }
 
 /// <summary>
-/// 主窗口④生成栏视图模型，承载批量代码生成的路径配置、dry-run 预览、覆盖确认与生成写盘全流程。
+/// 主窗口④生成栏视图模型，承载批量代码生成的路径配置、dry-run 预览、同名文件策略与生成写盘全流程。
 /// 勾选表集合取自①区表列表视图模型，勾选模板文件集合取自②模板区当前模板包的"勾选到层"勾选态，
 /// 路径默认值取自设置与配置，生成完成后由核心服务回写最近相对输出根。
 /// </summary>
 public sealed partial class GenerationViewModel : ObservableObject
 {
-    /// <summary>
-    /// 覆盖确认消息中最多列出的覆盖文件数，超出部分以计数收尾，避免确认框消息过长。
-    /// </summary>
-    private const int MaxOverwriteListed = 10;
-
     private readonly ICodeGenerator _codeGenerator;
     private readonly IConfigService _configService;
     private readonly IDialogService _dialogService;
-    private readonly IConfirmDialogService _confirmDialogService;
     private readonly IFolderPickerService _folderPickerService;
     private readonly Func<UnmappedTypesWindow> _unmappedWindowFactory;
     private readonly Func<TypeMappingWindow> _mappingWindowFactory;
@@ -112,6 +106,21 @@ public sealed partial class GenerationViewModel : ObservableObject
     /// 由代码目录推导的基础包名，供预览渲染与生成保持一致；无包名部分时为空串（回落模板包 manifest 包名）。
     /// </summary>
     public string EffectiveBasePackage => CodeDirectoryParser.DeriveBasePackage(CodeDirectory);
+
+    /// <summary>
+    /// 同名目标文件处理策略，默认覆盖；操作行下拉绑定，变更即持久化并失效旧预览。
+    /// </summary>
+    [ObservableProperty]
+    private DuplicateFileStrategy _duplicateFileStrategy = DuplicateFileStrategy.Overwrite;
+
+    /// <summary>
+    /// 同名文件处理策略下拉候选：覆盖 / 跳过，经 SelectedValue 绑定到 DuplicateFileStrategy。
+    /// </summary>
+    public IReadOnlyList<DuplicateFileOption> DuplicateFileOptions { get; } = new[]
+    {
+        new DuplicateFileOption(DuplicateFileStrategy.Overwrite, "覆盖"),
+        new DuplicateFileOption(DuplicateFileStrategy.Skip, "跳过")
+    };
 
     /// <summary>
     /// 是否处于预览或生成操作繁忙状态，繁忙时禁用两个操作按钮防重复提交。
@@ -167,10 +176,9 @@ public sealed partial class GenerationViewModel : ObservableObject
     /// 使用批量生成服务、配置服务、对话框服务、目录选择服务、表列表视图模型、模板视图模型与日志器构造生成栏视图模型。
     /// 初始化路径默认值并订阅①区勾选数量与②区当前包变化，输入变化时失效已构建的预览。
     /// </summary>
-    /// <param name="codeGenerator">批量生成服务，承载 dry-run 预览与确认后写盘。</param>
-    /// <param name="configService">配置服务，读取工作区根与最近相对输出根默认值。</param>
+    /// <param name="codeGenerator">批量生成服务，承载 dry-run 预览与按策略写盘。</param>
+    /// <param name="configService">配置服务，读取工作区根、最近相对输出根与同名文件处理策略默认值。</param>
     /// <param name="dialogService">消息提示服务，用于操作失败与引导反馈。</param>
-    /// <param name="confirmDialogService">二次确认服务，用于覆盖写盘前确认。</param>
     /// <param name="folderPickerService">目录选择服务，用于浏览选择工作区根。</param>
     /// <param name="unmappedWindowFactory">未映射类型提示窗口工厂，用于预览时存在未映射类型的弹窗。</param>
     /// <param name="mappingWindowFactory">类型映射窗口工厂，用于弹窗“去配置映射”跳转。</param>
@@ -182,7 +190,6 @@ public sealed partial class GenerationViewModel : ObservableObject
         ICodeGenerator codeGenerator,
         IConfigService configService,
         IDialogService dialogService,
-        IConfirmDialogService confirmDialogService,
         IFolderPickerService folderPickerService,
         Func<UnmappedTypesWindow> unmappedWindowFactory,
         Func<TypeMappingWindow> mappingWindowFactory,
@@ -193,7 +200,6 @@ public sealed partial class GenerationViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(codeGenerator);
         ArgumentNullException.ThrowIfNull(configService);
         ArgumentNullException.ThrowIfNull(dialogService);
-        ArgumentNullException.ThrowIfNull(confirmDialogService);
         ArgumentNullException.ThrowIfNull(folderPickerService);
         ArgumentNullException.ThrowIfNull(unmappedWindowFactory);
         ArgumentNullException.ThrowIfNull(mappingWindowFactory);
@@ -204,7 +210,6 @@ public sealed partial class GenerationViewModel : ObservableObject
         _codeGenerator = codeGenerator;
         _configService = configService;
         _dialogService = dialogService;
-        _confirmDialogService = confirmDialogService;
         _folderPickerService = folderPickerService;
         _unmappedWindowFactory = unmappedWindowFactory;
         _mappingWindowFactory = mappingWindowFactory;
@@ -217,10 +222,11 @@ public sealed partial class GenerationViewModel : ObservableObject
         _templateViewModel.PropertyChanged += OnSelectionStateChanged;
         _templateViewModel.Files.CollectionChanged += OnTemplateFilesChanged;
 
-        // 路径默认值取自设置与配置，本次生成可临时修改
+        // 路径与同名文件处理策略默认值取自设置与配置，本次生成可临时修改
         GenerationDefaults defaults = _configService.GetGenerationDefaults();
         WorkspaceRoot = defaults.WorkspaceRoot;
         CodeDirectory = defaults.LastRelativeOutputRoot;
+        DuplicateFileStrategy = _configService.Current.DuplicateFileStrategy;
         StatusText = "设置代码目录与工作区根后，点击预览待写查看待写清单。";
     }
 
@@ -366,7 +372,7 @@ public sealed partial class GenerationViewModel : ObservableObject
 
     /// <summary>
     /// 生成写盘：先经未映射类型预检弹窗（与预览一致），再调用批量生成服务内部重算 dry-run，
-    /// 存在覆盖项时先经确认再写盘，结果统计与生成日志回填底栏，最近相对输出根由核心服务回写。
+    /// 按请求同名文件策略覆盖/跳过写盘（无确认弹窗），结果统计与生成日志回填底栏，最近相对输出根由核心服务回写。
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanGenerate))]
     private async Task GenerateAsync()
@@ -389,9 +395,9 @@ public sealed partial class GenerationViewModel : ObservableObject
         IsBusy = true;
         try
         {
-            // 覆盖确认回调由界面层注入，包装二次确认服务；进度报告渲染/分类/写盘三阶段
+            // 同名文件策略已在请求中指定（覆盖/跳过，无确认弹窗）；进度报告渲染/分类/写盘三阶段
             var progress = new Progress<GenerationProgress>(OnProgress);
-            GenerationResult result = await _codeGenerator.GenerateAsync(request, ConfirmOverwriteAsync, progress, cts.Token);
+            GenerationResult result = await _codeGenerator.GenerateAsync(request, progress, cts.Token);
             ApplyResult(result);
         }
         catch (GenerationException exception)
@@ -481,7 +487,8 @@ public sealed partial class GenerationViewModel : ObservableObject
             relativeOutputRoot,
             basePackage,
             _tableListViewModel.CurrentConnection,
-            CodeDirectory.Trim());
+            CodeDirectory.Trim(),
+            DuplicateFileStrategy);
     }
 
     /// <summary>
@@ -610,46 +617,6 @@ public sealed partial class GenerationViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 覆盖确认回调：将覆盖条目清单组装为确认框消息，经二次确认服务返回用户选择。
-    /// </summary>
-    /// <param name="overwriteEntries">待覆盖的目标文件条目。</param>
-    /// <returns>用户确认返回 true，否则返回 false。</returns>
-    private async Task<bool> ConfirmOverwriteAsync(IReadOnlyList<GenerationFileEntry> overwriteEntries)
-    {
-        if (overwriteEntries.Count == 0)
-        {
-            return true;
-        }
-
-        var builder = new StringBuilder();
-        builder.AppendLine($"以下 {overwriteEntries.Count} 个目标文件已存在且内容不同，覆盖将替换原有内容：");
-        builder.AppendLine();
-
-        // 覆盖文件过多时只列前若干个，其余以计数收尾，避免确认框消息过长
-        int listed = 0;
-        foreach (GenerationFileEntry entry in overwriteEntries)
-        {
-            if (listed >= MaxOverwriteListed)
-            {
-                break;
-            }
-
-            builder.AppendLine($"  · {entry.RelativePath}");
-            listed++;
-        }
-
-        if (overwriteEntries.Count > MaxOverwriteListed)
-        {
-            builder.AppendLine($"  · 其余 {overwriteEntries.Count - MaxOverwriteListed} 个文件略…");
-        }
-
-        builder.AppendLine();
-        builder.Append("是否确认覆盖？");
-
-        return await _confirmDialogService.ConfirmAsync("确认覆盖", builder.ToString());
-    }
-
-    /// <summary>
     /// 输入源变化通知：①区勾选数量或②区当前包/文件集合变化时失效旧预览并刷新命令可用性。
     /// </summary>
     /// <param name="sender">属性变化事件发送方。</param>
@@ -696,6 +663,26 @@ public sealed partial class GenerationViewModel : ObservableObject
     {
         InvalidatePreview();
         OnPropertyChanged(nameof(EffectiveBasePackage));
+    }
+
+    /// <summary>
+    /// 同名文件处理策略变更后立即持久化到配置并失效旧预览：dry-run 分类依赖策略，预览清单需重算。
+    /// </summary>
+    /// <param name="value">变更后的处理策略。</param>
+    partial void OnDuplicateFileStrategyChanged(DuplicateFileStrategy value)
+    {
+        _configService.Current.DuplicateFileStrategy = value;
+        try
+        {
+            _configService.Save();
+        }
+        catch (ConfigSaveException exception)
+        {
+            // 策略记忆保存失败仅记录警告，本次选择仍生效
+            _logger.LogWarning(exception, "同名文件处理策略记忆保存失败。");
+        }
+
+        InvalidatePreview();
     }
 
     /// <summary>
@@ -766,3 +753,8 @@ public sealed partial class GenerationViewModel : ObservableObject
         return $"[{log.Timestamp:HH:mm:ss}] {levelText} {log.Message}";
     }
 }
+
+/// <summary>
+/// 同名文件处理策略下拉候选项，Value 供 ComboBox SelectedValuePath 绑定，Label 供展示。
+/// </summary>
+public sealed record DuplicateFileOption(DuplicateFileStrategy Value, string Label);
