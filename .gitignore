@@ -3,6 +3,7 @@ bin/
 obj/
 *.user
 *.suo
+out/
 
 # ===== 发布与测试产物 =====
 publish/
