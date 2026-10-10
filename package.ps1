@@ -8,7 +8,8 @@
 #   PowerShell  :  .\package.ps1
 #   Git Bash/CMD:  powershell -ExecutionPolicy Bypass -File package.ps1
 # 可选参数：
-#   -SelfContained  自包含打包（目标机无需安装 .NET 8 运行时，产物体积更大）
+#   -FrameworkDependent  框架依赖打包（体积小，但目标机需已安装 .NET 8 运行时）
+#                        缺省为自包含打包（双击即用，目标机免装运行时，产物体积更大）
 #
 # 产物结构（完整可用包，全部输出到 out/DbCodeGen/）：
 #   out/DbCodeGen/
@@ -23,16 +24,20 @@
 # data 保全语义：输出目录已存在时保留其 data\ 子目录（用户数据兜底保全，仅重建
 #               程序文件）；正常形态数据目录在 %AppData%\DbCodeGen（或经
 #               config-location.json 重定向后的目录），输出目录内通常无 data\。
-# 外部运行时依赖：缺省框架依赖打包，目标机需已安装 .NET 8 运行时；传
-#               -SelfContained 后桌面端与 MCP 服务端均自包含，目标机免装运行时。
+# 外部运行时依赖：缺省自包含打包，桌面端与 MCP 服务端均内嵌运行时，目标机免装
+#               .NET 8；传 -FrameworkDependent 切换为框架依赖（体积小，目标机需
+#               已安装 .NET 8 运行时）。
 # =============================================================================
 
 [CmdletBinding()]
 param(
-    [switch]$SelfContained   # 自包含打包（目标机无需安装 .NET 8 运行时）
+    [switch]$FrameworkDependent   # 框架依赖打包（体积小，目标机需已安装 .NET 8 运行时）
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 缺省自包含（分发口径：双击即用，目标机免装运行时）；-FrameworkDependent 显式退出
+$SelfContained = -not $FrameworkDependent.IsPresent
 
 # ---- 路径与命名 ----
 $RepoRoot     = $PSScriptRoot                          # 脚本所在目录 = 仓库根目录
