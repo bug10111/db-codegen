@@ -1,0 +1,126 @@
+using System.ComponentModel;
+using DbCodeGen.Core.Generation;
+using DbCodeGen.Core.Model;
+using DbCodeGen.Core.Templates.Packages;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Server;
+
+namespace DbCodeGen.McpServer.Tools;
+
+/// <summary>
+/// 代码生成写盘工具组：按显式入参执行批量生成并逐文件写盘。
+/// 零记忆态副作用（D8）：工作区根/代码目录/表/模板选择/覆盖策略全部显式传入，
+/// 生成过程不读取也不回写 config.json 的任何最近路径与勾选记忆。
+/// </summary>
+[McpServerToolType]
+public sealed class GenerationTools
+{
+    private readonly ITemplatePackageService _packageService;
+    private readonly ICodeGenerator _codeGenerator;
+    private readonly ILogger<GenerationTools> _logger;
+
+    /// <summary>
+    /// 以模板包服务、批量生成服务与日志器构造代码生成工具组。
+    /// </summary>
+    /// <param name="packageService">模板包服务，承载包加载与校验。</param>
+    /// <param name="codeGenerator">批量生成服务，承载 dry-run 重算与逐文件写盘。</param>
+    /// <param name="logger">工具组日志器。</param>
+    public GenerationTools(
+        ITemplatePackageService packageService,
+        ICodeGenerator codeGenerator,
+        ILogger<GenerationTools> logger)
+    {
+        _packageService = packageService;
+        _codeGenerator = codeGenerator;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// 执行批量生成并写盘（内部强制先重算 dry-run，写盘无确认弹窗）。
+    /// 全部参数显式传入：不读配置记忆态、生成后不回写 config.json。
+    /// </summary>
+    /// <param name="package">模板包包名。</param>
+    /// <param name="tables">合成表集合，至少一张表；需要完整列时建议先用 get_table_detail 取回后传入。</param>
+    /// <param name="workspaceRoot">工作区根目录绝对路径（输出文件的根前缀）。</param>
+    /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）。</param>
+    /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
+    /// <param name="files">模板相对路径清单；省略时默认选择包内全部启用条目。</param>
+    /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>写盘结果统计与生成日志。</returns>
+    [McpServerTool(Name = "generate")]
+    [Description("执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。建议先 preview_generation 确认文件计划。全参数显式，不读不写配置记忆。")]
+    public async Task<object> GenerateAsync(
+        string package,
+        IReadOnlyList<SyntheticTableInput> tables,
+        string workspaceRoot,
+        string codeDirectory,
+        string? basePackageOverride = null,
+        IReadOnlyList<string>? files = null,
+        string duplicateStrategy = "overwrite",
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            GenerationRequest request = await GenerationRequestFactory.CreateAsync(
+                _packageService, package, tables, files, workspaceRoot, codeDirectory,
+                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false, cancellationToken);
+
+            // 零记忆态副作用：请求关闭生成后路径记忆回写，config.json 的最近工作区根/代码目录保持不变
+            GenerationResult result = await _codeGenerator.GenerateAsync(request, progress: null, cancellationToken);
+
+            List<GenerationLogItem> logs = new(result.Logs.Count);
+            foreach (var logEntry in result.Logs)
+            {
+                logs.Add(new GenerationLogItem(logEntry.Timestamp, logEntry.Level.ToString().ToLowerInvariant(), logEntry.Message));
+            }
+
+            _logger.LogInformation(
+                "generate 完成，包 {PackageName}，新增 {Generated} / 覆盖 {Overwritten} / 跳过 {Skipped} / 失败 {Failed}，取消 {IsCancelled}。",
+                package, result.Generated, result.Overwritten, result.Skipped, result.Failed, result.IsCancelled);
+            return new GenerateResult(
+                result.Generated,
+                result.Overwritten,
+                result.Skipped,
+                result.Failed,
+                result.IsCancelled,
+                logs);
+        }
+        catch (GenerationException exception)
+        {
+            // 渲染失败与输出路径越界属生成域结构化业务错误（携带模板名行列或被拒路径），映射模板包域错误便于调用方定位模板问题
+            _logger.LogError(exception, "generate 生成域失败，包名 {PackageName}。", package);
+            return new ToolErrorResult(ToolErrorResult.ErrorMarker, "TemplatePackageError", exception.Message);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "generate 执行失败，包名 {PackageName}。", package);
+            return ToolError.From(exception, cancellationToken);
+        }
+    }
+}
+
+/// <summary>
+/// generate 生成日志条目 DTO。
+/// </summary>
+/// <param name="Timestamp">日志时间。</param>
+/// <param name="Level">日志级别：info / warning / error。</param>
+/// <param name="Message">日志消息（目标文件相对路径与结果描述，不含敏感信息）。</param>
+internal sealed record GenerationLogItem(DateTime Timestamp, string Level, string Message);
+
+/// <summary>
+/// generate 应答 DTO。
+/// </summary>
+/// <param name="Generated">新增成功写盘文件数。</param>
+/// <param name="Overwritten">覆盖成功文件数。</param>
+/// <param name="Skipped">跳过未写文件数。</param>
+/// <param name="Failed">写盘失败文件数。</param>
+/// <param name="IsCancelled">是否被取消，取消时部分文件可能已写盘。</param>
+/// <param name="Logs">生成日志列表。</param>
+internal sealed record GenerateResult(
+    int Generated,
+    int Overwritten,
+    int Skipped,
+    int Failed,
+    bool IsCancelled,
+    IReadOnlyList<GenerationLogItem> Logs);
