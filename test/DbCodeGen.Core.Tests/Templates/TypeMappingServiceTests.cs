@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace DbCodeGen.Core.Tests.Templates;
 
 /// <summary>
-/// 全局类型映射解析服务单元测试，覆盖"库专属>通用>包typeMap>兜底"解析链、
+/// 全局类型映射解析服务单元测试，覆盖"包typeMap>库专属>通用>兜底"解析链、
 /// 按数据库类型分桶、去修饰匹配、多词类型保留与生成前未映射类型预检。
 /// </summary>
 public sealed class TypeMappingServiceTests
@@ -66,10 +66,10 @@ public sealed class TypeMappingServiceTests
     }
 
     /// <summary>
-    /// 通用条目对所有数据库生效，全局通用映射优先于包 typeMap。
+    /// 包 typeMap 最优先：包级条目压过全局通用条目（含导包），包级命中即返回且无导包。
     /// </summary>
     [Fact]
-    public void Resolve_GenericMapping_BeatsPackageTypeMap()
+    public void Resolve_PackageTypeMap_BeatsGenericMapping()
     {
         var config = new StubConfigService
         {
@@ -82,13 +82,62 @@ public sealed class TypeMappingServiceTests
             }
         };
         TypeMappingService service = CreateService(config);
-        var packageTypeMap = new Dictionary<string, string> { ["bigint"] = "Long" };
+        var packageTypeMap = new Dictionary<string, string> { ["bigint"] = "long" };
 
         TypeMappingResult result = service.Resolve("bigint", DataSourceType.MySql, packageTypeMap);
 
         Assert.True(result.Found);
+        Assert.Equal("long", result.TypeName);
+        Assert.Null(result.Import);
+    }
+
+    /// <summary>
+    /// 包 typeMap 压过全局库专属条目：同为 int，包级 .NET 口径优先于 MySQL 专属的 Java 口径。
+    /// </summary>
+    [Fact]
+    public void Resolve_PackageTypeMap_BeatsDatabaseSpecific()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "int", TargetType = "Integer", DatabaseType = DataSourceType.MySql }
+                }
+            }
+        };
+        TypeMappingService service = CreateService(config);
+        var packageTypeMap = new Dictionary<string, string> { ["int"] = "int" };
+
+        TypeMappingResult result = service.Resolve("int", DataSourceType.MySql, packageTypeMap);
+
+        Assert.True(result.Found);
+        Assert.Equal("int", result.TypeName);
+    }
+
+    /// <summary>
+    /// 包 typeMap 为空表时透传全局链：全局通用条目照常命中，行为与包未配置一致。
+    /// </summary>
+    [Fact]
+    public void Resolve_EmptyPackageTypeMap_PassesThroughToGlobal()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig
+            {
+                TypeMappings = new List<TypeMappingEntry>
+                {
+                    new() { DbType = "bigint", TargetType = "BigInteger" }
+                }
+            }
+        };
+        TypeMappingService service = CreateService(config);
+
+        TypeMappingResult result = service.Resolve("bigint", DataSourceType.MySql, new Dictionary<string, string>());
+
+        Assert.True(result.Found);
         Assert.Equal("BigInteger", result.TypeName);
-        Assert.Equal("java.math.BigInteger", result.Import);
     }
 
     /// <summary>

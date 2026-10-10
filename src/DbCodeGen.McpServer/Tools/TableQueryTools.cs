@@ -78,7 +78,7 @@ public sealed class TableQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>表详情（含完整列元数据与主键列名清单）。</returns>
     [McpServerTool(Name = "get_table_detail", ReadOnly = true)]
-    [Description("读取指定表的完整列元数据（列名、数据库类型、主键、自增、可空、长度/精度/小数位、注释）。")]
+    [Description("读取指定表的完整列元数据（列名、数据库类型、主键、自增、可空、长度/精度/小数位、注释）。列字段 name/rawDbType 与生成工具入参 tables[].columns[] 同名，可原样透传。")]
     public async Task<object> GetTableDetailAsync(string datasource, string table, CancellationToken cancellationToken)
     {
         try
@@ -169,11 +169,11 @@ internal sealed record TableSummary(
 internal sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSummary> Tables);
 
 /// <summary>
-/// 列元数据 DTO。
+/// 列元数据 DTO，字段名与生成入参 tables[].columns[]（name/rawDbType）一致，调用方可将本应答列条目原样透传。
 /// </summary>
 /// <param name="Name">原始列名。</param>
 /// <param name="PropertyName">驼峰属性名。</param>
-/// <param name="DbType">原始数据库类型（不含长度修饰）。</param>
+/// <param name="RawDbType">原始数据库类型（不含长度修饰），与生成入参及渲染模型 rawDbType 同口径。</param>
 /// <param name="Comment">列注释，无注释时为 null。</param>
 /// <param name="IsPrimaryKey">是否主键列（联合主键每列均为 true）。</param>
 /// <param name="AutoIncrement">是否自增列。</param>
@@ -184,7 +184,7 @@ internal sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSu
 internal sealed record ColumnDetail(
     string Name,
     string PropertyName,
-    string DbType,
+    string RawDbType,
     string? Comment,
     bool IsPrimaryKey,
     bool AutoIncrement,

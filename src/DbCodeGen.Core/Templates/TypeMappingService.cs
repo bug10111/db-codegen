@@ -5,8 +5,9 @@ using Microsoft.Extensions.Logging;
 namespace DbCodeGen.Core.Templates;
 
 /// <summary>
-/// 全局类型映射解析服务实现：按"全局映射表 > 包 typeMap > 兜底"三级解析链解析数据库原始类型，
-/// 并支持生成前未映射类型预检。全局映射表实时读取配置服务当前快照，用户修改后立即生效无需重启。
+/// 全局类型映射解析服务实现：按"包 typeMap > 全局库专属 > 全局通用 > 兜底"四级解析链解析数据库原始类型，
+/// 并支持生成前未映射类型预检。包级映射承载目标语言自身口径，压过与 Java 包共享的全局默认；
+/// 全局映射表实时读取配置服务当前快照，用户修改后立即生效无需重启。
 /// </summary>
 public sealed class TypeMappingService : ITypeMappingService
 {
@@ -37,7 +38,25 @@ public sealed class TypeMappingService : ITypeMappingService
 
         string normalized = TypeMapper.Normalize(rawDbType);
 
-        // 第一轮：命中当前数据库类型专属条目，同类型名在不同数据库可映射不同目标类型
+        // 第一轮：命中当前模板包 typeMap——包即目标语言的映射口径，压过与 Java 包共享的全局默认；
+        // 空表或未配置时自然跳过，行为与旧链一致
+        if (packageTypeMap is not null)
+        {
+            foreach (KeyValuePair<string, string> pair in packageTypeMap)
+            {
+                // 跳过空键空值条目，避免畸形包 manifest 导致解析崩溃
+                if (pair.Key is null
+                    || string.IsNullOrWhiteSpace(pair.Value)
+                    || TypeMapper.Normalize(pair.Key) != normalized)
+                {
+                    continue;
+                }
+
+                return new TypeMappingResult(true, pair.Value.Trim(), null);
+            }
+        }
+
+        // 第二轮：命中当前数据库类型专属条目，同类型名在不同数据库可映射不同目标类型
         if (databaseType is not null)
         {
             foreach (TypeMappingEntry entry in _configService.Current.TypeMappings)
@@ -59,7 +78,7 @@ public sealed class TypeMappingService : ITypeMappingService
             }
         }
 
-        // 第二轮：命中通用条目（对所有数据库生效），数据库专属条目优先于通用条目
+        // 第三轮：命中通用条目（对所有数据库生效），数据库专属条目优先于通用条目
         foreach (TypeMappingEntry entry in _configService.Current.TypeMappings)
         {
             if (entry is null
@@ -75,23 +94,6 @@ public sealed class TypeMappingService : ITypeMappingService
                 true,
                 entry.TargetType.Trim(),
                 string.IsNullOrWhiteSpace(entry.Import) ? null : entry.Import.Trim());
-        }
-
-        // 模板包 typeMap 兜底：兼容旧包，包内映射优先级低于全局表
-        if (packageTypeMap is not null)
-        {
-            foreach (KeyValuePair<string, string> pair in packageTypeMap)
-            {
-                // 跳过空键空值条目，避免畸形包 manifest 导致解析崩溃
-                if (pair.Key is null
-                    || string.IsNullOrWhiteSpace(pair.Value)
-                    || TypeMapper.Normalize(pair.Key) != normalized)
-                {
-                    continue;
-                }
-
-                return new TypeMappingResult(true, pair.Value.Trim(), null);
-            }
         }
 
         // 最终兜底返回默认类型，并标记未命中供预检收集

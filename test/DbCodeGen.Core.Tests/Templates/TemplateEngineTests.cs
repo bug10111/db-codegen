@@ -196,7 +196,8 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// 注入全局映射服务时 tool.typeImport 返回映射条目声明的导包，tool.imports 对列集合去重后生成导包块。
+    /// 注入全局映射服务时导包函数：仅全局表命中的类型（timestamptz）返回声明导包；
+    /// 样例表全列由包 typeMap 命中且均无导包，tool.imports 输出空串（包级条目不承载导包）。
     /// </summary>
     [Fact]
     public void Render_ToolTypeImportAndImports_WithGlobalMappingService()
@@ -207,20 +208,20 @@ public sealed class TemplateEngineTests
             {
                 TypeMappings = new List<TypeMappingEntry>
                 {
-                    new() { DbType = "datetime", TargetType = "LocalDateTime", Import = "java.time.LocalDateTime" },
-                    new() { DbType = "varchar", TargetType = "String" }
+                    new() { DbType = "timestamptz", TargetType = "DateTimeOffset", Import = "java.time.OffsetDateTime" },
+                    new() { DbType = "timestamp", TargetType = "LocalDateTime", Import = "java.time.LocalDateTime" }
                 }
             }
         };
         var engine = new TemplateEngine(new TypeMappingService(config, NullLogger<TypeMappingService>.Instance));
 
-        // 样例表列含 bigint/varchar/datetime：bigint 走包 typeMap 无导包，varchar 无导包，datetime 有导包
-        PreviewResult result = engine.Render("{{ tool.typeImport('datetime') }}|{{ tool.imports(table.fullColumn) }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+        // timestamptz 仅全局表声明（包 typeMap 未覆盖）返回其导包；样例列 bigint/varchar/datetime 全部包级命中且无导包
+        PreviewResult result = engine.Render("{{ tool.typeImport('timestamptz') }}|{{ tool.imports(table.fullColumn) }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.StartsWith("java.time.LocalDateTime|", result.Output);
-        Assert.Contains("import java.time.LocalDateTime;", result.Output);
+        Assert.StartsWith("java.time.OffsetDateTime|", result.Output);
         Assert.DoesNotContain("import java.lang.Long;", result.Output);
+        Assert.DoesNotContain("import ", result.Output);
     }
 
     /// <summary>
@@ -255,10 +256,11 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// 全局映射表应优先于内置包 typeMap：内置包声明 datetime→LocalDateTime，全局表声明 datetime→Date 时渲染结果为 Date。
+    /// 包级 typeMap 应优先于全局映射表：内置包声明 datetime→LocalDateTime，全局表声明 datetime→Date 时
+    /// 渲染结果为 LocalDateTime（解析链：包 typeMap &gt; 库专属 &gt; 通用 &gt; 兜底）。
     /// </summary>
     [Fact]
-    public void Render_ToolType_GlobalMappingBeatsPackageTypeMap()
+    public void Render_ToolType_PackageTypeMapBeatsGlobalMapping()
     {
         var config = new StubConfigService
         {
@@ -272,11 +274,11 @@ public sealed class TemplateEngineTests
         };
         var engine = new TemplateEngine(new TypeMappingService(config, NullLogger<TypeMappingService>.Instance));
 
-        // CreatePackageContext 内置包 typeMap 含 datetime→LocalDateTime，全局表 datetime→Date 应优先命中
+        // CreatePackageContext 内置包 typeMap 含 datetime→LocalDateTime，包级条目应压过全局表 datetime→Date
         PreviewResult result = engine.Render("{{ tool.type('datetime') }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("Date", result.Output);
+        Assert.Equal("LocalDateTime", result.Output);
     }
 
     /// <summary>
@@ -486,6 +488,162 @@ public sealed class TemplateEngineTests
 
             Assert.True(result.IsSuccess, $"模板 {file.RelativeTemplatePath} 渲染失败：{result.ErrorMessage}");
             Assert.Contains("SysUser", result.Output);
+        }
+    }
+
+    /// <summary>
+    /// 包根存在 _functions.scriban 时，主模板应可调用其中定义的 func——共享函数机制的机制实证。
+    /// </summary>
+    [Fact]
+    public void Render_SharedFunctions_GlobalFuncCallableFromMainTemplate()
+    {
+        (TemplatePackageInfo package, string rootPath) = CreatePackageWithRoot(
+            "{{ func greet(name) }}hello {{ name }}{{ end }}\n{{ func shout(text) }}{{ text | string.upcase }}!{{ end }}");
+        try
+        {
+            TemplatePackageContext context = TemplatePackageContext.From(package);
+
+            PreviewResult result = _engine.Render(
+                "{{ greet(table.className) }}|{{ shout('abc') }}", CreateTable(), null, context, CancellationToken.None);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal("hello SysUser|ABC!", result.Output);
+        }
+        finally
+        {
+            DeletePackageRoot(rootPath);
+        }
+    }
+
+    /// <summary>
+    /// 包根存在但无 _functions.scriban 时渲染行为不变：无共享函数的包零感知该机制。
+    /// </summary>
+    [Fact]
+    public void Render_SharedFunctionsAbsent_BehaviorUnchanged()
+    {
+        (TemplatePackageInfo package, string rootPath) = CreatePackageWithRoot(null);
+        try
+        {
+            TemplatePackageContext context = TemplatePackageContext.From(package);
+
+            PreviewResult result = _engine.Render(
+                "{{ tool.firstLowerCase(table.className) }}", CreateTable(), null, context, CancellationToken.None);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal("sysUser", result.Output);
+        }
+        finally
+        {
+            DeletePackageRoot(rootPath);
+        }
+    }
+
+    /// <summary>
+    /// 共享函数与 tool.* 命名空间互不冲突：共享 func 与 tool 函数可在同一模板并存调用。
+    /// </summary>
+    [Fact]
+    public void Render_SharedFunctions_CoexistWithToolNamespace()
+    {
+        (TemplatePackageInfo package, string rootPath) = CreatePackageWithRoot(
+            "{{ func displayName(text) }}[{{ text }}]{{ end }}");
+        try
+        {
+            TemplatePackageContext context = TemplatePackageContext.From(package);
+
+            PreviewResult result = _engine.Render(
+                "{{ displayName(table.className) }}-{{ tool.firstUpperCase(table.className) }}",
+                CreateTable(), null, context, CancellationToken.None);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal("[SysUser]-SysUser", result.Output);
+        }
+        finally
+        {
+            DeletePackageRoot(rootPath);
+        }
+    }
+
+    /// <summary>
+    /// 共享函数文件语法错误应结构化返回，错误以共享文件名归因并携带共享文件内行列。
+    /// </summary>
+    [Fact]
+    public void Render_SharedFunctionsParseError_ReturnsStructuredError()
+    {
+        (TemplatePackageInfo package, string rootPath) = CreatePackageWithRoot("{{ if }}");
+        try
+        {
+            TemplatePackageContext context = TemplatePackageContext.From(package);
+
+            PreviewResult result = _engine.Render(
+                "{{ table.className }}", CreateTable(), null, context, CancellationToken.None);
+
+            Assert.False(result.IsSuccess);
+            Assert.Contains(TemplateEngine.SharedFunctionsFileName, result.ErrorMessage);
+            Assert.NotNull(result.ErrorLine);
+            Assert.NotNull(result.ErrorColumn);
+        }
+        finally
+        {
+            DeletePackageRoot(rootPath);
+        }
+    }
+
+    /// <summary>
+    /// 共享函数文件顶层运行期错误应结构化返回，错误以共享文件名归因，不中断为未处理异常。
+    /// </summary>
+    [Fact]
+    public void Render_SharedFunctionsRuntimeError_ReturnsStructuredError()
+    {
+        (TemplatePackageInfo package, string rootPath) = CreatePackageWithRoot("{{ unknownSharedCall() }}");
+        try
+        {
+            TemplatePackageContext context = TemplatePackageContext.From(package);
+
+            PreviewResult result = _engine.Render(
+                "{{ table.className }}", CreateTable(), null, context, CancellationToken.None);
+
+            Assert.False(result.IsSuccess);
+            Assert.Contains(TemplateEngine.SharedFunctionsFileName, result.ErrorMessage);
+        }
+        finally
+        {
+            DeletePackageRoot(rootPath);
+        }
+    }
+
+    /// <summary>
+    /// 构造带包根目录的测试包：sharedFunctionsContent 非 null 时写入约定共享函数文件，null 时仅建空目录。
+    /// </summary>
+    /// <param name="sharedFunctionsContent">共享函数文件内容；null 表示不创建该文件。</param>
+    /// <returns>测试包信息与其临时包根路径。</returns>
+    private static (TemplatePackageInfo Package, string RootPath) CreatePackageWithRoot(string? sharedFunctionsContent)
+    {
+        string rootPath = Path.Combine(Path.GetTempPath(), "DbCodeGenSharedFnTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(rootPath);
+        if (sharedFunctionsContent is not null)
+        {
+            File.WriteAllText(Path.Combine(rootPath, TemplateEngine.SharedFunctionsFileName), sharedFunctionsContent);
+        }
+
+        var package = new TemplatePackageInfo
+        {
+            Name = "shared-fn",
+            BasePackage = "com.example",
+            RootPath = rootPath,
+            TypeMap = new Dictionary<string, string>()
+        };
+        return (package, rootPath);
+    }
+
+    /// <summary>
+    /// 递归删除测试包临时目录，尽力清理不影响断言。
+    /// </summary>
+    /// <param name="rootPath">待删除的包根路径。</param>
+    private static void DeletePackageRoot(string rootPath)
+    {
+        if (Directory.Exists(rootPath))
+        {
+            Directory.Delete(rootPath, recursive: true);
         }
     }
 

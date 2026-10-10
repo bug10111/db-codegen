@@ -8,7 +8,7 @@ namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
 /// 模板包管理服务实现，单例注入。承载列表加载、单包加载、zip/文件夹导入、复制、重命名、导出、删除，
-/// 以及新建包、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名，
+/// 以及新建包、包元数据更新、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名，
 /// 内置包只读边界、zip 防穿越与解压上限、变更操作串行化均在此实现。
 /// </summary>
 public sealed class TemplatePackageService : ITemplatePackageService, IDisposable
@@ -255,10 +255,12 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
     /// <inheritdoc />
     public async Task<TemplatePackageOperationResult> CreatePackageAsync(
-        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken)
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath,
+        CancellationToken cancellationToken, string? basePackage = null,
+        IReadOnlyDictionary<string, string>? typeMap = null)
     {
         return await _gate.ExecuteExclusiveAsync(
-            token => CreatePackageCoreAsync(packageName, description, firstTemplatePath, firstOutputPath, token),
+            token => CreatePackageCoreAsync(packageName, description, firstTemplatePath, firstOutputPath, token, basePackage, typeMap),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -301,6 +303,16 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     }
 
     /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> UpdatePackageMetadataAsync(
+        string packageName, string? description, string? basePackage, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? typeMap = null)
+    {
+        return await _gate.ExecuteExclusiveAsync(
+            token => UpdatePackageMetadataCoreAsync(packageName, description, basePackage, token, typeMap),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<TemplatePackageOperationResult> RenamePackageAsync(
         string packageName, string newName, CancellationToken cancellationToken)
     {
@@ -323,7 +335,9 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     /// 建目录写清单（首文件为空则写空 files 清单、不建物理文件）→ 重新校验返回。
     /// </summary>
     private async Task<TemplatePackageOperationResult> CreatePackageCoreAsync(
-        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken)
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath,
+        CancellationToken cancellationToken, string? basePackage,
+        IReadOnlyDictionary<string, string>? typeMap = null)
     {
         if (!TemplatePackageLoader.IsValidPackageName(packageName))
         {
@@ -371,12 +385,15 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         {
             Directory.CreateDirectory(targetDirectory);
 
-            // 写入 template.json 清单：固定 scriban 引擎；提供首文件时声明首模板条目，否则写空 files 清单
+            // 写入 template.json 清单：固定 scriban 引擎；提供首文件时声明首模板条目，否则写空 files 清单；
+            // 基础包名空白收口为 null，与清单"基础包名可空"语义一致；typeMap 清理空白项后写入（null 时为空映射表）
             var manifest = new TemplateManifest
             {
                 Name = packageName,
                 Description = description?.Trim() ?? string.Empty,
                 Engine = TemplatePackageLoader.SupportedEngine,
+                BasePackage = NormalizeOptionalBasePackage(basePackage),
+                TypeMap = CleanTypeMap(typeMap),
                 Files = hasFirstFile
                     ? new List<TemplateFileEntry>
                     {
@@ -951,6 +968,108 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             _logger.LogError(exception, "保存模板内容失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
             return TemplatePackageOperationResult.Failure($"保存模板内容失败：{exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// 元数据更新核心流程：加载包并校验内置只读 → 双字段均为 null 拒绝空转写盘 →
+    /// 更新清单 description/basePackage 并重写清单 → 重新校验返回更新后的包。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> UpdatePackageMetadataCoreAsync(
+        string packageName, string? description, string? basePackage, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? typeMap = null)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可更新包元数据。");
+        }
+
+        // 三字段均未提供（null=不改动）时无元数据可更新，拒绝无意义写盘
+        if (description is null && basePackage is null && typeMap is null)
+        {
+            return TemplatePackageOperationResult.Invalid("未提供任何待更新元数据：description、basePackage 与 typeMap 至少传一项（null 表示不改动该字段）。");
+        }
+
+        try
+        {
+            TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
+
+            // description 非 null 即更新：空白收口为空串，保持列表展示稳定；
+            // basePackage 非 null 即更新：空白收口为 null，与清单"基础包名可空"语义一致表示清空；
+            // typeMap 非 null 即整体覆盖写入：清理空白项（空对象=清空映射表），与清单归一化规则一致
+            if (description is not null)
+            {
+                manifest.Description = description.Trim();
+            }
+
+            if (basePackage is not null)
+            {
+                manifest.BasePackage = NormalizeOptionalBasePackage(basePackage);
+            }
+
+            if (typeMap is not null)
+            {
+                manifest.TypeMap = CleanTypeMap(typeMap);
+            }
+
+            await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
+
+            // 重写清单后整体重新校验，保证返回的包信息与落盘清单一致
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已更新模板包元数据，包 {PackageName}。", packageName);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(exception, "更新模板包元数据失败，包 {PackageName}。", packageName);
+            return TemplatePackageOperationResult.Failure($"更新模板包元数据失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 基础包名收口：去首尾空白后为空串则归一为 null，与清单"基础包名可空"语义一致。
+    /// </summary>
+    /// <param name="basePackage">原始基础包名，可为 null。</param>
+    /// <returns>收口后的基础包名；无有效内容时为 null。</returns>
+    private static string? NormalizeOptionalBasePackage(string? basePackage)
+    {
+        string trimmed = basePackage?.Trim() ?? string.Empty;
+        return trimmed.Length == 0 ? null : trimmed;
+    }
+
+    /// <summary>
+    /// 包级类型映射表收口：跳过空白键值项，键去空白并统一小写化、值去空白，
+    /// 与清单加载侧归一化规则一致，保证写入后读取渲染大小写不敏感命中。
+    /// </summary>
+    /// <param name="typeMap">原始类型映射表，可为 null。</param>
+    /// <returns>清理后的映射表；输入为 null 时返回空映射表。</returns>
+    private static Dictionary<string, string> CleanTypeMap(IReadOnlyDictionary<string, string>? typeMap)
+    {
+        var cleaned = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (typeMap is null)
+        {
+            return cleaned;
+        }
+
+        foreach (KeyValuePair<string, string> pair in typeMap)
+        {
+            if (!string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+            {
+                cleaned[pair.Key.Trim().ToLowerInvariant()] = pair.Value.Trim();
+            }
+        }
+
+        return cleaned;
     }
 
     /// <summary>

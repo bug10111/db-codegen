@@ -13,6 +13,12 @@ namespace DbCodeGen.Core.Templates;
 /// </summary>
 public sealed class TemplateEngine
 {
+    /// <summary>
+    /// 包内共享函数文件约定名（相对包根）。存在时渲染主模板前先以同一渲染上下文执行其中的
+    /// func 定义，供包内全部模板复用；文件不存在时渲染行为与无共享函数机制完全一致。
+    /// </summary>
+    public const string SharedFunctionsFileName = "_functions.scriban";
+
     private readonly ITypeMappingService? _typeMappingService;
 
     /// <summary>
@@ -64,11 +70,41 @@ public sealed class TemplateEngine
         // 组装渲染上下文：table / column? / package / tool
         ScriptObject root = BuildRootContext(table, column, packageContext);
 
+        // 解析包内共享函数文件：约定文件不存在时为 null，渲染管线零改动，保证无共享文件包行为不变
+        string? sharedFunctionsPath = ResolveSharedFunctionsPath(packageContext);
+        Template? sharedFunctionsTemplate = null;
+        if (sharedFunctionsPath is not null)
+        {
+            (sharedFunctionsTemplate, (string Message, int Line, int Column)? parseError) = ParseSharedFunctions(sharedFunctionsPath);
+            if (parseError is not null)
+            {
+                // 共享函数文件语法错误按其自身文件名结构化返回，行列定位在共享文件内部
+                stopwatch.Stop();
+                return PreviewResult.Error(
+                    FormatErrorMessage(SharedFunctionsFileName, parseError.Value.Message, parseError.Value.Line, parseError.Value.Column),
+                    parseError.Value.Line, parseError.Value.Column, stopwatch.ElapsedMilliseconds);
+            }
+        }
+
         try
         {
             var context = new TemplateContext();
             context.CancellationToken = cancellationToken;
             context.PushGlobal(root);
+
+            // 主模板渲染前先执行共享函数文件：func 定义注册进同一渲染上下文的全局作用域供主模板调用；
+            // 共享文件仅为定义副作用执行，其输出文本丢弃，运行期错误按共享文件名结构化定位
+            if (sharedFunctionsTemplate is not null)
+            {
+                (string? sharedError, int? sharedErrorLine, int? sharedErrorColumn) =
+                    RenderSharedFunctions(sharedFunctionsTemplate, context, sharedFunctionsPath!);
+                if (sharedError is not null)
+                {
+                    stopwatch.Stop();
+                    return PreviewResult.Error(sharedError, sharedErrorLine, sharedErrorColumn, stopwatch.ElapsedMilliseconds);
+                }
+            }
+
             string output = NormalizeBlankLines(template.Render(context));
             stopwatch.Stop();
             return PreviewResult.Success(output, stopwatch.ElapsedMilliseconds);
@@ -155,6 +191,77 @@ public sealed class TemplateEngine
         }
 
         return ("模板语法错误。", 1, 1);
+    }
+
+    /// <summary>
+    /// 解析包内共享函数文件路径：包根已知且约定文件存在时返回其绝对路径，否则返回 null
+    /// （无包根的测试直构上下文或无共享文件的包均跳过注入，渲染行为不变）。
+    /// </summary>
+    /// <param name="packageContext">package 侧渲染上下文，提供包根目录。</param>
+    /// <returns>共享函数文件绝对路径；无需注入时为 null。</returns>
+    private static string? ResolveSharedFunctionsPath(TemplatePackageContext packageContext)
+    {
+        string? rootPath = packageContext.RootPath;
+        if (string.IsNullOrWhiteSpace(rootPath))
+        {
+            return null;
+        }
+
+        string candidate = Path.Combine(rootPath, SharedFunctionsFileName);
+        return File.Exists(candidate) ? candidate : null;
+    }
+
+    /// <summary>
+    /// 读取并解析包内共享函数文件；语法错误按共享文件自身行列结构化返回，不进入渲染。
+    /// </summary>
+    /// <param name="sharedFunctionsPath">共享函数文件绝对路径。</param>
+    /// <returns>解析成功的模板；失败时模板为 null 并携带错误消息与行列。</returns>
+    private static (Template? Template, (string Message, int Line, int Column)? Error) ParseSharedFunctions(string sharedFunctionsPath)
+    {
+        string text;
+        try
+        {
+            text = File.ReadAllText(sharedFunctionsPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // 共享函数文件读取失败（被外部占用/权限变动）按结构化错误返回，不中断渲染管线崩溃
+            return (null, ($"共享函数文件读取失败：{exception.Message}", 1, 1));
+        }
+
+        Template template = Template.Parse(text, SharedFunctionsFileName);
+        if (template.HasErrors)
+        {
+            (string message, int line, int column) = FirstParseError(template);
+            return (null, (message, line, column));
+        }
+
+        return (template, null);
+    }
+
+    /// <summary>
+    /// 以主模板同一渲染上下文执行共享函数文件：func 定义注册进全局作用域，输出文本丢弃。
+    /// 运行期错误按共享文件名与共享文件内行列返回；取消与中止异常穿透由调用方统一处理。
+    /// </summary>
+    /// <param name="sharedFunctionsTemplate">已解析的共享函数模板。</param>
+    /// <param name="context">主模板渲染上下文，func 定义注册于此。</param>
+    /// <param name="sharedFunctionsPath">共享函数文件路径，供错误消息归因。</param>
+    /// <returns>错误三元组；成功时 ErrorMessage 为 null。</returns>
+    private static (string? ErrorMessage, int? Line, int? Column) RenderSharedFunctions(
+        Template sharedFunctionsTemplate, TemplateContext context, string sharedFunctionsPath)
+    {
+        try
+        {
+            // 输出丢弃：共享文件预期只承载 func 定义，不产出正文文本
+            _ = sharedFunctionsTemplate.Render(context);
+            return (null, null, null);
+        }
+        catch (ScriptRuntimeException exception)
+        {
+            int line = exception.Span.Start.Line + 1;
+            int column = exception.Span.Start.Column + 1;
+            return (FormatErrorMessage(SharedFunctionsFileName, exception.OriginalMessage, line, column), line, column);
+        }
     }
 
     /// <summary>

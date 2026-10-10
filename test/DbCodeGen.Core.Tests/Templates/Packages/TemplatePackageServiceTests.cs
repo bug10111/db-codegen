@@ -146,6 +146,21 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 断言两个类型映射表键值完全一致（键序不敏感），供 typeMap 清理/覆盖断言复用。
+    /// </summary>
+    /// <param name="expected">期望的映射表。</param>
+    /// <param name="actual">实际的映射表。</param>
+    private static void AssertTypeMapEquals(Dictionary<string, string> expected, IReadOnlyDictionary<string, string> actual)
+    {
+        Assert.Equal(expected.Count, actual.Count);
+        foreach (KeyValuePair<string, string> pair in expected)
+        {
+            Assert.True(actual.TryGetValue(pair.Key, out string? value), $"映射缺少键 {pair.Key}");
+            Assert.Equal(pair.Value, value);
+        }
+    }
+
+    /// <summary>
     /// 列表应内置包优先、组内包名升序排序。
     /// </summary>
     [Fact]
@@ -837,6 +852,35 @@ public sealed class TemplatePackageServiceTests : IDisposable
         TemplatePackageInfo reloaded = await service.LoadPackageAsync("new-pkg", CancellationToken.None);
         Assert.Equal("scriban", reloaded.Engine);
         Assert.Equal("新包说明", reloaded.Description);
+    }
+
+    /// <summary>
+    /// 新建包携带基础包名应写入清单并可重新加载；空白基础包名收口为 null（清空语义）。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_WithBasePackage_WritesManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "base-pkg", "基础包说明", null, null, CancellationToken.None, basePackage: "com.newbase");
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Equal("com.newbase", result.Package!.BasePackage);
+
+        // 落盘清单同步验证：重读 template.json 确认基础包名真实写盘而非仅返回值
+        string manifestJson = await File.ReadAllTextAsync(Path.Combine(userLibrary, "base-pkg", TemplatePackageLoader.ManifestFileName));
+        TemplateManifest manifest = JsonSerializer.Deserialize<TemplateManifest>(manifestJson, JsonOptions)!;
+        Assert.Equal("com.newbase", manifest.BasePackage);
+
+        // 空白收口：仅传空白基础包名建包，清单与运行时信息均为 null
+        TemplatePackageOperationResult blankResult = await service.CreatePackageAsync(
+            "blank-base-pkg", "", null, null, CancellationToken.None, basePackage: "   ");
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, blankResult.Status);
+        Assert.Null(blankResult.Package!.BasePackage);
     }
 
     /// <summary>
@@ -1783,5 +1827,221 @@ public sealed class TemplatePackageServiceTests : IDisposable
 
         Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
         Assert.False(File.Exists(Path.Combine(userLibrary, "edit-pkg", "missing.scriban")));
+    }
+
+    /// <summary>
+    /// 更新用户包元数据应改写清单 description/basePackage 并重新校验通过，落盘清单与新值一致。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_UserPackage_UpdatesManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "meta-pkg");
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "meta-pkg", "更新后的包说明", "com.newbase", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Equal("更新后的包说明", result.Package!.Description);
+        Assert.Equal("com.newbase", result.Package.BasePackage);
+
+        // 落盘清单同步验证：重读 template.json 确认新值真实写盘而非仅返回值
+        string manifestJson = await File.ReadAllTextAsync(Path.Combine(userLibrary, "meta-pkg", TemplatePackageLoader.ManifestFileName));
+        TemplateManifest manifest = JsonSerializer.Deserialize<TemplateManifest>(manifestJson, JsonOptions)!;
+        Assert.Equal("更新后的包说明", manifest.Description);
+        Assert.Equal("com.newbase", manifest.BasePackage);
+    }
+
+    /// <summary>
+    /// 更新内置包元数据应返回内置只读拒绝，清单内容不被改动。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_BuiltinPackage_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(builtinRoot, "builtin-pkg");
+        string manifestPath = Path.Combine(builtinRoot, "builtin-pkg", TemplatePackageLoader.ManifestFileName);
+        string manifestBefore = await File.ReadAllTextAsync(manifestPath);
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "builtin-pkg", "新说明", "com.new", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.Equal(manifestBefore, await File.ReadAllTextAsync(manifestPath));
+    }
+
+    /// <summary>
+    /// 更新不存在的包元数据应返回失败。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_PackageNotExists_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "ghost-pkg", "新说明", null, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.Contains("模板包不存在", result.Message);
+    }
+
+    /// <summary>
+    /// 待更新字段全部省略应返回 Invalid，不触发无意义写盘。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_NoFields_ReturnsInvalid()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "meta-pkg");
+        string manifestPath = Path.Combine(userLibrary, "meta-pkg", TemplatePackageLoader.ManifestFileName);
+        string manifestBefore = await File.ReadAllTextAsync(manifestPath);
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "meta-pkg", null, null, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.Equal(manifestBefore, await File.ReadAllTextAsync(manifestPath));
+    }
+
+    /// <summary>
+    /// 新建包携带 typeMap 应清理空白项并键小写化后写入清单，落盘 template.json 与加载回读一致。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_WithTypeMap_WritesCleanedMapToManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        var typeMap = new Dictionary<string, string>
+        {
+            ["BIGINT"] = "long",
+            [" varchar "] = "string",
+            [""] = "被跳过的空白键",
+            ["numeric"] = " "
+        };
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "mapped-pkg", "带映射包", null, null, CancellationToken.None, typeMap: typeMap);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        AssertTypeMapEquals(
+            new Dictionary<string, string> { ["bigint"] = "long", ["varchar"] = "string" },
+            result.Package!.TypeMap);
+
+        // 落盘清单同步验证：重读 template.json 确认清理后的映射真实写盘
+        string manifestJson = await File.ReadAllTextAsync(Path.Combine(userLibrary, "mapped-pkg", TemplatePackageLoader.ManifestFileName));
+        TemplateManifest manifest = JsonSerializer.Deserialize<TemplateManifest>(manifestJson, JsonOptions)!;
+        AssertTypeMapEquals(
+            new Dictionary<string, string> { ["bigint"] = "long", ["varchar"] = "string" },
+            manifest.TypeMap);
+    }
+
+    /// <summary>
+    /// 新建包不传 typeMap 应写空映射表，保持既有创建行为不变。
+    /// </summary>
+    [Fact]
+    public async Task CreatePackageAsync_WithoutTypeMap_WritesEmptyMap()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.CreatePackageAsync(
+            "plain-pkg", "无映射包", null, null, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Empty(result.Package!.TypeMap);
+    }
+
+    /// <summary>
+    /// 更新元数据携带 typeMap 应整体覆盖清单映射表。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_WithTypeMap_OverwritesManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "overwrite-pkg");
+
+        var newMap = new Dictionary<string, string> { ["decimal"] = "decimal" };
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "overwrite-pkg", null, null, CancellationToken.None, typeMap: newMap);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        // 测试包原始映射（bigint→Long）被整体覆盖为新映射
+        AssertTypeMapEquals(newMap, result.Package!.TypeMap);
+    }
+
+    /// <summary>
+    /// 更新元数据未传 typeMap（null）应保留清单既有映射表不动。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_TypeMapNull_KeepsExistingMap()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "keep-pkg");
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "keep-pkg", "只改说明", null, CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        AssertTypeMapEquals(
+            new Dictionary<string, string> { ["bigint"] = "Long" },
+            result.Package!.TypeMap);
+    }
+
+    /// <summary>
+    /// 更新元数据传空 typeMap 对象应清空清单映射表。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_TypeMapEmpty_ClearsMap()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "clear-pkg");
+
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "clear-pkg", null, null, CancellationToken.None, typeMap: new Dictionary<string, string>());
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.NotNull(result.Package);
+        Assert.Empty(result.Package!.TypeMap);
+    }
+
+    /// <summary>
+    /// 仅更新基础包名（description 传 null）应保持包说明不变；basePackage 传空白应收口为 null 清空。
+    /// </summary>
+    [Fact]
+    public async Task UpdatePackageMetadataAsync_BlankBasePackage_ClearsToNull()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "meta-pkg");
+
+        // CreatePackageAsync 帮助方法建包时 BasePackage 固定 com.example、说明固定"测试包"
+        TemplatePackageOperationResult result = await service.UpdatePackageMetadataAsync(
+            "meta-pkg", null, "   ", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.Null(result.Package!.BasePackage);
+        Assert.Equal("测试包", result.Package.Description);
     }
 }

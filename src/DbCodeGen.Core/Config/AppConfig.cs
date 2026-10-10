@@ -51,7 +51,7 @@ public class AppConfig
 
     /// <summary>
     /// 全局类型映射表，数据库原始类型到目标语言类型，由"类型映射"窗口维护，
-    /// 生成时经 TypeMappingService 优先于模板包 typeMap 命中，随配置导入导出与备份恢复持久化。
+    /// 生成时在包级 typeMap 未命中后参与解析（包级映射优先于全局表），随配置导入导出与备份恢复持久化。
     /// </summary>
     public List<TypeMappingEntry> TypeMappings { get; set; } = new();
 

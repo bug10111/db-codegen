@@ -3,14 +3,15 @@ using DbCodeGen.Core.Model;
 namespace DbCodeGen.Core.Templates;
 
 /// <summary>
-/// 全局类型映射解析服务接口，承载"当前数据库类型条目 > 通用条目 > 包 typeMap > 兜底"的解析链，
-/// 与生成前未映射类型预检。全局映射表取自配置服务，由用户经"类型映射"窗口按数据库类型维护。
+/// 全局类型映射解析服务接口，承载"包 typeMap > 当前数据库类型条目 > 通用条目 > 兜底"的解析链，
+/// 与生成前未映射类型预检。包级映射最优先（目标语言自身口径），全局映射表取自配置服务，
+/// 由用户经"类型映射"窗口按数据库类型维护。
 /// </summary>
 public interface ITypeMappingService
 {
     /// <summary>
-    /// 解析数据库原始类型为目标语言类型：先命中当前数据库类型专属条目，再回落通用条目，
-    /// 其次查包 typeMap，均未命中返回兜底类型。
+    /// 解析数据库原始类型为目标语言类型：先查包 typeMap（包级映射最优先），
+    /// 再命中当前数据库类型专属条目，随后回落通用条目，均未命中返回兜底类型。
     /// </summary>
     /// <param name="rawDbType">数据库原始类型，可空。</param>
     /// <param name="databaseType">当前数据库类型；为空时仅命中通用条目。</param>

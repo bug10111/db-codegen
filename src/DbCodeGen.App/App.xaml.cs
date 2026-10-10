@@ -71,7 +71,7 @@ public partial class App : Application
         services.AddSingleton<IDataSourceManagementService, DataSourceManagementService>();
         services.AddSingleton<SqlExecutor>();
 
-        // 全局类型映射服务：承载"全局映射表>包typeMap>兜底"解析链与生成前未映射预检
+        // 全局类型映射服务：承载"包typeMap>全局映射表>兜底"解析链与生成前未映射预检
         services.AddSingleton<ITypeMappingService, TypeMappingService>();
 
         // 元数据读取服务：方言工厂 + 表清单/表详情编排，供主窗口①表列表区消费

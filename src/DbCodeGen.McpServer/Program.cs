@@ -29,7 +29,7 @@ builder.Services.AddSingleton<IConfigService, ConfigService>();
 builder.Services.AddSingleton<IDataSourceService, DataSourceService>();
 builder.Services.AddSingleton<IDataSourceManagementService, DataSourceManagementService>();
 
-// 全局类型映射服务：承载"全局映射表>包typeMap>兜底"解析链与生成前未映射预检
+// 全局类型映射服务：承载"包typeMap>全局映射表>兜底"解析链与生成前未映射预检
 builder.Services.AddSingleton<ITypeMappingService, TypeMappingService>();
 
 // 元数据读取：方言工厂 + 表清单/表详情编排
@@ -56,7 +56,9 @@ builder.Services.AddMcpServer(options =>
     options.ServerInstructions = "DbCodeGen 代码生成器 MCP 服务端（只读枚举工具面）："
         + "先 list_template_packages / list_templates 选择模板，read_template 查看正文；"
         + "list_datasources / list_tables / get_table_detail 查询连接与表结构；"
-        + "生成前用 check_type_mapping 预检未映射类型。内置模板包只读。";
+        + "生成前用 check_type_mapping 预检未映射类型。内置模板包只读；"
+        + "模板包管理走 create_template_package / delete_template_package / rename_template_package / "
+        + "update_template_package_metadata / copy_template_package（删除需 confirm=true，内置包复制转可写用户包用 copy_template_package）。";
 })
     .WithStdioServerTransport()
     // 加性注册：程序集内一切带 [McpServerToolType] 的工具类自动发现并注册（工具类按需经构造注入上述 Core 服务）。

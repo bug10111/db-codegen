@@ -2,8 +2,8 @@ namespace DbCodeGen.Core.Templates.Packages;
 
 /// <summary>
 /// 模板包管理服务接口，覆盖模板包列表、单包加载、zip 导入、文件夹导入、复制、重命名、导出、删除，
-/// 以及新建包、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名。
-/// 变更操作（导入/复制/重命名/删除/新建/增删文件/批量追加）在实现内部经串行门互斥，读操作不加锁。
+/// 以及新建包、包元数据更新、新增模板文件、批量追加模板文件、删除模板文件与模板文件重命名。
+/// 变更操作（导入/复制/重命名/删除/新建/元数据更新/增删文件/批量追加）在实现内部经串行门互斥，读操作不加锁。
 /// </summary>
 public interface ITemplatePackageService
 {
@@ -108,9 +108,15 @@ public interface ITemplatePackageService
     /// <param name="firstTemplatePath">首模板文件相对包根路径，可含分组目录；为空时创建空包，非空时须防目录穿越安全。</param>
     /// <param name="firstOutputPath">首模板文件输出相对路径；首模板路径非空时须防目录穿越校验。</param>
     /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="basePackage">基础包名，可空；空白收口为 null。置于可空取消标记之后的尾部可选参数，
+    /// 保证既有按位置传参调用方（实参止于取消标记）源兼容。</param>
+    /// <param name="typeMap">包级类型映射表（数据库原始类型 → 目标语言类型），可空；null 表示不配置，
+    /// 非 null 时清理空白项（键小写化，与清单归一化规则一致）后写入清单。尾部可选参数，源兼容同 basePackage。</param>
     /// <returns>创建操作结果，成功时 Package 携带新包信息。</returns>
     Task<TemplatePackageOperationResult> CreatePackageAsync(
-        string packageName, string description, string? firstTemplatePath, string? firstOutputPath, CancellationToken cancellationToken);
+        string packageName, string description, string? firstTemplatePath, string? firstOutputPath,
+        CancellationToken cancellationToken, string? basePackage = null,
+        IReadOnlyDictionary<string, string>? typeMap = null);
 
     /// <summary>
     /// 向用户模板包新增一个空模板文件：建空文件并同步追加 manifest files 条目（enabled=true）后重写清单。
@@ -146,6 +152,24 @@ public interface ITemplatePackageService
     /// <returns>追加操作结果，成功时 Package 携带更新后的包信息。</returns>
     Task<TemplatePackageOperationResult> AppendTemplateFilesAsync(
         string packageName, IReadOnlyList<TemplateFileWriteEntry> files, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 更新用户模板包的元数据（包说明、基础包名与包级类型映射）：仅覆写 manifest 清单元数据字段，不动模板文件清单。
+    /// 内置包只读拒绝；三字段均传 null 时不做任何更新返回 Invalid，
+    /// 非 null 即更新对应字段（description 空白收口为空串；basePackage 空白收口为 null 表示清空；
+    /// typeMap 清理空白项后整体覆盖写入，空对象表示清空映射表）。
+    /// 操作在包变更串行门与跨进程互斥锁内执行，成功后重写清单并重新校验返回更新后的包信息。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="description">新包说明；null 表示不改动该字段。</param>
+    /// <param name="basePackage">新基础包名；null 表示不改动该字段，空白表示清空。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="typeMap">新包级类型映射表；null 表示不改动该字段，非 null（含空对象）时整体覆盖写入。
+    /// 尾部可选参数，保证既有按位置传参调用方源兼容。</param>
+    /// <returns>更新操作结果，成功时 Package 携带重校验后的包信息。</returns>
+    Task<TemplatePackageOperationResult> UpdatePackageMetadataAsync(
+        string packageName, string? description, string? basePackage, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? typeMap = null);
 
     /// <summary>
     /// 保存用户模板包内既有模板文件的正文内容：仅覆写模板文件内容，不改动 manifest 清单条目。

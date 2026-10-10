@@ -24,6 +24,11 @@ public sealed class TemplatePackageContext
     public string Dir { get; }
 
     /// <summary>
+    /// 包根目录绝对路径，供渲染侧定位包内共享资源（如共享函数文件）；测试直构上下文时可为 null。
+    /// </summary>
+    public string? RootPath { get; }
+
+    /// <summary>
     /// 当前包的类型映射表快照，数据库原始类型到目标语言类型，供 tool.type 实时计算。
     /// </summary>
     public IReadOnlyDictionary<string, string> TypeMap { get; }
@@ -31,11 +36,12 @@ public sealed class TemplatePackageContext
     /// <summary>
     /// 使用完整字段构造渲染上下文，仅由工厂方法调用。
     /// </summary>
-    private TemplatePackageContext(string name, string? basePackage, string dir, IReadOnlyDictionary<string, string> typeMap)
+    private TemplatePackageContext(string name, string? basePackage, string dir, string? rootPath, IReadOnlyDictionary<string, string> typeMap)
     {
         Name = name;
         BasePackage = basePackage;
         Dir = dir;
+        RootPath = rootPath;
         TypeMap = typeMap;
     }
 
@@ -54,7 +60,7 @@ public sealed class TemplatePackageContext
         string? basePackage = string.IsNullOrWhiteSpace(basePackageOverride) ? package.BasePackage : basePackageOverride.Trim();
         string dir = BuildDir(basePackage);
         var typeMapSnapshot = new Dictionary<string, string>(package.TypeMap ?? new Dictionary<string, string>());
-        return new TemplatePackageContext(package.Name, basePackage, dir, typeMapSnapshot);
+        return new TemplatePackageContext(package.Name, basePackage, dir, package.RootPath, typeMapSnapshot);
     }
 
     /// <summary>

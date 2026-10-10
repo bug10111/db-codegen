@@ -57,12 +57,32 @@
 | 首字母大写 | `{{ tool.firstUpperCase(table.variableName) }}` | 如 sysUser → SysUser |
 | 驼峰转下划线小写 | `{{ tool.hump2Underline(table.className) }}` | 如 SysUser → sys_user，SysURLConfig → sys_url_config |
 | 驼峰转短横线小写 | `{{ tool.hump3Underline(table.className) }}` | 如 SysUser → sys-user |
-| 类型映射 | `{{ tool.type(column.rawDbType) }}` | 解析链：当前数据库类型条目 → 通用条目 → 包 typeMap → 默认 String |
+| 类型映射 | `{{ tool.type(column.rawDbType) }}` | 解析链：包 typeMap → 当前数据库类型条目 → 通用条目 → 默认 String |
 | 类型导包 | `{{ tool.typeImport(column.rawDbType) }}` | 返回该类型映射声明的导包（如 java.util.Date），无导包需求返回空串 |
 | 列集合导包块 | `{{ tool.imports(table.fullColumn) }}` | 对列集合去重生成 `import X;` 语句块，供实体模板自动导包，无导包返回空串 |
 
-> `tool.type` 映射解析链为：**当前数据库类型专属条目（设置 → 类型映射）→ 通用条目 → 当前包 manifest `typeMap` → 默认 String**。
+> `tool.type` 映射解析链为：**当前包 manifest `typeMap` → 当前数据库类型专属条目（设置 → 类型映射）→ 通用条目 → 默认 String**（包级映射声明目标语言语义，优先于全局表命中）。
 > 映射与表所属数据库类型挂钩（MySQL / PostgreSQL），`tool.typeImport` / `tool.imports` 的导包信息仅全局映射条目可提供（`typeMap` 为纯字符串映射不含导包）。
+
+### 2.1 包内共享函数文件（_functions.scriban）
+
+包根目录可放置约定名 `_functions.scriban` 的共享函数文件，集中定义包内全部模板复用的 Scriban `func`；渲染引擎在渲染每个模板前先以同一渲染上下文执行该文件（func 定义注册进全局作用域），模板正文直接按名调用，无需 include。文件不存在时渲染行为不变。
+
+- 函数声明语法带括号：`{{ func 函数名(参数) }}...{{ end }}`，调用写作 `{{ 函数名(实参) }}`。
+- 共享文件仅承载 func 定义，不产出正文文本（其渲染输出被丢弃）；顶层表达式错误与语法错误按 `_functions.scriban` 结构化报错并携带行列。
+- 共享函数与 `tool.*` 命名空间互不冲突（`tool` 为独立子对象），同名互不影响。
+- 该文件不进 manifest `files` 清单，包校验器不感知；共享函数属于包私有约定，不承载语言知识（类型映射请用 manifest `typeMap` + `tool.type`）。
+
+```scriban
+{{~ func cs_decl(column)
+    base = tool.type(column.rawDbType)
+    if base == 'string' && column.isNullable
+        ret base + '?'
+    else
+        ret base
+    end
+end ~}}
+```
 
 ## 三、template.json manifest 规范
 
@@ -98,7 +118,7 @@
 - `name`：目录名规则，仅字母/数字/中划线/下划线，至少含一个字母或数字；禁止路径分隔符、`..`、绝对路径。
 - `engine`：固定 `scriban`，不允许其它引擎。
 - `basePackage`：可空；可填完整包名（含模块段，如 com.example.common），非空时作为生成上下文注入 `package.basePackage`，`package.dir` 按点号全量转目录。
-- `typeMap`：可选；Dictionary\<string,string\>，键为数据库原始类型（大小写不敏感命中），值为目标语言类型。作为全局映射表之下的兜底，未声明时生成走全局映射表。
+- `typeMap`：可选；Dictionary\<string,string\>，键为数据库原始类型（大小写不敏感命中），值为目标语言类型。生成时**优先于全局映射表命中**（解析链首环），未声明时走全局映射表。
 - `files[].template`：模板文件相对包根路径，禁止绝对路径与 `..` 段（防目录穿越）；模板文件必须与落盘的 Scriban 文件一一对应。
 - `files[].output`：输出相对路径，支持 `{{变量}}` 占位（如 `{{package.dir}}/entity/{{table.className}}.java`）；禁止绝对路径与盘符前缀；允许 `..` 段越出代码根（如 `../resources/mapper/{{table.className}}Dao.xml`）落到 `src/main/resources` 等代码根外目录，但解析后必须落在工作区根内。
 - `files[].enabled`：是否默认勾选参与生成，缺省 true。

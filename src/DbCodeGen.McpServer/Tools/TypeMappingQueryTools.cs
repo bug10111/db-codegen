@@ -96,7 +96,7 @@ public sealed class TypeMappingQueryTools
 
     /// <summary>
     /// 生成前未映射类型预检：读取指定表集合的完整列元数据，按与生成一致的解析链
-    /// （数据库专属条目 > 通用条目 > 包 typeMap）汇总未命中类型及首次出现位置。
+    /// （包 typeMap > 数据库专属条目 > 通用条目）汇总未命中类型及首次出现位置。
     /// </summary>
     /// <param name="datasource">已保存的数据源连接名称。</param>
     /// <param name="tables">待生成的表名清单（与 list_tables 返回的 name 一致）。</param>
@@ -104,7 +104,7 @@ public sealed class TypeMappingQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>未映射类型清单与是否全部命中。</returns>
     [McpServerTool(Name = "check_type_mapping", ReadOnly = true)]
-    [Description("生成前预检：检查指定表集合在当前映射链（全局>包 typeMap>兜底）下的未映射数据库类型，避免生成出回落 String 的列。")]
+    [Description("生成前预检：检查指定表集合在当前映射链（包 typeMap>全局>兜底）下的未映射数据库类型，避免生成出回落 String 的列。")]
     public async Task<object> CheckTypeMappingAsync(
         string datasource,
         string[] tables,

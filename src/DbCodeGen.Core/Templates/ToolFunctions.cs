@@ -31,7 +31,7 @@ public static class ToolFunctions
         tool.SetValue("hump2Underline", new ScriptToolFunction(args => Hump2Underline(args.FirstOrDefault()?.ToString())), true);
         tool.SetValue("hump3Underline", new ScriptToolFunction(args => Hump3Underline(args.FirstOrDefault()?.ToString())), true);
 
-        // 类型映射闭包当前包类型映射表、全局映射服务与数据库类型：有服务时走"库专属>通用>包typeMap>兜底"解析链，否则按旧包行为
+        // 类型映射闭包当前包类型映射表、全局映射服务与数据库类型：有服务时走"包typeMap>库专属>通用>兜底"解析链，否则按旧包行为
         tool.SetValue("type", new ScriptToolFunction(args => ResolveType(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService, databaseType)), true);
 
         // 单类型导包：返回映射条目声明的导包（如 java.math.BigDecimal），无导包需求时返回空串
