@@ -2,6 +2,8 @@
 # DbCodeGen 一键打包脚本
 # -----------------------------------------------------------------------------
 # 位置：项目根目录
+# 用途：一键发布桌面端（DbCodeGen.App）与 MCP 服务端（DbCodeGen.McpServer），
+#       产出完整可用包到 out/DbCodeGen/。
 # 用法（任选其一）：
 #   PowerShell  :  .\package.ps1
 #   Git Bash/CMD:  powershell -ExecutionPolicy Bypass -File package.ps1
@@ -13,12 +15,21 @@
 #   ├─ DbCodeGen.App.exe         # 桌面宿主：双击即用（WPF）
 #   ├─ DbCodeGen.Core.dll        # 领域核心程序集
 #   ├─ *.dll / *.json            # 依赖程序集与运行时配置
-#   └─ version.txt               # 构建时间与 git 提交号
+#   ├─ McpServer/                # MCP 服务端（本地 stdio，供 AI 客户端注册拉起）
+#   │  ├─ DbCodeGen.McpServer.exe
+#   │  └─ Templates/Builtin/     # 内置模板包随发布复制
+#   └─ version.txt               # 构建时间、git 提交号与打包模式
+#
+# data 保全语义：输出目录已存在时保留其 data\ 子目录（用户数据兜底保全，仅重建
+#               程序文件）；正常形态数据目录在 %AppData%\DbCodeGen（或经
+#               config-location.json 重定向后的目录），输出目录内通常无 data\。
+# 外部运行时依赖：缺省框架依赖打包，目标机需已安装 .NET 8 运行时；传
+#               -SelfContained 后桌面端与 MCP 服务端均自包含，目标机免装运行时。
 # =============================================================================
 
 [CmdletBinding()]
 param(
-    [switch]$SelfContained   # 自包含打包（目标机无需 .NET 8 运行时）
+    [switch]$SelfContained   # 自包含打包（目标机无需安装 .NET 8 运行时）
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,14 +39,16 @@ $RepoRoot     = $PSScriptRoot                          # 脚本所在目录 = �
 $SoftwareName = 'DbCodeGen'                            # 软件名（输出目录同名）
 $OutputDir    = Join-Path $RepoRoot "out\$SoftwareName"  # 打包输出目录（out 下按软件名建整包）
 $AppProject   = Join-Path $RepoRoot 'src\DbCodeGen.App\DbCodeGen.App.csproj'
+$McpProject   = Join-Path $RepoRoot 'src\DbCodeGen.McpServer\DbCodeGen.McpServer.csproj'
+$McpOutputDir = Join-Path $OutputDir 'McpServer'       # MCP 服务端产物子目录（与桌面端同包、独立目录）
 
 function Write-Step {
     param([string]$Text)
     Write-Host "`n== $Text ==" -ForegroundColor Cyan
 }
 
-# ---- 0/4 工具链检查 ----
-Write-Step '0/4 检查工具链'
+# ---- 0/5 工具链检查 ----
+Write-Step '0/5 检查工具链'
 foreach ($tool in 'dotnet') {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "未找到 $tool 命令，请先安装后再运行打包脚本。"
@@ -43,42 +56,79 @@ foreach ($tool in 'dotnet') {
 }
 Write-Host 'dotnet 就绪。'
 
-# ---- 1/4 清理并重建输出目录 ----
-Write-Step '1/4 清理输出目录'
-if (Test-Path $OutputDir) { Remove-Item -Path $OutputDir -Recurse -Force }
+# ---- 1/5 清理并重建输出目录（data\ 子目录兜底保全） ----
+Write-Step '1/5 清理输出目录（保留 data\ 兜底保全）'
+$preservedDataDir = $null
+if (Test-Path $OutputDir) {
+    # 升级重跑保全：data\ 可能承载经迁移改迁到输出目录内的用户数据，清空前先移出、清空后还原
+    $candidateDataDir = Join-Path $OutputDir 'data'
+    if (Test-Path $candidateDataDir) {
+        $preservedDataDir = Join-Path $RepoRoot ("out\.data-preserve-" + [System.Guid]::NewGuid().ToString('N'))
+        Move-Item -Path $candidateDataDir -Destination $preservedDataDir
+        Write-Host "已保全输出目录 data\ 子目录 → $preservedDataDir"
+    }
+    Remove-Item -Path $OutputDir -Recurse -Force
+}
 New-Item -ItemType Directory -Path $OutputDir | Out-Null
+if ($preservedDataDir) {
+    Move-Item -Path $preservedDataDir -Destination $candidateDataDir
+    Write-Host "已还原 data\ 子目录 → $candidateDataDir（升级保全完成）"
+}
 Write-Host "输出目录：$OutputDir"
 
-# ---- 2/4 发布桌面宿主 ----
-Write-Step '2/4 发布桌面宿主 (DbCodeGen.App)'
+# ---- 2/5 发布桌面宿主 ----
+Write-Step '2/5 发布桌面宿主 (DbCodeGen.App)'
 $ridArg = @()
 if ($SelfContained) { $ridArg = @('-r', 'win-x64', '--self-contained', 'true') }
 
 & dotnet publish $AppProject -c Release -o $OutputDir @ridArg
 if ($LASTEXITCODE -ne 0) { throw '桌面宿主发布失败。' }
+# 对外分发包禁止携带 pdb（调试符号不参与运行，剔除后不影响程序可用）
+$pdbs = @(Get-ChildItem -Path $OutputDir -Filter '*.pdb' -File)
+if ($pdbs.Count -gt 0) {
+    $pdbs | Remove-Item -Force
+    Write-Host ("已剔除桌面端产物 pdb：{0}" -f (($pdbs | ForEach-Object { $_.Name }) -join '、'))
+}
 Write-Host '桌面宿主发布完成。'
 
-# ---- 3/4 生成版本信息 ----
-Write-Step '3/4 生成版本信息'
+# ---- 3/5 发布 MCP 服务端 ----
+Write-Step '3/5 发布 MCP 服务端 (DbCodeGen.McpServer)'
+& dotnet publish $McpProject -c Release -o $McpOutputDir @ridArg
+if ($LASTEXITCODE -ne 0) { throw 'MCP 服务端发布失败。' }
+# 对外分发包禁止携带 pdb（同桌面端整备口径）
+$mcpPdbs = @(Get-ChildItem -Path $McpOutputDir -Filter '*.pdb' -File)
+if ($mcpPdbs.Count -gt 0) {
+    $mcpPdbs | Remove-Item -Force
+    Write-Host ("已剔除 MCP 服务端产物 pdb：{0}" -f (($mcpPdbs | ForEach-Object { $_.Name }) -join '、'))
+}
+Write-Host 'MCP 服务端发布完成。'
+
+# ---- 4/5 生成版本信息 ----
+Write-Step '4/5 生成版本信息'
 $gitCommit = ''
 try {
     $gitCommit = (& git -C $RepoRoot rev-parse --short HEAD 2>$null).Trim()
 } catch {
     $gitCommit = ''
 }
+# 打包模式随参数落进 version.txt，交付包自带运行时依赖说明
+$packageMode = if ($SelfContained) { '自包含（目标机免装 .NET 8 运行时）' } else { '框架依赖（目标机需已安装 .NET 8 运行时）' }
 $versionLines = @(
     'DbCodeGen 数据库代码生成工具',
     "构建时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-    "Git 提交：$gitCommit"
+    "Git 提交：$gitCommit",
+    "打包模式：$packageMode"
 )
 $versionPath = Join-Path $OutputDir 'version.txt'
 Set-Content -Path $versionPath -Value $versionLines -Encoding UTF8
 Write-Host "已写入 $versionPath"
 
-# ---- 4/4 校验产物并汇总 ----
-Write-Step '4/4 校验产物'
+# ---- 5/5 校验产物并汇总 ----
+Write-Step '5/5 校验产物'
 $mustExist = @(
-    (Join-Path $OutputDir 'DbCodeGen.App.exe')
+    (Join-Path $OutputDir 'DbCodeGen.App.exe'),
+    (Join-Path $OutputDir 'McpServer\DbCodeGen.McpServer.exe'),
+    (Join-Path $OutputDir 'McpServer\Templates\Builtin\java-mybatis-plus\template.json')
 )
 $missing = $mustExist | Where-Object { -not (Test-Path $_) }
 if ($missing) {
@@ -94,3 +144,4 @@ Get-ChildItem -Path $OutputDir -Recurse -File | ForEach-Object {
 Write-Host ''
 Write-Host '使用方法：'
 Write-Host "  双击 $OutputDir\DbCodeGen.App.exe 打开桌面窗口。"
+Write-Host "  MCP 服务端：$McpOutputDir\DbCodeGen.McpServer.exe（AI 客户端以 stdio 注册拉起，配置示例见 README）"

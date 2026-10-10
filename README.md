@@ -71,3 +71,76 @@
 2. ① 表列表区勾选要生成代码的表
 3. ② 模板区选择一个模板包（没有合适的模板？用「AI 写模板」生成一套）
 4. ④ 生成栏配置工作区根与代码目录，点「预览待写」核对、点「生成」写盘
+
+## MCP 服务端（接入 AI 客户端）
+
+除桌面客户端外，本工具自带一个**本地 stdio MCP 服务端**（`src/DbCodeGen.McpServer`，.NET 8 控制台程序）。任何支持 MCP stdio 传输的 AI 客户端（Claude Desktop、ZCode、Cursor 等）把它作为子进程拉起后，即可用自然语言驱动全部代码生成能力：查表结构、管数据源、改模板、预览渲染、批量生成。
+
+MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面，并与桌面端共享同一份配置与模板库。
+
+### 工具清单（19 个，tools/list 实测）
+
+| 分类 | 工具 | 说明 |
+| --- | --- | --- |
+| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含说明、只读标记、文件数 |
+| | `list_templates` | 列出指定包内模板条目（路径、输出路径模板、启用标记），可按分组 / 语言过滤 |
+| | `read_template` | 读取模板文件正文全文（Scriban 源文本） |
+| | `list_datasources` | 列出已保存的数据源连接（密码永不回显） |
+| | `list_tables` | 列出指定数据源下全部表（表名、类名、注释；不含列） |
+| | `get_table_detail` | 读取指定表的完整列元数据（类型、主键、自增、可空、注释等） |
+| | `get_type_map` | 查看生效的类型映射表（全局 > 包 typeMap > 兜底） |
+| | `check_type_mapping` | 生成前预检未映射的数据库类型 |
+| 模板编辑（4） | `save_template_content` | 覆写保存用户包内既有模板正文（内置包只读拒绝） |
+| | `create_template_file` | 向用户包新增空模板文件（可含分组目录） |
+| | `delete_template_file` | 删除用户包内模板文件（不可恢复） |
+| | `rename_template_file` | 重命名 / 移动用户包内模板文件 |
+| 渲染预览（2） | `render_template` | 以合成表上下文渲染单个模板，语法错误精确到行列 |
+| | `preview_generation` | 批量生成 dry-run 预览（零写盘）：表 × 模板的文件计划与未映射类型清单 |
+| 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run；建议先 `preview_generation` 确认） |
+| 数据源管理（4） | `add_datasource` | 新增数据源连接（密码 DPAPI 加密入库） |
+| | `update_datasource` | 按名更新连接（只传要改的字段） |
+| | `delete_datasource` | 按名删除连接 |
+| | `test_connection` | 测试连通性（10 秒超时）：传 `datasource` 按已保存连接测试，或传完整明文参数直测（不入库不留痕） |
+
+`generate` 全参数显式、不读写配置记忆：`package`（包名）与 `tables`（内联表结构，列元数据自带，建议先用 `get_table_detail` 取回）必填；`files` 省略时默认选择包内全部启用条目；`workspaceRoot` / `codeDirectory` 指定输出位置；`duplicateStrategy` 控制同名文件覆盖（`overwrite`）或跳过（`skip`）。
+
+### 构建发布
+
+```powershell
+dotnet publish src/DbCodeGen.McpServer -c Release
+```
+
+产物输出到 `src\DbCodeGen.McpServer\bin\Release\net8.0-windows\publish\`，入口为 `DbCodeGen.McpServer.exe`，内置模板包 `Templates\Builtin\` 随发布一并复制。
+
+整包打包用仓库根脚本 `.\package.ps1`：桌面端输出到 `out\DbCodeGen\`，MCP 服务端输出到其子目录 `out\DbCodeGen\McpServer\`。缺省为框架依赖模式（目标机需已装 .NET 8 运行时），传 `-SelfContained` 后两者均自包含、目标机免装运行时。
+
+### AI 客户端注册（stdio）
+
+MCP 服务端以 stdio 子进程方式被 AI 客户端拉起，注册时提供 exe 全路径即可，无需参数。以上述发布产物为例，可执行命令为（占位路径，替换为实际全路径）：
+
+```
+C:\path\to\DbCodeGen.McpServer.exe
+```
+
+通用 MCP 客户端配置 JSON 片段（`command` 填实际 exe 全路径）：
+
+```json
+{
+  "mcpServers": {
+    "dbcodegen": {
+      "command": "C:\\path\\to\\DbCodeGen.McpServer.exe",
+      "args": []
+    }
+  }
+}
+```
+
+### 运行约束与双开注意事项
+
+- **同机同用户**：数据源密码与 AI Key 均以 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。换机 / 换用户复制配置无法解密，需重新录入。
+- **与桌面端共享数据**：与桌面端共用同一份 `%AppData%\DbCodeGen\config.json` 与用户模板库（若桌面端已通过 `config-location.json` 重定向数据目录，则共用重定向后的目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
+- **模板变更感知**：桌面端不监听模板文件变更（无 FileSystemWatcher）。模板内容被 MCP 修改后，桌面端需重新加载包（重新打开「模板包管理」窗口，或重启应用）才能看到最新内容。
+- **内置模板包只读**：内置包 `java-mybatis-plus` 只读，MCP 编辑类工具对内置包一律拒绝；生成用模板请复制到用户包或使用既有用户包。
+- **日志**：MCP 服务端日志固定落 `C:\simple\DbCodeGen.McpServer\logs\`（按天滚动、保留 7 天、单文件 20MB 上限，多实例共享写）。
+
+> **工具使用手册**：19 个工具的完整参数表、返回字段、错误契约与推荐调用顺序（首次接入/数据源接入/生成主流水线/模板维护/连接直测五条管线）见 [docs/db-codegen-MCP工具使用手册.md](docs/db-codegen-MCP工具使用手册.md)。
