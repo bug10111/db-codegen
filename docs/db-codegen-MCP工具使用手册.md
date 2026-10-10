@@ -480,15 +480,17 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 
 ### 4.13 `render_template`
 
-**用途与使用时机**：以合成表上下文渲染单个模板（**无需数据库连接**），模板维护后的回归验证、生成前确认单模板输出。渲染失败按业务结果返回（`success=false` + 行列定位），不算调用错误。
+**用途与使用时机**：以合成表上下文渲染单个模板（**无需数据库连接**），模板维护后的回归验证、生成前确认单模板输出。渲染失败按业务结果返回（`success=false` + 行列定位），不算调用错误。支持可选 `variables` / `modules` 作用域片段渲染（module 作用域片段渲染入口），**返回文本不落盘**。
 
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
 | `package` | string | 是 | — | 模板包包名 |
 | `path` | string | 是 | — | 模板相对包根路径（`list_templates` 返回的 `path`） |
-| `table` | object | 是 | — | 合成表上下文（结构见本章开头「合成表与合成列」）；表名必填，列集合可选 |
-| `column` | object | 否 | null | 当前列上下文（结构同合成列），供列级模板内 `column` 变量消费；表级模板省略 |
+| `table` | object | 否 | null | 合成表上下文（结构见本章开头「合成表与合成列」）；表名必填，列集合可选。**传入时按表上下文渲染（现状行为）；省略时按作用域片段渲染**（与 `modules` 互斥） |
+| `column` | object | 否 | null | 当前列上下文（结构同合成列），供列级模板内 `column` 变量消费；表级模板省略；依赖 `table` 提供 |
 | `basePackageOverride` | string | 否 | null | 本次渲染的基础包名覆盖值；缺省使用模板包 manifest 的 `basePackage`（无则为空） |
+| `variables` | object | 否 | null | 调用方变量对象，逐键注入模板 `vars.*`（如 `{"appName":"demo"}`）；键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝 |
+| `modules` | array of object | 否 | null | 模块清单（如 `[{"name":"account"}]`）；**单次最多一个元素**，取首元素为 module 上下文（`name` 必填，其余字段原样注入 `module.*`）；与 `table` 互斥；省略 `table` 且未传 `modules` 时按 project 型上下文（vars + 空 tables 汇总）渲染 |
 
 **返回**：
 
@@ -501,7 +503,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `errorColumn` | integer \| 省略 | 错误列号（从 1 开始），未知时省略 |
 | `renderDurationMs` | integer | 渲染耗时（毫秒） |
 
-**错误态**：`TemplatePackageError`（包不存在；`path` 未在清单声明）；`InvalidArgument`（`package`/`path` 为空；合成表名为空；合成列名为空）；`InternalError`。
+**错误态**：`TemplatePackageError`（包不存在；`path` 未在清单声明）；`InvalidArgument`（`package`/`path` 为空；合成表名为空；合成列名为空；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`/重复/多元素；`table` 与 `modules` 同时提供；省略 `table` 时传 `column`）；`InternalError`。
 
 **调用示例**：
 
@@ -520,9 +522,20 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 }
 ```
 
+module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.*}}`，返回文本不落盘）：
+
+```json
+{
+  "package": "zz-probe-scope",
+  "path": "module-info.cs.scriban",
+  "variables": { "appName": "demo" },
+  "modules": [ { "name": "account" } ]
+}
+```
+
 ### 4.14 `preview_generation`
 
-**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回表 × 模板笛卡尔积的文件计划与未映射类型清单，是 `generate` 前的唯一把关点，必须在生成前调用。
+**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回文件计划与未映射类型清单，是 `generate` 前的唯一把关点，必须在生成前调用。文件计划按模板作用域三路展开：`table`（缺省）按表 × 模板笛卡尔积；`module` 按调用方 `modules` 清单逐个；`project` 整次渲染一次——三种作用域同次调用可混跑。
 
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
@@ -533,14 +546,16 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
 | `files` | array of string | 否 | null | 参与生成的模板相对路径清单；**省略时默认选择包内全部启用条目**；清单含包内不存在的路径会被拒绝 |
 | `duplicateStrategy` | string | 否 | `"overwrite"` | 同名目标文件处理策略：`overwrite`（内容相同跳过/不同覆盖）/ `skip`（存在即跳过）；大小写不敏感，空白或非法取值被拒绝 |
+| `variables` | object | 否 | null | 调用方变量对象，逐键注入模板 `vars.*`（如 `{"appName":"demo"}`）；键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝 |
+| `modules` | array of object | 否 | null | 模块清单（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此逐个渲染；元素 `name` 必填且清单内不得重复，name 之外字段原样注入 `module.*`；**勾选 module 作用域模板但省略本参时结构化报错** |
 
 **返回**：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `entries` | array | 文件计划条目（表 × 模板笛卡尔积顺序） |
-| `entries[].table` | string | 来源表名 |
-| `entries[].relativePath` | string | 渲染后相对输出根路径（`{{变量}}` 占位已解析） |
+| `entries` | array | 文件计划条目（按作用域分组顺序：表×模板笛卡尔积、模块清单逐个、工程模板依次） |
+| `entries[].table` | string | 来源上下文名：table 作用域条目为表名；module 作用域条目为模块名；project 作用域条目为空串 |
+| `entries[].relativePath` | string | 渲染后路径（`{{变量}}` 占位已解析）；table/module 条目相对输出根，project 条目相对工作区根 |
 | `entries[].absolutePath` | string | 目标文件绝对路径（已通过防目录穿越校验） |
 | `entries[].action` | string | 动作分类：`new` / `overwrite` / `skip`（语义见下） |
 | `newCount` | integer | 新增条目数 |
@@ -554,7 +569,9 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 
 `action` 分类语义：`new` = 目标不存在（将新增写盘）；`overwrite` = 目标存在且内容不同（将覆盖，非 UTF-8 遗留文件按覆盖处理）；`skip` = 目标存在但不写盘——`skip` 策略下同名一律跳过；`overwrite` 策略下内容相同（行尾归一化后比较）也跳过。
 
-**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径）；`InvalidArgument`（必填参缺失；`tables` 为空；`files` 含包外路径；`duplicateStrategy` 非法）；`InternalError`。
+**模板作用域与路径基准**：作用域由包清单 `files[].scope` 声明（`table` 缺省 / `module` / `project`）。`table` 与 `module` 作用域的 `output` 相对输出根（工作区根 + codeDirectory 派生的相对输出根）；`project` 作用域的 `output` 相对 `workspaceRoot`。`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作。防目录穿越对三种作用域一致：解析后必须落在工作区根内。
+
+**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空；`files` 含包外路径；`duplicateStrategy` 非法；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
 
 **调用示例**：
 
@@ -576,7 +593,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 
 **用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。
 
-参数与 `preview_generation` 完全一致（`package` / `tables` / `workspaceRoot` / `codeDirectory` 必填，`basePackageOverride` / `files` / `duplicateStrategy` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
+参数与 `preview_generation` 完全一致（`package` / `tables` / `workspaceRoot` / `codeDirectory` 必填，`basePackageOverride` / `files` / `duplicateStrategy` / `variables` / `modules` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
 
 **返回**：
 
@@ -608,7 +625,9 @@ list_templates → read_template → 编辑（四选一）→ render_template �
   "workspaceRoot": "C:\\work\\demo-project",
   "codeDirectory": "src/main/java/com/example/demo",
   "files": ["entity.java.scriban", "mapper.java.scriban"],
-  "duplicateStrategy": "overwrite"
+  "duplicateStrategy": "overwrite",
+  "variables": { "appName": "demo" },
+  "modules": [ { "name": "account" } ]
 }
 ```
 

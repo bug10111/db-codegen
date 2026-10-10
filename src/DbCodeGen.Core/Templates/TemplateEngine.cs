@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Model;
 using Scriban;
 using Scriban.Parsing;
@@ -32,7 +33,7 @@ public sealed class TemplateEngine
 
     /// <summary>
     /// 渲染模板内容，注入 table / column? / package / tool 上下文；失败时返回结构化错误与行列定位。
-    /// 实时预览与批量生成共用本方法渲染模板正文。
+    /// 实时预览与批量生成共用本方法渲染模板正文。传入 scopeContext 时附加注入 vars / module / tables 作用域变量。
     /// </summary>
     /// <param name="templateText">模板文本。</param>
     /// <param name="table">当前表元数据。</param>
@@ -40,6 +41,7 @@ public sealed class TemplateEngine
     /// <param name="packageContext">package 侧渲染上下文。</param>
     /// <param name="cancellationToken">取消标记，渲染被取消时抛 OperationCanceledException。</param>
     /// <param name="templateName">模板名，用于错误定位展示；为空时使用包名。</param>
+    /// <param name="scopeContext">可选的作用域渲染输入，注入 vars / module / tables；为空时与既有行为一致。</param>
     /// <returns>渲染结果，成功时含真实代码，失败时含错误描述与行列。</returns>
     /// <exception cref="OperationCanceledException">渲染被取消时抛出。</exception>
     public PreviewResult Render(
@@ -48,7 +50,8 @@ public sealed class TemplateEngine
         ColumnInfo? column,
         TemplatePackageContext packageContext,
         CancellationToken cancellationToken,
-        string? templateName = null)
+        string? templateName = null,
+        ScopeRenderInput? scopeContext = null)
     {
         ArgumentNullException.ThrowIfNull(templateText);
         ArgumentNullException.ThrowIfNull(table);
@@ -56,19 +59,79 @@ public sealed class TemplateEngine
         cancellationToken.ThrowIfCancellationRequested();
 
         string sourceName = string.IsNullOrWhiteSpace(templateName) ? packageContext.Name : templateName;
-        Stopwatch stopwatch = Stopwatch.StartNew();
 
         Template template = Template.Parse(templateText, sourceName);
         if (template.HasErrors)
         {
             // 模板存在语法错误时直接结构化返回，不再进入渲染
             (string errorMessage, int errorLine, int errorColumn) = FirstParseError(template);
-            stopwatch.Stop();
-            return PreviewResult.Error(FormatErrorMessage(sourceName, errorMessage, errorLine, errorColumn), errorLine, errorColumn, stopwatch.ElapsedMilliseconds);
+            return PreviewResult.Error(FormatErrorMessage(sourceName, errorMessage, errorLine, errorColumn), errorLine, errorColumn, 0);
         }
 
-        // 组装渲染上下文：table / column? / package / tool
-        ScriptObject root = BuildRootContext(table, column, packageContext);
+        // 组装渲染上下文：table / column? / package / tool（+ 可选作用域变量 vars / module / tables）
+        ScriptObject root = BuildRootContext(table, column, packageContext, scopeContext);
+
+        return RenderCore(template, root, packageContext, cancellationToken, sourceName);
+    }
+
+    /// <summary>
+    /// 按作用域渲染模板正文（module / project 作用域片段与生成共用）：不注入 table / column 单表上下文，
+    /// 注入 package / tool 与作用域变量 vars? / module? / tables?；渲染管线（共享函数文件、空行规整、结构化错误）与
+    /// 表作用域 Render 完全一致。
+    /// </summary>
+    /// <param name="templateText">模板文本。</param>
+    /// <param name="packageContext">package 侧渲染上下文。</param>
+    /// <param name="scopeContext">作用域渲染输入，承载 vars / module / tables。</param>
+    /// <param name="cancellationToken">取消标记，渲染被取消时抛 OperationCanceledException。</param>
+    /// <param name="templateName">模板名，用于错误定位展示；为空时使用包名。</param>
+    /// <returns>渲染结果，成功时含真实代码，失败时含错误描述与行列。</returns>
+    /// <exception cref="OperationCanceledException">渲染被取消时抛出。</exception>
+    public PreviewResult RenderScoped(
+        string templateText,
+        TemplatePackageContext packageContext,
+        ScopeRenderInput scopeContext,
+        CancellationToken cancellationToken,
+        string? templateName = null)
+    {
+        ArgumentNullException.ThrowIfNull(templateText);
+        ArgumentNullException.ThrowIfNull(packageContext);
+        ArgumentNullException.ThrowIfNull(scopeContext);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string sourceName = string.IsNullOrWhiteSpace(templateName) ? packageContext.Name : templateName;
+
+        Template template = Template.Parse(templateText, sourceName);
+        if (template.HasErrors)
+        {
+            // 模板存在语法错误时直接结构化返回，不再进入渲染
+            (string errorMessage, int errorLine, int errorColumn) = FirstParseError(template);
+            return PreviewResult.Error(FormatErrorMessage(sourceName, errorMessage, errorLine, errorColumn), errorLine, errorColumn, 0);
+        }
+
+        // 组装作用域渲染上下文：package / tool + vars? / module? / tables?（无单表 table / column）
+        ScriptObject root = BuildScopedRootContext(packageContext, scopeContext);
+
+        return RenderCore(template, root, packageContext, cancellationToken, sourceName);
+    }
+
+    /// <summary>
+    /// 渲染执行共用管线：以既定根上下文执行包内共享函数文件、渲染主模板并规整空行；
+    /// 取消、运行期错误与语法错误的结构化映射对表作用域与作用域渲染保持一致。
+    /// </summary>
+    /// <param name="template">已解析模板。</param>
+    /// <param name="root">已组装的渲染根上下文。</param>
+    /// <param name="packageContext">package 侧渲染上下文，供共享函数文件定位。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="sourceName">模板名，用于错误定位展示。</param>
+    /// <returns>渲染结果，成功时含真实代码，失败时含错误描述与行列。</returns>
+    private PreviewResult RenderCore(
+        Template template,
+        ScriptObject root,
+        TemplatePackageContext packageContext,
+        CancellationToken cancellationToken,
+        string sourceName)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
 
         // 解析包内共享函数文件：约定文件不存在时为 null，渲染管线零改动，保证无共享文件包行为不变
         string? sharedFunctionsPath = ResolveSharedFunctionsPath(packageContext);
@@ -158,6 +221,62 @@ public sealed class TemplateEngine
         }
 
         ScriptObject root = BuildPathContext(context);
+        try
+        {
+            var renderContext = new TemplateContext();
+            renderContext.PushGlobal(root);
+            return template.Render(renderContext);
+        }
+        catch (ScriptRuntimeException exception)
+        {
+            int line = exception.Span.Start.Line + 1;
+            int column = exception.Span.Start.Column + 1;
+            throw new TemplateRenderException($"{sourceName}渲染失败：{exception.OriginalMessage}", exception, line, column);
+        }
+    }
+
+    /// <summary>
+    /// 按作用域渲染输出路径模板占位（module / project 作用域）：注入 package / tool 与 vars? / module?，
+    /// 不注入单表 table；module 作用域路径可引用 {{module.name}}，project 作用域可引用 {{vars.*}}。
+    /// </summary>
+    /// <param name="pathTemplate">输出相对路径模板。</param>
+    /// <param name="packageContext">package 侧渲染上下文。</param>
+    /// <param name="scopeContext">作用域渲染输入。</param>
+    /// <returns>渲染后的相对输出路径。</returns>
+    /// <exception cref="TemplateRenderException">路径模板解析或渲染失败时抛出，携带行列定位。</exception>
+    public string RenderScopedPathTemplate(
+        string pathTemplate,
+        TemplatePackageContext packageContext,
+        ScopeRenderInput scopeContext)
+    {
+        ArgumentNullException.ThrowIfNull(pathTemplate);
+        ArgumentNullException.ThrowIfNull(packageContext);
+        ArgumentNullException.ThrowIfNull(scopeContext);
+
+        const string sourceName = "输出路径模板";
+        Template template = Template.Parse(pathTemplate, sourceName);
+        if (template.HasErrors)
+        {
+            // 路径模板语法错误按渲染异常抛出，供批量生成整单定位
+            (string message, int line, int column) = FirstParseError(template);
+            throw new TemplateRenderException(FormatErrorMessage(sourceName, message, line, column), line, column);
+        }
+
+        var root = new ScriptObject();
+        root.SetValue("package", BuildPackageObject(packageContext), true);
+        root.SetValue("tool", ToolFunctions.Build(packageContext, _typeMappingService, ResolveScopeDatabaseType(scopeContext)), true);
+
+        // module 作用域路径可引用 module.*（如 {{module.name}}）；vars 供工程级路径参数引用
+        if (scopeContext.Module is not null)
+        {
+            root.SetValue("module", BuildModuleObject(scopeContext.Module), true);
+        }
+
+        if (scopeContext.Variables is not null)
+        {
+            root.SetValue("vars", BuildVarsObject(scopeContext.Variables), true);
+        }
+
         try
         {
             var renderContext = new TemplateContext();
@@ -265,9 +384,10 @@ public sealed class TemplateEngine
     }
 
     /// <summary>
-    /// 组装内容渲染根上下文，注入 table / column? / package / tool 四个变量节点。
+    /// 组装内容渲染根上下文，注入 table / column? / package / tool 四个变量节点；
+    /// 传入 scopeContext 时附加注入 vars / module / tables 作用域变量。
     /// </summary>
-    private ScriptObject BuildRootContext(TableInfo table, ColumnInfo? column, TemplatePackageContext packageContext)
+    private ScriptObject BuildRootContext(TableInfo table, ColumnInfo? column, TemplatePackageContext packageContext, ScopeRenderInput? scopeContext = null)
     {
         var root = new ScriptObject();
         root.SetValue("table", BuildTableObject(table), true);
@@ -280,7 +400,121 @@ public sealed class TemplateEngine
             root.SetValue("column", BuildColumnObject(column), true);
         }
 
+        ApplyScopeContext(root, scopeContext);
         return root;
+    }
+
+    /// <summary>
+    /// 组装作用域（module / project）内容渲染根上下文：注入 package / tool 与 vars? / module? / tables?，
+    /// 不注入单表 table / column；tool 的数据库类型取全表汇总中首个非空值（同次生成通常同库）。
+    /// </summary>
+    /// <param name="packageContext">package 侧渲染上下文。</param>
+    /// <param name="scopeContext">作用域渲染输入。</param>
+    /// <returns>作用域渲染根上下文。</returns>
+    private ScriptObject BuildScopedRootContext(TemplatePackageContext packageContext, ScopeRenderInput scopeContext)
+    {
+        DataSourceType? databaseType = ResolveScopeDatabaseType(scopeContext);
+        var root = new ScriptObject();
+        root.SetValue("package", BuildPackageObject(packageContext), true);
+        root.SetValue("tool", ToolFunctions.Build(packageContext, _typeMappingService, databaseType), true);
+        ApplyScopeContext(root, scopeContext);
+        return root;
+    }
+
+    /// <summary>
+    /// 向渲染根上下文注入作用域变量：vars.*（键值经 Scriban 值转换）、module.*（name + 附加属性）、
+    /// tables（全表汇总，元素字段与 table.* 同构）；各集合仅在调用方提供时注入。
+    /// </summary>
+    /// <param name="root">渲染根上下文。</param>
+    /// <param name="scopeContext">作用域渲染输入，可为空（空时不注入任何作用域变量，行为与既有一致）。</param>
+    private static void ApplyScopeContext(
+        ScriptObject root,
+        ScopeRenderInput? scopeContext)
+    {
+        if (scopeContext is null)
+        {
+            return;
+        }
+
+        // 调用方变量集合注入 vars 子对象：键已在 ScopeRenderInput.Create 校验过保留命名空间冲突
+        if (scopeContext.Variables is not null)
+        {
+            root.SetValue("vars", BuildVarsObject(scopeContext.Variables), true);
+        }
+
+        // 当前模块注入 module 子对象：name 必含，其余附加属性原样注入
+        if (scopeContext.Module is not null)
+        {
+            root.SetValue("module", BuildModuleObject(scopeContext.Module), true);
+        }
+
+        // 全表汇总注入 tables 集合：元素字段与 table.* 同构，供 project/module 模板循环登记胶水代码
+        if (scopeContext.Tables is not null)
+        {
+            var tablesArray = new ScriptArray();
+            foreach (TableInfo table in scopeContext.Tables)
+            {
+                tablesArray.Add(BuildTableObject(table)!);
+            }
+
+            root.SetValue("tables", tablesArray, true);
+        }
+    }
+
+    /// <summary>
+    /// 将调用方变量集合构建为 vars 子对象，键值经 Scriban 值转换。
+    /// </summary>
+    /// <param name="variables">调用方注入变量集合（键已校验保留命名空间冲突）。</param>
+    /// <returns>vars 脚本对象。</returns>
+    private static ScriptObject BuildVarsObject(IReadOnlyDictionary<string, object?> variables)
+    {
+        var varsObject = new ScriptObject();
+        foreach (KeyValuePair<string, object?> pair in variables)
+        {
+            varsObject.SetValue(pair.Key, ScribanValueFactory.ToScribanValue(pair.Value), true);
+        }
+
+        return varsObject;
+    }
+
+    /// <summary>
+    /// 将模块上下文构建为 module 子对象：name 必含，其余附加属性原样注入。
+    /// </summary>
+    /// <param name="module">当前模块上下文。</param>
+    /// <returns>module 脚本对象。</returns>
+    private static ScriptObject BuildModuleObject(ModuleContext module)
+    {
+        var moduleObject = new ScriptObject();
+        moduleObject.SetValue("name", module.Name, true);
+        foreach (KeyValuePair<string, object?> pair in module.Properties)
+        {
+            moduleObject.SetValue(pair.Key, ScribanValueFactory.ToScribanValue(pair.Value), true);
+        }
+
+        return moduleObject;
+    }
+
+    /// <summary>
+    /// 解析作用域渲染的 tool 数据库类型：取全表汇总中首个非空值，全空时返回 null（仅命中通用映射条目）。
+    /// </summary>
+    /// <param name="scopeContext">作用域渲染输入。</param>
+    /// <returns>首个非空数据库类型；无可用值时为 null。</returns>
+    private static DataSourceType? ResolveScopeDatabaseType(ScopeRenderInput scopeContext)
+    {
+        if (scopeContext.Tables is null)
+        {
+            return null;
+        }
+
+        foreach (TableInfo table in scopeContext.Tables)
+        {
+            if (table.DatabaseType is not null)
+            {
+                return table.DatabaseType;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

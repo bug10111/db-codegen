@@ -21,6 +21,11 @@ public sealed class TemplateFileInfo
     public string OutputPath { get; set; } = string.Empty;
 
     /// <summary>
+    /// 模板作用域，manifest files[].scope 解析结果，缺省 table（既有包行为不变）。
+    /// </summary>
+    public TemplateScope Scope { get; set; } = TemplateScope.Table;
+
+    /// <summary>
     /// 是否默认勾选参与生成（勾选到层默认态）。
     /// </summary>
     public bool IsEnabled { get; set; }

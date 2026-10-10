@@ -31,8 +31,8 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 | | `rename_template_package` | 重命名用户模板包（勾选 / 展示顺序记忆不迁移，内置包只读拒绝） |
 | | `update_template_package_metadata` | 更新包说明与基础包名（只传要改的字段，未传字段保持不变） |
 | | `copy_template_package` | 复制模板包为新用户包（内置包可一键复制为可写用户包后修改） |
-| 渲染预览（2） | `render_template` | 以合成表上下文渲染单个模板，语法错误精确到行列 |
-| | `preview_generation` | 批量生成 dry-run 预览（零写盘）：表 × 模板的文件计划与未映射类型清单 |
+| 渲染预览（2） | `render_template` | 以合成表上下文渲染单个模板，语法错误精确到行列；支持可选 `variables` / `modules` 片段渲染（返回文本不落盘） |
+| | `preview_generation` | 批量生成 dry-run 预览（零写盘）：table / module / project 三作用域混跑的文件计划与未映射类型清单 |
 | 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run；建议先 `preview_generation` 确认） |
 | 数据源管理（4） | `add_datasource` | 新增数据源连接（密码 DPAPI 加密入库） |
 | | `update_datasource` | 按名更新连接（只传要改的字段） |
@@ -40,6 +40,8 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 | | `test_connection` | 测试连通性（10 秒超时）：传 `datasource` 按已保存连接测试，或传完整明文参数直测（不入库不留痕） |
 
 `generate` 全参数显式、不读写配置记忆：`package`（包名）与 `tables`（内联表结构，列元数据自带，建议先用 `get_table_detail` 取回）必填；`files` 省略时默认选择包内全部启用条目；`workspaceRoot` / `codeDirectory` 指定输出位置；`duplicateStrategy` 控制同名文件覆盖（`overwrite`）或跳过（`skip`）。
+
+`preview_generation` / `generate` 可选参数 `variables` 与 `modules`（两工具含义一致）：`variables` 为对象，逐键注入模板 `vars.*` 命名空间（如 `{"appName":"demo"}`，键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝）；`modules` 为数组（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此清单逐个渲染，元素 `name` 必填、其余字段原样注入 `module.*`，勾选 module 作用域模板但省略 `modules` 时结构化报错。模板作用域由包清单 `files[].scope` 声明：`table`（缺省，按表集逐表渲染，相对输出根）/ `module`（按 modules 清单逐个，相对输出根）/ `project`（整次渲染一次，相对 `workspaceRoot`），三种作用域同次调用可混跑；`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件。
 
 ### 构建发布
 

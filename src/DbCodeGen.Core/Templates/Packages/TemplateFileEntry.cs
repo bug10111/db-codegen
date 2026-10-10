@@ -16,6 +16,12 @@ public sealed class TemplateFileEntry
     public string Output { get; set; } = string.Empty;
 
     /// <summary>
+    /// 模板作用域声明：table（缺省，按表集逐表渲染）/ module（按模块清单逐个渲染）/ project（整次生成渲染一次）。
+    /// manifest 缺省不写即 table，既有包行为不变；非法取值在包加载校验阶段结构化拒绝。
+    /// </summary>
+    public string? Scope { get; set; }
+
+    /// <summary>
     /// 是否默认勾选参与生成（勾选到层默认态），缺省为 true。
     /// </summary>
     public bool Enabled { get; set; } = true;

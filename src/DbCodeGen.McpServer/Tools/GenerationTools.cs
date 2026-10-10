@@ -46,6 +46,8 @@ public sealed class GenerationTools
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板相对路径清单；省略时默认选择包内全部启用条目。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）。</param>
+    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；键与保留命名空间冲突时结构化拒绝。</param>
+    /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>写盘结果统计与生成日志。</returns>
     [McpServerTool(Name = "generate")]
@@ -58,13 +60,16 @@ public sealed class GenerationTools
         string? basePackageOverride = null,
         IReadOnlyList<string>? files = null,
         string duplicateStrategy = "overwrite",
+        IReadOnlyDictionary<string, object?>? variables = null,
+        IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             GenerationRequest request = await GenerationRequestFactory.CreateAsync(
                 _packageService, package, tables, files, workspaceRoot, codeDirectory,
-                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false, cancellationToken);
+                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false,
+                variables, modules, cancellationToken);
 
             // 零记忆态副作用：请求关闭生成后路径记忆回写，config.json 的最近工作区根/代码目录保持不变
             GenerationResult result = await _codeGenerator.GenerateAsync(request, progress: null, cancellationToken);

@@ -5,7 +5,9 @@
 
 ## 一、模板渲染上下文变量
 
-模板（Scriban）渲染时可用的顶层变量为 `table`（表元数据）、`column`（当前列，遍历列时可用）、`package`（包上下文）、`tool`（函数集）。字段名严格以下表为准，不得使用 `name` 等别名。
+模板（Scriban）渲染时可用的顶层变量为 `table`（表元数据）、`column`（当前列，遍历列时可用）、`package`（包上下文）、`tool`（函数集），以及作用域变量 `vars`（调用方变量）、`module`（当前模块，module 作用域可用）、`tables`（本次全表汇总，project/module 作用域与传入 variables 的调用可用）。字段名严格以下表为准，不得使用 `name` 等别名。
+
+**保留命名空间**：`table` / `column` / `package` / `tool` / `vars` / `module` / `tables` 七个名字为渲染上下文保留命名空间；调用方 variables 对象的键不得与保留命名空间同名（如 `{"table": ...}` 会被结构化拒绝并列出冲突键），防止调用方变量遮蔽根变量。
 
 ### 1.1 table 表元数据（TableInfo）
 
@@ -46,6 +48,38 @@
 | `{{ package.dir }}` | Dir | 输出目录占位，完整包名按点号全量转斜杠（如 com.example.common → com/example/common） |
 
 > 注意：`table.name`、`column.name` 不存在，一律用 `table.rawName` / `table.className` / `column.rawName` / `column.propertyName`。
+
+### 1.4 vars 调用方变量
+
+调用方经 `variables` 参数（MCP 工具入参对象）传入的变量，逐键注入 `vars.*` 命名空间。值支持字符串、数值、布尔、嵌套对象与数组（嵌套成员按字段访问）。
+
+| 变量表达式 | 说明 |
+|------|------|
+| `{{ vars.appName }}` | 调用方传入的 appName 变量值，键名由调用方自定义（不得与保留命名空间冲突） |
+| `{{ vars.group.name }}` | 嵌套对象的字段访问 |
+
+未传 `variables` 时上下文不注入 `vars`，模板引用 `vars.*` 按运行期结构化错误返回（success=false + 模板名行列定位，如 `Cannot get the member vars.appName for a null object.`）；同理 project 作用域模板误引 `module.*` 亦按运行期结构化错误返回——未注入即引用一律显式报错，不静默输出空值。模板作者应通过作用域声明与调用约定保证变量已传入。
+
+### 1.5 module 当前模块（module 作用域可用）
+
+module 作用域模板按调用方 `modules` 清单逐个渲染，每次渲染注入当前模块上下文。`name` 必含；清单元素中 name 之外的其余字段原样注入 `module.*` 供模板消费。
+
+| 变量表达式 | 说明 |
+|------|------|
+| `{{ module.name }}` | 当前模块名（如 account），来自 modules[] 元素的 name 字段（必填） |
+| `{{ module.<自定义字段> }}` | modules[] 元素中 name 之外的其余字段原样注入（如元素 `{"name":"account","desc":"账户"}` → `{{ module.desc }}`） |
+
+### 1.6 tables 本次全表汇总
+
+`tables` 为本次调用传入的全部表集合，元素字段与 `table.*` 完全同构（见 1.1）。project / module 作用域模板用它循环生成胶水文件内容（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作——胶水文件由模板整体渲染产出。
+
+```scriban
+{{ for t in tables }}
+    public DbSet<{{ t.className }}> {{ t.variableName }} { get; set; }
+{{ end }}
+```
+
+`render_template` 片段渲染时 `tables` 注入口径：传 `table` 时为单元素集合；省略 `table` 的片段渲染为空集合。
 
 ## 二、tool 函数集
 
@@ -108,6 +142,12 @@ end ~}}
       "template": "mapper.xml.scriban",
       "output": "../resources/mapper/{{table.className}}Dao.xml",
       "enabled": true
+    },
+    {
+      "template": "appDbContext.cs.scriban",
+      "output": "Data/AppDbContext.cs",
+      "scope": "project",
+      "enabled": true
     }
   ]
 }
@@ -120,8 +160,21 @@ end ~}}
 - `basePackage`：可空；可填完整包名（含模块段，如 com.example.common），非空时作为生成上下文注入 `package.basePackage`，`package.dir` 按点号全量转目录。
 - `typeMap`：可选；Dictionary\<string,string\>，键为数据库原始类型（大小写不敏感命中），值为目标语言类型。生成时**优先于全局映射表命中**（解析链首环），未声明时走全局映射表。
 - `files[].template`：模板文件相对包根路径，禁止绝对路径与 `..` 段（防目录穿越）；模板文件必须与落盘的 Scriban 文件一一对应。
-- `files[].output`：输出相对路径，支持 `{{变量}}` 占位（如 `{{package.dir}}/entity/{{table.className}}.java`）；禁止绝对路径与盘符前缀；允许 `..` 段越出代码根（如 `../resources/mapper/{{table.className}}Dao.xml`）落到 `src/main/resources` 等代码根外目录，但解析后必须落在工作区根内。
+- `files[].output`：输出相对路径，支持 `{{变量}}` 占位；禁止绝对路径与盘符前缀；允许 `..` 段（由解析端限定在工作区根内）。
+- `files[].scope`：可选；模板作用域声明，取值 `table`（缺省，按表集逐表渲染）/ `module`（按调用方 modules 清单逐个渲染）/ `project`（整次生成渲染一次）。缺省不写即 `table`，既有包行为不变；非法取值在包加载校验阶段结构化拒绝。
 - `files[].enabled`：是否默认勾选参与生成，缺省 true。
+
+### 作用域与输出路径基准
+
+| 作用域 | 展开方式 | 渲染上下文 | output 路径基准 |
+|------|------|------|------|
+| `table`（缺省） | 按勾选表集逐表渲染（表 × 模板笛卡尔积） | table / column? / package / tool + vars? / tables? | 相对输出根（工作区根 + 代码目录派生的相对输出根，现状管线） |
+| `module` | 按调用方 modules 清单逐个渲染 | module / package / tool + vars? / tables | 相对输出根（与 table 相同基准） |
+| `project` | 整次生成渲染一次 | package / tool + vars? / tables | **相对工作区根**（output 直接以工作区根为基准拼绝对路径） |
+
+- 路径占位按作用域取自对应上下文：table 作用域可用 `{{table.*}}` / `{{package.*}}` / `{{tool.*}}`；module 作用域可用 `{{module.*}}` / `{{vars.*}}` / `{{package.*}}` / `{{tool.*}}`；project 作用域可用 `{{vars.*}}` / `{{package.*}}` / `{{tool.*}}`。
+- 防目录穿越规则对三种作用域一致不放松：渲染后相对路径解析出的绝对路径必须位于工作区根内，越界即整单失败拒绝。
+- module 作用域被勾选但调用未传 `modules` 清单 → 结构化报错；`modules[]` 元素 `name` 必填且清单内不得重复，name 之外字段原样注入 `module.*`。
 
 ## 四、Scriban 用法示例
 
@@ -173,7 +226,7 @@ public class {{ table.className }} {
 ../resources/mapper/{{table.className}}Dao.xml
 ```
 
-输出相对路径以代码根（如 `src/main/java`）为基准；要落到 `src/main/resources` 等代码根外目录时用 `..` 越级（如 `../resources/mapper/...`），解析后必须仍位于工作区根内，禁止携带 `src/` 等绝对前缀。
+输出相对路径以代码根（如 `src/main/java`）为基准；要落到 `src/main/resources` 等代码根外目录时用 `..` 越级（如 `../resources/mapper/...`），解析后必须仍位于工作区根内，禁止携带 `src/` 等绝对前缀。本节以 table 作用域（缺省）为准；module / project 作用域的展开方式、上下文与路径基准见第三节「作用域与输出路径基准」表格。
 
 路径占位除 `{{package.dir}}`、`{{table.className}}`、`{{table.variableName}}` 外，同样可使用 `tool.*` 函数（如 `{{tool.firstLowerCase(table.className)}}`、`{{tool.hump3Underline(table.className)}}`），与内容渲染一致。
 

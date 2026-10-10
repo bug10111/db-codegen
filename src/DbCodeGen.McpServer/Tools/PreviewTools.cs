@@ -46,22 +46,28 @@ public sealed class PreviewTools
 
     /// <summary>
     /// 以合成表上下文渲染单个模板（无需数据库连接），返回渲染后全文或结构化语法错误（含行列定位）。
+    /// 传入 table 时按表上下文渲染（现状行为）；省略 table 时按作用域片段渲染——传 modules 取首元素为 module 上下文，
+    /// 未传 modules 按 project 型上下文（vars + 空 tables 汇总）；渲染返回文本不落盘。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致）。</param>
-    /// <param name="table">合成表上下文：原始表名必填，列集合可选。</param>
-    /// <param name="column">可选的当前列上下文，供模板内 column 变量消费（列级模板用）。</param>
+    /// <param name="table">合成表上下文：原始表名必填，列集合可选；module/project 型片段渲染可省略。</param>
+    /// <param name="column">可选的当前列上下文，供模板内 column 变量消费（列级模板用）；仅在传入 table 时可用。</param>
     /// <param name="basePackageOverride">本次渲染的基础包名覆盖值；为空时使用模板包 manifest 基础包名。</param>
+    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*；键与保留命名空间冲突时结构化拒绝。</param>
+    /// <param name="modules">可选的模块清单（如 [{"name":"account"}]）；片段渲染单次仅支持一个模块上下文，取首元素（name 必填，其余字段原样注入 module.*）；与 table 互斥。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>渲染结果全文（PreviewResult 全量字段）。</returns>
     [McpServerTool(Name = "render_template", ReadOnly = true, Idempotent = true)]
-    [Description("以合成表上下文渲染单个模板（无需数据库连接）：返回渲染后全文；模板语法错误时返回 errorMessage 与 errorLine/errorColumn 行列定位。")]
+    [Description("以合成表上下文渲染单个模板（无需数据库连接）：返回渲染后全文；模板语法错误时返回 errorMessage 与 errorLine/errorColumn 行列定位。支持可选 variables（注入 vars.*）与 modules（module 作用域片段渲染，返回文本不落盘）。")]
     public async Task<object> RenderTemplateAsync(
         string package,
         string path,
-        SyntheticTableInput table,
+        SyntheticTableInput? table = null,
         SyntheticColumnInput? column = null,
         string? basePackageOverride = null,
+        IReadOnlyDictionary<string, object?>? variables = null,
+        IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -76,7 +82,21 @@ public sealed class PreviewTools
                 throw new ArgumentException("模板路径（path）不能为空。");
             }
 
-            ArgumentNullException.ThrowIfNull(table);
+            // 片段渲染入参组合校验：table 与 modules 互斥；column 依赖 table
+            if (table is not null && modules is not null && modules.Count > 0)
+            {
+                throw new ArgumentException("render_template 的 table 与 modules 互斥：表上下文渲染传 table，module 作用域片段渲染传 modules，二者不可同时提供。");
+            }
+
+            if (table is null && column is not null)
+            {
+                throw new ArgumentException("column（当前列上下文）依赖 table 提供；module/project 型片段渲染不支持 column。");
+            }
+
+            if (modules is not null && modules.Count > 1)
+            {
+                throw new ArgumentException("render_template 单次仅支持一个模块上下文：modules 清单最多一个元素；多模块请逐次调用。");
+            }
 
             TemplatePackageInfo packageInfo = await _packageService.LoadPackageAsync(package.Trim(), cancellationToken);
 
@@ -89,12 +109,36 @@ public sealed class PreviewTools
 
             // 复用桌面端同款读取通道（防目录穿越 + UTF-8 去 BOM），随后与实时预览共用同一渲染管线
             string templateText = await _templateFileWriter.ReadAsync(packageInfo, entry.RelativeTemplatePath, cancellationToken);
-            var tableInfo = SyntheticTableMapper.ToTableInfo(table);
-            ColumnInfo? columnInfo = column is null ? null : SyntheticTableMapper.ToColumnInfo(column);
             TemplatePackageContext packageContext = TemplatePackageContext.From(packageInfo, basePackageOverride);
 
-            PreviewResult renderResult = _templateEngine.Render(
-                templateText, tableInfo, columnInfo, packageContext, cancellationToken, templateName: entry.RelativeTemplatePath);
+            // 变量与模块解析：键空白/模块缺 name 在此结构化拒绝；保留命名空间冲突由 Core 作用域输入校验
+            IReadOnlyDictionary<string, object?>? parsedVariables = GenerationRequestFactory.ParseVariables(variables);
+            IReadOnlyList<ModuleContext>? parsedModules = GenerationRequestFactory.ParseModules(modules);
+
+            PreviewResult renderResult;
+            if (table is not null)
+            {
+                // 表上下文渲染（现状行为），附带注入可选 vars / tables 汇总
+                var tableInfo = SyntheticTableMapper.ToTableInfo(table);
+                ColumnInfo? columnInfo = column is null ? null : SyntheticTableMapper.ToColumnInfo(column);
+                ScopeRenderInput? scopeInput = parsedVariables is null
+                    ? null
+                    : ScopeRenderInput.Create(parsedVariables, null, new[] { tableInfo });
+
+                renderResult = _templateEngine.Render(
+                    templateText, tableInfo, columnInfo, packageContext, cancellationToken, templateName: entry.RelativeTemplatePath, scopeInput);
+            }
+            else
+            {
+                // 作用域片段渲染（module / project 型）：返回文本不落盘；tables 汇总按无表空清单注入
+                ScopeRenderInput scopeInput = ScopeRenderInput.Create(
+                    parsedVariables,
+                    parsedModules is null ? null : parsedModules[0],
+                    Array.Empty<TableInfo>());
+
+                renderResult = _templateEngine.RenderScoped(
+                    templateText, packageContext, scopeInput, cancellationToken, templateName: entry.RelativeTemplatePath);
+            }
 
             _logger.LogInformation(
                 "render_template 完成，包 {PackageName}，路径 {TemplatePath}，成功 {IsSuccess}，耗时 {RenderDurationMs}ms。",
@@ -107,6 +151,12 @@ public sealed class PreviewTools
                 renderResult.ErrorColumn,
                 renderResult.RenderDurationMs);
         }
+        catch (GenerationException exception)
+        {
+            // 变量命名空间冲突等生成域结构化业务错误按参数错误返回，供调用方修正入参后重试
+            _logger.LogError(exception, "render_template 生成域失败，包名 {PackageName}，路径 {TemplatePath}。", package, path);
+            return new ToolErrorResult(ToolErrorResult.ErrorMarker, "InvalidArgument", exception.Message);
+        }
         catch (Exception exception)
         {
             _logger.LogError(exception, "render_template 执行失败，包名 {PackageName}，路径 {TemplatePath}。", package, path);
@@ -115,7 +165,8 @@ public sealed class PreviewTools
     }
 
     /// <summary>
-    /// 构建批量生成 dry-run 文件计划（表 × 模板笛卡尔积渲染后按目标状态分类为 new/overwrite/skip），全程零写盘。
+    /// 构建批量生成 dry-run 文件计划（table 作用域按表×模板笛卡尔积、module 作用域按模块清单逐个、project 作用域整次一次，
+    /// 三种作用域可混跑；渲染后按目标状态分类为 new/overwrite/skip），全程零写盘。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="tables">合成表集合，至少一张表。</param>
@@ -124,10 +175,12 @@ public sealed class PreviewTools
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板相对路径清单；省略时默认选择包内全部启用条目。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite / skip，影响 overwrite/skip 分类。</param>
+    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；键与保留命名空间冲突时结构化拒绝。</param>
+    /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>文件计划条目与分类计数、未映射类型清单。</returns>
     [McpServerTool(Name = "preview_generation", ReadOnly = true, Idempotent = true)]
-    [Description("批量生成 dry-run 预览（零写盘）：返回表×模板笛卡尔积的文件计划（new/overwrite/skip 分类与目标路径）及未映射类型清单，确认后再调 generate。")]
+    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）及未映射类型清单，确认后再调 generate。")]
     public async Task<object> PreviewGenerationAsync(
         string package,
         IReadOnlyList<SyntheticTableInput> tables,
@@ -136,13 +189,16 @@ public sealed class PreviewTools
         string? basePackageOverride = null,
         IReadOnlyList<string>? files = null,
         string duplicateStrategy = "overwrite",
+        IReadOnlyDictionary<string, object?>? variables = null,
+        IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             GenerationRequest request = await GenerationRequestFactory.CreateAsync(
                 _packageService, package, tables, files, workspaceRoot, codeDirectory,
-                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false, cancellationToken);
+                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false,
+                variables, modules, cancellationToken);
 
             // dry-run 只计算文件计划，不产生任何写盘动作
             GenerationPreview preview = await _codeGenerator.BuildPreviewAsync(request, progress: null, cancellationToken);

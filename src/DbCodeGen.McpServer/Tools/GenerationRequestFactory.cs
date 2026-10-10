@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates.Packages;
@@ -25,9 +26,11 @@ internal static class GenerationRequestFactory
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略文本：overwrite / skip。</param>
     /// <param name="persistLastUsedPaths">生成成功后是否回写最近生成路径记忆；MCP 调用方应传 false。</param>
+    /// <param name="variables">调用方注入变量对象，逐键注入渲染上下文 vars.* 命名空间；可省略。</param>
+    /// <param name="modules">模块清单（如 [{"name":"account"}]），module 作用域模板按此逐个渲染；可省略。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>可直接提交 Core 生成服务的请求。</returns>
-    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法或文件清单含包内不存在的路径时抛出。</exception>
+    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径或 variables/modules 元素结构非法时抛出。</exception>
     public static async Task<GenerationRequest> CreateAsync(
         ITemplatePackageService packageService,
         string package,
@@ -38,6 +41,8 @@ internal static class GenerationRequestFactory
         string? basePackageOverride,
         string duplicateStrategy,
         bool persistLastUsedPaths,
+        IReadOnlyDictionary<string, object?>? variables,
+        IReadOnlyList<Dictionary<string, object?>>? modules,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(packageService);
@@ -65,6 +70,10 @@ internal static class GenerationRequestFactory
         // 同名文件策略先解析，非法取值直接结构化拒绝并列出合法值
         DuplicateFileStrategy strategy = ParseDuplicateStrategy(duplicateStrategy);
 
+        // 变量与模块清单解析：键空白、模块缺 name、模块名重复在此结构化拒绝（保留命名空间冲突由 Core 作用域输入校验）
+        IReadOnlyDictionary<string, object?>? parsedVariables = ParseVariables(variables);
+        IReadOnlyList<ModuleContext>? parsedModules = ParseModules(modules);
+
         TemplatePackageInfo packageInfo = await packageService.LoadPackageAsync(package.Trim(), cancellationToken);
         IReadOnlyList<TemplateFileSelection> selections = BuildSelections(packageInfo, files);
 
@@ -91,7 +100,96 @@ internal static class GenerationRequestFactory
             dataSource: null,
             codeDirectory.Trim(),
             strategy,
-            persistLastUsedPaths);
+            persistLastUsedPaths,
+            parsedVariables,
+            parsedModules);
+    }
+
+    /// <summary>
+    /// 解析调用方变量对象：拒绝空白键，逐键保留原始值（值经 Core 渲染侧 Scriban 值转换后供模板消费）。
+    /// </summary>
+    /// <param name="variables">调用方传入的变量对象，可空。</param>
+    /// <returns>归一化后的变量字典；入参为空或空对象时返回 null。</returns>
+    /// <exception cref="ArgumentException">变量对象含空白键时抛出。</exception>
+    internal static IReadOnlyDictionary<string, object?>? ParseVariables(IReadOnlyDictionary<string, object?>? variables)
+    {
+        if (variables is null || variables.Count == 0)
+        {
+            return null;
+        }
+
+        var parsed = new Dictionary<string, object?>(variables.Count);
+        foreach (KeyValuePair<string, object?> pair in variables)
+        {
+            if (string.IsNullOrWhiteSpace(pair.Key))
+            {
+                throw new ArgumentException("变量对象（variables）含空白键。");
+            }
+
+            parsed[pair.Key.Trim()] = pair.Value;
+        }
+
+        return parsed;
+    }
+
+    /// <summary>
+    /// 解析模块清单：每个元素 name 必填且非空字符串、模块名不得重复；name 之外的键值原样注入 module.*。
+    /// </summary>
+    /// <param name="modules">调用方传入的模块清单，可空。</param>
+    /// <returns>模块上下文清单；入参为空或空清单时返回 null。</returns>
+    /// <exception cref="ArgumentException">清单含空元素、元素缺 name、name 非字符串或模块名重复时抛出。</exception>
+    internal static IReadOnlyList<ModuleContext>? ParseModules(IReadOnlyList<Dictionary<string, object?>>? modules)
+    {
+        if (modules is null || modules.Count == 0)
+        {
+            return null;
+        }
+
+        List<ModuleContext> parsed = new(modules.Count);
+        HashSet<string> seenNames = new(StringComparer.Ordinal);
+        foreach (Dictionary<string, object?>? element in modules)
+        {
+            if (element is null)
+            {
+                throw new ArgumentException("模块清单（modules）含空元素。");
+            }
+
+            // MCP 绑定下 object 值落地为 JsonElement：name 兼容 string 与 JSON 字符串元素两种形态
+            if (!element.TryGetValue("name", out object? nameValue))
+            {
+                throw new ArgumentException("模块清单（modules）每个元素必须包含非空字符串 name 字段（如 {\"name\":\"account\"}）。");
+            }
+
+            string? name = nameValue switch
+            {
+                string text => text,
+                JsonElement { ValueKind: JsonValueKind.String } jsonName => jsonName.GetString(),
+                _ => null
+            };
+
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                throw new ArgumentException("模块清单（modules）每个元素必须包含非空字符串 name 字段（如 {\"name\":\"account\"}）。");
+            }
+
+            if (!seenNames.Add(name.Trim()))
+            {
+                throw new ArgumentException($"模块清单（modules）存在重复模块名：{name.Trim()}。");
+            }
+
+            var properties = new Dictionary<string, object?>();
+            foreach (KeyValuePair<string, object?> pair in element)
+            {
+                if (pair.Key != "name")
+                {
+                    properties[pair.Key] = pair.Value;
+                }
+            }
+
+            parsed.Add(new ModuleContext(name, properties));
+        }
+
+        return parsed;
     }
 
     /// <summary>
@@ -132,7 +230,7 @@ internal static class GenerationRequestFactory
             List<TemplateFileSelection> defaultSelections = new(enabledFiles.Count);
             foreach (TemplateFileInfo file in enabledFiles)
             {
-                defaultSelections.Add(new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, isSelected: true));
+                defaultSelections.Add(new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, isSelected: true, file.Scope));
             }
 
             if (defaultSelections.Count == 0)
@@ -161,7 +259,7 @@ internal static class GenerationRequestFactory
                     $"模板文件不存在：包 {packageInfo.Name} 中未声明模板路径 {normalized}；请用 list_templates 查看包内全部路径。");
             }
 
-            selections.Add(new TemplateFileSelection(entry.RelativeTemplatePath, entry.OutputPath, isSelected: true));
+            selections.Add(new TemplateFileSelection(entry.RelativeTemplatePath, entry.OutputPath, isSelected: true, entry.Scope));
         }
 
         return selections;

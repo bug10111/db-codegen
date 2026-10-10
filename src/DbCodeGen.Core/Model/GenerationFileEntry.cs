@@ -59,7 +59,7 @@ public sealed class GenerationFileEntry
     }
 
     /// <summary>
-    /// 来源表名，渲染上下文归属。
+    /// 来源上下文名，渲染归属标识：table 作用域条目为表名；module 作用域条目为模块名；project 作用域条目为空串。
     /// </summary>
     public string TableName { get; }
 

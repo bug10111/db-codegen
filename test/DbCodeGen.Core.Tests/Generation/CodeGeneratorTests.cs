@@ -538,6 +538,213 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
+    /// 三作用域混跑应产出正确文件计划：table 组按表展开、module 组按模块清单展开、project 组单文件，
+    /// 同次调用全部产出且条目归属正确。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_MixedScopes_ProducesAllScopeEntries()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateScopedPackageAsync();
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = package.Files.Select(file => new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, true, file.Scope)).ToList();
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        var modules = new[] { new ModuleContext("account"), new ModuleContext("billing") };
+        request = WithModules(request, variables: new Dictionary<string, object?> { ["appName"] = "demo" }, modules: modules);
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(request, null, CancellationToken.None);
+
+        // table 组：1 表 × 1 模板；module 组：2 模块 × 1 模板；project 组：1 模板
+        Assert.Equal(4, preview.Entries.Count);
+        Assert.Equal(4, preview.NewCount);
+
+        GenerationFileEntry tableEntry = Assert.Single(preview.Entries, entry => entry.RelativePath == "out/sysUser.java");
+        Assert.Equal("sys_user", tableEntry.TableName);
+
+        List<GenerationFileEntry> moduleEntries = preview.Entries.Where(entry => entry.RelativePath.Contains("Modules/") && entry.RelativePath.EndsWith("Info.cs", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, moduleEntries.Count);
+        Assert.Contains(moduleEntries, entry => entry.TableName == "account" && entry.RelativePath == "gen/Modules/account/Info.cs");
+        Assert.Contains(moduleEntries, entry => entry.TableName == "billing" && entry.RelativePath == "gen/Modules/billing/Info.cs");
+
+        GenerationFileEntry projectEntry = Assert.Single(preview.Entries, entry => entry.RelativePath == "AppDbContext.cs");
+        Assert.Equal(string.Empty, projectEntry.TableName);
+        Assert.Equal(Path.Combine(workspaceRoot, "AppDbContext.cs"), projectEntry.AbsolutePath);
+    }
+
+    /// <summary>
+    /// 三作用域混跑 generate 应按路径基准写盘：table/module 落输出根下，project 落工作区根下，
+    /// module 模板的 vars 与 tables 循环渲染进文件内容。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_MixedScopes_WritesFilesByPathBaseline()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateScopedPackageAsync();
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = package.Files.Select(file => new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, true, file.Scope)).ToList();
+        (CodeGenerator generator, _) = CreateGenerator();
+        var request = WithModules(
+            CreateRequest(package, workspaceRoot, "gen", files),
+            variables: new Dictionary<string, object?> { ["appName"] = "demo" },
+            modules: new[] { new ModuleContext("account") });
+
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        Assert.Equal(0, result.Failed);
+        Assert.False(result.IsCancelled);
+        // table 组 1 + module 组 1 + project 组 1
+        Assert.Equal(3, result.Generated);
+
+        // table/module 相对输出根；project 相对工作区根
+        Assert.True(File.Exists(Path.Combine(outputRoot, "out", "sysUser.java")));
+        Assert.True(File.Exists(Path.Combine(outputRoot, "gen", "Modules", "account", "Info.cs")));
+        Assert.True(File.Exists(Path.Combine(workspaceRoot, "AppDbContext.cs")));
+
+        // project 模板的 vars 注入与 tables 循环（2 张表：默认 sys_user + module 场景同一表集合）渲染核对
+        string contextContent = File.ReadAllText(Path.Combine(workspaceRoot, "AppDbContext.cs"));
+        Assert.Contains("app=demo", contextContent);
+        Assert.Contains("DbSet<SysUser>", contextContent);
+
+        // module 模板的 module.* 与 vars.* 渲染核对
+        string moduleContent = File.ReadAllText(Path.Combine(outputRoot, "gen", "Modules", "account", "Info.cs"));
+        Assert.Contains("module=account app=demo", moduleContent);
+    }
+
+    /// <summary>
+    /// module 模板应可循环 tables 全表汇总（元素字段与 table.* 同构），多表时逐表展开。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_TablesLoopInModuleTemplate_RendersPerTable()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("module-glue.cs.scriban", "Modules/{{module.name}}/Glue.cs", "{{ for t in tables }}entity:{{ t.variableName }};{{ end }}\n")
+        }, moduleScope: true);
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("module-glue.cs.scriban", "Modules/{{module.name}}/Glue.cs", true, TemplateScope.Module) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        var tableA = CreateTable();
+        var tableB = new TableInfo
+        {
+            RawName = "sys_order",
+            ClassName = TableInfo.ToPascalCase("sys_order"),
+            VariableName = TableInfo.ToCamelCase("sys_order")
+        };
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        request = WithTablesAndModules(request, new[] { tableA, tableB }, modules: new[] { new ModuleContext("account") });
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(request, null, CancellationToken.None);
+
+        GenerationFileEntry entry = Assert.Single(preview.Entries);
+        Assert.Equal("account", entry.TableName);
+        Assert.Contains("entity:sysUser;entity:sysOrder;", entry.Content);
+    }
+
+    /// <summary>
+    /// 勾选 module 作用域模板但未传 modules 清单时应结构化报错并整单失败。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ModuleScopeWithoutModules_Throws()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("module-info.cs.scriban", "Modules/{{module.name}}/Info.cs", "module {{module.name}}\n")
+        }, moduleScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("module-info.cs.scriban", "Modules/{{module.name}}/Info.cs", true, TemplateScope.Module) };
+        (CodeGenerator generator, _) = CreateGenerator();
+
+        GenerationException exception = await Assert.ThrowsAsync<GenerationException>(
+            () => generator.BuildPreviewAsync(CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None));
+
+        Assert.Contains("modules", exception.Message);
+    }
+
+    /// <summary>
+    /// modules 清单存在重复模块名时应结构化拒绝。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_DuplicateModuleNames_Throws()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("module-info.cs.scriban", "Modules/{{module.name}}/Info.cs", "module {{module.name}}\n")
+        }, moduleScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("module-info.cs.scriban", "Modules/{{module.name}}/Info.cs", true, TemplateScope.Module) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        request = WithModules(request, variables: null, modules: new[] { new ModuleContext("account"), new ModuleContext("account") });
+
+        GenerationException exception = await Assert.ThrowsAsync<GenerationException>(
+            () => generator.BuildPreviewAsync(request, null, CancellationToken.None));
+
+        Assert.Contains("重复模块名", exception.Message);
+    }
+
+    /// <summary>
+    /// variables 键与保留命名空间冲突时生成编排应结构化拒绝。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_VariablesConflictReservedNamespace_Throws()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        request = WithModules(request, variables: new Dictionary<string, object?> { ["table"] = "bad" }, modules: null);
+
+        GenerationException exception = await Assert.ThrowsAsync<GenerationException>(
+            () => generator.BuildPreviewAsync(request, null, CancellationToken.None));
+
+        Assert.Contains("table", exception.Message);
+    }
+
+    /// <summary>
+    /// project 作用域输出路径相对工作区根解析（B 路径基准），渲染后路径允许子目录层级。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ProjectScopeOutputRelativeWorkspaceRoot_ResolvesBaseline()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("app-context.cs.scriban", "src/Data/AppDbContext.cs", "context {{vars.appName}}\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("app-context.cs.scriban", "src/Data/AppDbContext.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        request = WithModules(request, variables: new Dictionary<string, object?> { ["appName"] = "demo" }, modules: null);
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(request, null, CancellationToken.None);
+
+        GenerationFileEntry entry = Assert.Single(preview.Entries);
+        // project 条目相对工作区根（不拼相对输出根 gen）
+        Assert.Equal(Path.Combine(workspaceRoot, "src", "Data", "AppDbContext.cs"), entry.AbsolutePath);
+        Assert.Contains("context demo", entry.Content);
+    }
+
+    /// <summary>
+    /// project 作用域渲染后路径越出工作区根应拒绝（防目录穿越不放松）。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ProjectScopePathEscapesWorkspace_Throws()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("evil.cs.scriban", "../../evil.cs", "evil\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("evil.cs.scriban", "../../evil.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = CreateRequest(package, workspaceRoot, "gen", files);
+        request = WithModules(request, variables: null, modules: null);
+
+        await Assert.ThrowsAsync<GenerationException>(
+            () => generator.BuildPreviewAsync(request, null, CancellationToken.None));
+    }
+
+    /// <summary>
     /// 构造生成服务与配置服务测试替身。
     /// </summary>
     /// <returns>生成服务与可断言的配置服务。</returns>
@@ -570,9 +777,13 @@ public sealed class CodeGeneratorTests : IDisposable
     /// 在临时目录下按指定文件清单创建测试模板包并加载。
     /// </summary>
     /// <param name="files">模板相对路径、输出路径模板与模板内容三元组清单。</param>
+    /// <param name="moduleScope">清单内全部文件声明为 module 作用域。</param>
+    /// <param name="projectScope">清单内全部文件声明为 project 作用域（与 moduleScope 互斥使用）。</param>
     /// <returns>加载后的模板包信息与临时根目录。</returns>
     private async Task<(TemplatePackageInfo Package, string TempRoot)> CreateTempPackageAsync(
-        IReadOnlyList<(string Template, string Output, string Content)> files)
+        IReadOnlyList<(string Template, string Output, string Content)> files,
+        bool moduleScope = false,
+        bool projectScope = false)
     {
         string tempRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"));
         _tempRoots.Add(tempRoot);
@@ -590,6 +801,7 @@ public sealed class CodeGeneratorTests : IDisposable
             {
                 Template = file.Template,
                 Output = file.Output,
+                Scope = moduleScope ? "module" : projectScope ? "project" : null,
                 Enabled = true
             }).ToList()
         };
@@ -603,6 +815,95 @@ public sealed class CodeGeneratorTests : IDisposable
 
         TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, isBuiltin: false, CancellationToken.None);
         return (package, tempRoot);
+    }
+
+    /// <summary>
+    /// 创建三作用域混跑测试包：table 模板 1 个、module 模板 1 个、project 模板 1 个，
+    /// 输出路径覆盖 table（相对输出根）、module（相对输出根含 module.name）、project（相对工作区根）三种基准。
+    /// </summary>
+    /// <returns>加载后的模板包信息与临时根目录。</returns>
+    private async Task<(TemplatePackageInfo Package, string TempRoot)> CreateScopedPackageAsync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"));
+        _tempRoots.Add(tempRoot);
+        string packageDir = Path.Combine(tempRoot, "user-pkg");
+        Directory.CreateDirectory(packageDir);
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "entity.java.scriban"), "public class {{table.className}} {}\n");
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "module-info.cs.scriban"), "module={{module.name}} app={{vars.appName}}\n");
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "app-context.cs.scriban"), "app={{vars.appName}}\n{{ for t in tables }}DbSet<{{ t.className }}>{{ end }}\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName),
+            """
+            {
+              "name": "user-pkg",
+              "description": "scoped test package",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "typeMap": { "bigint": "Long" },
+              "files": [
+                { "template": "entity.java.scriban", "output": "out/{{table.variableName}}.java" },
+                { "template": "module-info.cs.scriban", "output": "gen/Modules/{{module.name}}/Info.cs", "scope": "module" },
+                { "template": "app-context.cs.scriban", "output": "AppDbContext.cs", "scope": "project" }
+              ]
+            }
+            """);
+
+        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, isBuiltin: false, CancellationToken.None);
+        return (package, tempRoot);
+    }
+
+    /// <summary>
+    /// 以变量与模块清单重建生成请求（请求模型不可变，按原字段拷贝重建）。
+    /// </summary>
+    /// <param name="request">原始生成请求。</param>
+    /// <param name="variables">调用方变量集合，可为空。</param>
+    /// <param name="modules">模块清单，可为空。</param>
+    /// <returns>携带变量与模块清单的新请求。</returns>
+    private static GenerationRequest WithModules(
+        GenerationRequest request,
+        IReadOnlyDictionary<string, object?>? variables,
+        IReadOnlyList<ModuleContext>? modules)
+    {
+        return new GenerationRequest(
+            request.Package,
+            request.Tables,
+            request.SelectedFiles,
+            request.WorkspaceRoot,
+            request.RelativeOutputRoot,
+            request.BasePackageOverride,
+            request.DataSource,
+            request.CodeDirectory,
+            request.DuplicateFileStrategy,
+            request.PersistLastUsedPaths,
+            variables,
+            modules);
+    }
+
+    /// <summary>
+    /// 以表集合与模块清单重建生成请求，供多表循环渲染测试使用。
+    /// </summary>
+    /// <param name="request">原始生成请求。</param>
+    /// <param name="tables">替换后的表集合。</param>
+    /// <param name="modules">模块清单。</param>
+    /// <returns>携带新表集合与模块清单的新请求。</returns>
+    private static GenerationRequest WithTablesAndModules(
+        GenerationRequest request,
+        IReadOnlyList<TableInfo> tables,
+        IReadOnlyList<ModuleContext>? modules)
+    {
+        return new GenerationRequest(
+            request.Package,
+            tables,
+            request.SelectedFiles,
+            request.WorkspaceRoot,
+            request.RelativeOutputRoot,
+            request.BasePackageOverride,
+            request.DataSource,
+            request.CodeDirectory,
+            request.DuplicateFileStrategy,
+            request.PersistLastUsedPaths,
+            request.Variables,
+            modules);
     }
 
     /// <summary>

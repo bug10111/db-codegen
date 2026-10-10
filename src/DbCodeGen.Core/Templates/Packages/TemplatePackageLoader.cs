@@ -97,11 +97,15 @@ public static class TemplatePackageLoader
                 throw new TemplatePackageException($"模板文件 {templateRelative} 的输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{entry.Output}");
             }
 
+            // 作用域解析与校验：非法取值在包加载阶段结构化拒绝，缺省按 table（既有包行为不变）
+            TemplateScope scope = TemplateScopeParser.Parse(entry.Scope, templateRelative);
+
             files.Add(new TemplateFileInfo
             {
                 RelativeTemplatePath = templateRelative,
                 TemplatePath = templateFullPath,
                 OutputPath = entry.Output,
+                Scope = scope,
                 IsEnabled = entry.Enabled
             });
         }
@@ -353,6 +357,7 @@ public static class TemplatePackageLoader
 
             entry.Template = (entry.Template ?? string.Empty).Trim();
             entry.Output = (entry.Output ?? string.Empty).Trim();
+            entry.Scope = string.IsNullOrWhiteSpace(entry.Scope) ? null : entry.Scope.Trim();
         }
 
         return manifest;

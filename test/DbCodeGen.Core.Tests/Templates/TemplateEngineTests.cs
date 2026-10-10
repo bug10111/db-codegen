@@ -1,4 +1,5 @@
 using DbCodeGen.Core.Config;
+using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
@@ -698,6 +699,119 @@ public sealed class TemplateEngineTests
     private static TemplateRenderContext CreatePathContext()
     {
         return new TemplateRenderContext(CreateTable(), CreatePackageContext());
+    }
+
+    /// <summary>
+    /// Render 传入作用域输入时应注入 vars 变量，模板按 {{vars.*}} 取值。
+    /// </summary>
+    [Fact]
+    public void Render_WithScopeVariables_InjectsVarsNamespace()
+    {
+        var scope = ScopeRenderInput.Create(new Dictionary<string, object?> { ["appName"] = "demo" });
+
+        PreviewResult result = _engine.Render("app={{ vars.appName }} class={{ table.className }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None, scopeContext: scope);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("app=demo class=SysUser", result.Output);
+    }
+
+    /// <summary>
+    /// Render 未传作用域输入时输出与既有行为一致（vars 未注入）。
+    /// </summary>
+    [Fact]
+    public void Render_WithoutScope_BehaviorUnchanged()
+    {
+        PreviewResult result = _engine.Render("class={{ table.className }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("class=SysUser", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped 应注入 module 上下文（name 与附加属性）与 vars，无 table 上下文。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ModuleContext_InjectsNameAndProperties()
+    {
+        var module = new ModuleContext("account", new Dictionary<string, object?> { ["label"] = "Account" });
+        var scope = ScopeRenderInput.Create(new Dictionary<string, object?> { ["appName"] = "demo" }, module);
+
+        PreviewResult result = _engine.RenderScoped(
+            "module={{ module.name }} label={{ module.label }} app={{ vars.appName }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("module=account label=Account app=demo", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped 应注入 tables 全表汇总，模板可循环并访问与 table.* 同构的字段。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_TablesLoop_IteratesAllTables()
+    {
+        var secondTable = new TableInfo
+        {
+            RawName = "sys_order",
+            ClassName = TableInfo.ToPascalCase("sys_order"),
+            VariableName = TableInfo.ToCamelCase("sys_order")
+        };
+        var scope = ScopeRenderInput.Create(null, null, new[] { CreateTable(), secondTable });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ for t in tables }}{{ t.className }};{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("SysUser;SysOrder;", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped project 型输入（无 module）下模板误引用 module.* 应渲染失败并结构化定位（undefined member 拒绝）。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScope_ModuleReferenceFails()
+    {
+        var scope = ScopeRenderInput.Create(new Dictionary<string, object?> { ["appName"] = "demo" });
+
+        PreviewResult result = _engine.RenderScoped(
+            "app={{ vars.appName }} module={{ module.name }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("module.name", result.ErrorMessage);
+    }
+
+    /// <summary>
+    /// RenderScoped 语法错误应结构化返回行列定位，与表作用域渲染口径一致。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_SyntaxError_ReturnsStructuredError()
+    {
+        var scope = ScopeRenderInput.Create(null, new ModuleContext("account"));
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None, templateName: "app-context.cs.scriban");
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("app-context.cs.scriban", result.ErrorMessage);
+        Assert.NotNull(result.ErrorLine);
+    }
+
+    /// <summary>
+    /// RenderScopedPathTemplate 应解析 module.* 与 vars.* 路径占位。
+    /// </summary>
+    [Fact]
+    public void RenderScopedPathTemplate_ModuleAndVars_PlaceholdersResolved()
+    {
+        var scope = ScopeRenderInput.Create(
+            new Dictionary<string, object?> { ["dataRoot"] = "Data" },
+            new ModuleContext("account"));
+
+        string rendered = _engine.RenderScopedPathTemplate("{{ vars.dataRoot }}/Modules/{{ module.name }}/Info.cs", CreatePackageContext(), scope);
+
+        Assert.Equal("Data/Modules/account/Info.cs", rendered);
     }
 
     /// <summary>

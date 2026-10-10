@@ -1,3 +1,4 @@
+using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Templates.Packages;
 
 namespace DbCodeGen.Core.Model;
@@ -21,6 +22,8 @@ public sealed class GenerationRequest
     /// <param name="codeDirectory">本次生成的代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common），生成完成后写回为最近记忆；可为空。</param>
     /// <param name="duplicateFileStrategy">同名目标文件处理策略，默认覆盖；dry-run 分类与写盘按此策略执行。</param>
     /// <param name="persistLastUsedPaths">生成成功后是否回写最近生成路径记忆（工作区根与代码目录写回配置并落盘），默认 true 保持桌面端既有行为；MCP 等无记忆态调用方显式置 false 实现零配置副作用。</param>
+    /// <param name="variables">本次生成的调用方变量集合，逐键注入渲染上下文 vars.* 命名空间；可为空，键与保留命名空间冲突在作用域输入构造时结构化拒绝。</param>
+    /// <param name="modules">本次生成的模块清单，module 作用域模板按此清单逐个渲染；可为空，勾选 module 作用域模板但未提供时结构化报错。</param>
     /// <exception cref="ArgumentNullException">package、tables 或 selectedFiles 为 null 时抛出。</exception>
     public GenerationRequest(
         TemplatePackageInfo package,
@@ -32,7 +35,9 @@ public sealed class GenerationRequest
         DataSourceConfig? dataSource = null,
         string? codeDirectory = null,
         DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite,
-        bool persistLastUsedPaths = true)
+        bool persistLastUsedPaths = true,
+        IReadOnlyDictionary<string, object?>? variables = null,
+        IReadOnlyList<ModuleContext>? modules = null)
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentNullException.ThrowIfNull(tables);
@@ -47,6 +52,8 @@ public sealed class GenerationRequest
         CodeDirectory = codeDirectory;
         DuplicateFileStrategy = duplicateFileStrategy;
         PersistLastUsedPaths = persistLastUsedPaths;
+        Variables = variables;
+        Modules = modules;
     }
 
     /// <summary>
@@ -100,4 +107,15 @@ public sealed class GenerationRequest
     /// 生成全程不触碰 config.json 的最近路径字段。
     /// </summary>
     public bool PersistLastUsedPaths { get; }
+
+    /// <summary>
+    /// 本次生成的调用方变量集合，逐键注入渲染上下文 vars.* 命名空间；可为空，为空时不注入 vars。
+    /// </summary>
+    public IReadOnlyDictionary<string, object?>? Variables { get; }
+
+    /// <summary>
+    /// 本次生成的模块清单，module 作用域模板按此清单逐个渲染；可为空。
+    /// 勾选 module 作用域模板但未提供清单时，生成编排结构化报错。
+    /// </summary>
+    public IReadOnlyList<ModuleContext>? Modules { get; }
 }

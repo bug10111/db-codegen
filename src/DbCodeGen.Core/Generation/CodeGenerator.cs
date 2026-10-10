@@ -135,7 +135,9 @@ public sealed class CodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// 执行 dry-run 渲染与分类核心管线：逐（表 × 勾选模板文件）直读模板、内容渲染、
+    /// 执行 dry-run 渲染与分类核心管线：按模板作用域三路调度——
+    /// table 作用域按（表 × 勾选模板）笛卡尔积（现状管线）；module 作用域按模块清单逐个渲染；
+    /// project 作用域整次渲染一次。三种作用域同次调用可混跑，逐模板直读、内容渲染、
     /// 输出路径占位渲染、绝对路径解析与防目录穿越、按目标文件状态分类。
     /// </summary>
     /// <param name="request">生成请求。</param>
@@ -143,7 +145,7 @@ public sealed class CodeGenerator : ICodeGenerator
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>dry-run 清单与分类计数。</returns>
     /// <exception cref="OperationCanceledException">渲染或分类过程被取消时抛出。</exception>
-    /// <exception cref="GenerationException">模板渲染失败、输出路径模板渲染失败或路径越界时抛出。</exception>
+    /// <exception cref="GenerationException">勾选 module 作用域模板但未提供模块清单、模块名重复、模板渲染失败、输出路径模板渲染失败或路径越界时抛出。</exception>
     private async Task<GenerationPreview> BuildPreviewCoreAsync(
         GenerationRequest request,
         IProgress<GenerationProgress>? progress,
@@ -157,9 +159,57 @@ public sealed class CodeGenerator : ICodeGenerator
             .Where(table => table is not null)
             .ToList();
 
-        if (tables.Count == 0 || selectedFiles.Count == 0)
+        if (selectedFiles.Count == 0)
         {
             return new GenerationPreview(Array.Empty<GenerationFileEntry>(), 0, 0, 0);
+        }
+
+        // 按模板作用域分组，各组保持勾选清单内相对顺序；无 scope 声明的条目全部落在表作用域组（既有包行为不变）
+        List<TemplateFileSelection> tableFiles = new();
+        List<TemplateFileSelection> moduleFiles = new();
+        List<TemplateFileSelection> projectFiles = new();
+        foreach (TemplateFileSelection file in selectedFiles)
+        {
+            switch (file.Scope)
+            {
+                case TemplateScope.Module:
+                    moduleFiles.Add(file);
+                    break;
+                case TemplateScope.Project:
+                    projectFiles.Add(file);
+                    break;
+                default:
+                    tableFiles.Add(file);
+                    break;
+            }
+        }
+
+        // 表作用域无表可渲染且无其它作用域工作时整体空转（与既有"表×模板=0 条目"行为一致）
+        if ((tableFiles.Count == 0 || tables.Count == 0) && moduleFiles.Count == 0 && projectFiles.Count == 0)
+        {
+            return new GenerationPreview(Array.Empty<GenerationFileEntry>(), 0, 0, 0);
+        }
+
+        // module 作用域被勾选但未提供模块清单时结构化报错；模块名重复同样拒绝（同名模块无法区分产出归属）
+        IReadOnlyList<ModuleContext> modules = Array.Empty<ModuleContext>();
+        if (moduleFiles.Count > 0)
+        {
+            if (request.Modules is null || request.Modules.Count == 0)
+            {
+                throw new GenerationException(
+                    "勾选了 module 作用域模板但未提供模块清单（modules）；请传入 modules（如 [{\"name\":\"account\"}]）后重试。");
+            }
+
+            HashSet<string> seenModuleNames = new(StringComparer.Ordinal);
+            foreach (ModuleContext module in request.Modules)
+            {
+                if (!seenModuleNames.Add(module.Name))
+                {
+                    throw new GenerationException($"模块清单存在重复模块名：{module.Name}；请去重后重试。");
+                }
+            }
+
+            modules = request.Modules;
         }
 
         // 生成前补全表列元数据：表清单阶段不含列，实体与 mapper.xml 模板按列循环渲染，
@@ -167,13 +217,23 @@ public sealed class CodeGenerator : ICodeGenerator
         tables = await EnrichTableColumnsAsync(request, tables, cancellationToken).ConfigureAwait(false);
 
         TemplatePackageContext packageContext = TemplatePackageContext.From(request.Package, request.BasePackageOverride);
+
+        // 作用域渲染输入构造：variables 键的保留命名空间冲突在此结构化拒绝；
+        // 仅有表作用域且未传 variables 时保持 null（既有渲染路径零改动）
+        bool hasScopeWork = moduleFiles.Count > 0 || projectFiles.Count > 0 || request.Variables is not null;
+        ScopeRenderInput? tableScopeInput = hasScopeWork ? ScopeRenderInput.Create(request.Variables, null, tables) : null;
+        ScopeRenderInput? projectScopeInput = projectFiles.Count > 0 ? ScopeRenderInput.Create(request.Variables, null, tables) : null;
+
         var entries = new List<GenerationFileEntry>();
-        int total = tables.Count * selectedFiles.Count;
+        int total = (tableFiles.Count > 0 ? tables.Count * tableFiles.Count : 0)
+            + (moduleFiles.Count > 0 ? modules.Count * moduleFiles.Count : 0)
+            + projectFiles.Count;
         int completed = 0;
 
+        // 表作用域：表 × 模板笛卡尔积（现状管线不变）
         foreach (TableInfo table in tables)
         {
-            foreach (TemplateFileSelection file in selectedFiles)
+            foreach (TemplateFileSelection file in tableFiles)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 completed++;
@@ -184,7 +244,7 @@ public sealed class CodeGenerator : ICodeGenerator
                 string templateText = await ReadTemplateContentAsync(request, file, cancellationToken).ConfigureAwait(false);
 
                 // 内容渲染，与模板编辑预览共用同一渲染管线，失败定位到模板名与行列
-                PreviewResult renderResult = RenderContent(templateText, table, packageContext, file, cancellationToken);
+                PreviewResult renderResult = RenderContent(templateText, table, packageContext, file, cancellationToken, tableScopeInput);
 
                 // 输出路径模板占位渲染，失败定位到具体模板文件
                 string renderedRelativePath = RenderOutputPath(table, packageContext, file);
@@ -198,6 +258,54 @@ public sealed class CodeGenerator : ICodeGenerator
                 GenerationAction action = await ClassifyTargetAsync(absolutePath, renderResult.Output, request.DuplicateFileStrategy, cancellationToken).ConfigureAwait(false);
                 entries.Add(new GenerationFileEntry(table.RawName, renderedRelativePath, absolutePath, action, renderResult.Output, null));
             }
+        }
+
+        // 模块作用域：模块清单 × 模块模板，渲染上下文含 module.* / vars.* / tables 汇总
+        foreach (ModuleContext module in modules)
+        {
+            foreach (TemplateFileSelection file in moduleFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                completed++;
+
+                progress?.Report(new GenerationProgress(GenerationStage.Rendering, completed, total, file.TemplateFileName));
+
+                ScopeRenderInput scopeInput = ScopeRenderInput.Create(request.Variables, module, tables);
+                string templateText = await ReadTemplateContentAsync(request, file, cancellationToken).ConfigureAwait(false);
+
+                // 内容渲染与表作用域同一渲染管线（共享函数文件、空行规整、结构化错误一致），仅上下文不同
+                PreviewResult renderResult = RenderScopedContent(templateText, packageContext, scopeInput, file, cancellationToken);
+
+                // 路径基准按 B 裁决：module 作用域相对输出根（现状管线），路径可引用 module.* / vars.*
+                string renderedRelativePath = RenderScopedOutputPath(packageContext, scopeInput, file);
+                string absolutePath = ResolveAbsolutePath(request.WorkspaceRoot, request.RelativeOutputRoot, renderedRelativePath);
+
+                progress?.Report(new GenerationProgress(GenerationStage.Previewing, completed, total, renderedRelativePath));
+
+                GenerationAction action = await ClassifyTargetAsync(absolutePath, renderResult.Output, request.DuplicateFileStrategy, cancellationToken).ConfigureAwait(false);
+                entries.Add(new GenerationFileEntry(module.Name, renderedRelativePath, absolutePath, action, renderResult.Output, null));
+            }
+        }
+
+        // 工程作用域：整次渲染一次，渲染上下文含 vars.* / tables 汇总（无 module）
+        foreach (TemplateFileSelection file in projectFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            completed++;
+
+            progress?.Report(new GenerationProgress(GenerationStage.Rendering, completed, total, file.TemplateFileName));
+
+            string templateText = await ReadTemplateContentAsync(request, file, cancellationToken).ConfigureAwait(false);
+            PreviewResult renderResult = RenderScopedContent(templateText, packageContext, projectScopeInput!, file, cancellationToken);
+
+            // 路径基准按 B 裁决：project 作用域相对工作区根（拼空相对输出根复用同一防穿越校验）
+            string renderedRelativePath = RenderScopedOutputPath(packageContext, projectScopeInput!, file);
+            string absolutePath = ResolveAbsolutePath(request.WorkspaceRoot, string.Empty, renderedRelativePath);
+
+            progress?.Report(new GenerationProgress(GenerationStage.Previewing, completed, total, renderedRelativePath));
+
+            GenerationAction action = await ClassifyTargetAsync(absolutePath, renderResult.Output, request.DuplicateFileStrategy, cancellationToken).ConfigureAwait(false);
+            entries.Add(new GenerationFileEntry(string.Empty, renderedRelativePath, absolutePath, action, renderResult.Output, null));
         }
 
         // 生成前未映射类型预检：全部表列解析链未命中的类型归并清单，供界面弹窗提示补映射
@@ -278,6 +386,7 @@ public sealed class CodeGenerator : ICodeGenerator
     /// <param name="packageContext">package 侧渲染上下文。</param>
     /// <param name="file">勾选模板文件，提供模板名定位。</param>
     /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="scopeContext">可选的作用域渲染输入（vars / tables），为空时与既有行为一致。</param>
     /// <returns>渲染结果，成功时含真实代码。</returns>
     /// <exception cref="GenerationException">模板渲染失败时抛出。</exception>
     private PreviewResult RenderContent(
@@ -285,15 +394,65 @@ public sealed class CodeGenerator : ICodeGenerator
         TableInfo table,
         TemplatePackageContext packageContext,
         TemplateFileSelection file,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ScopeRenderInput? scopeContext = null)
     {
-        PreviewResult result = _engine.Render(templateText, table, null, packageContext, cancellationToken, file.TemplateFileName);
+        PreviewResult result = _engine.Render(templateText, table, null, packageContext, cancellationToken, file.TemplateFileName, scopeContext);
         if (!result.IsSuccess)
         {
             throw new GenerationException($"模板渲染失败：{result.ErrorMessage}");
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// 按作用域渲染模板正文（module / project 作用域），失败时抛整单失败异常并携带结构化错误信息。
+    /// </summary>
+    /// <param name="templateText">模板文本。</param>
+    /// <param name="packageContext">package 侧渲染上下文。</param>
+    /// <param name="scopeInput">作用域渲染输入（vars / module / tables）。</param>
+    /// <param name="file">勾选模板文件，提供模板名定位。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>渲染结果，成功时含真实代码。</returns>
+    /// <exception cref="GenerationException">模板渲染失败时抛出。</exception>
+    private PreviewResult RenderScopedContent(
+        string templateText,
+        TemplatePackageContext packageContext,
+        ScopeRenderInput scopeInput,
+        TemplateFileSelection file,
+        CancellationToken cancellationToken)
+    {
+        PreviewResult result = _engine.RenderScoped(templateText, packageContext, scopeInput, cancellationToken, file.TemplateFileName);
+        if (!result.IsSuccess)
+        {
+            throw new GenerationException($"模板渲染失败：{result.ErrorMessage}");
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 按作用域渲染输出路径模板中的占位变量（module / project 作用域），失败时抛整单失败异常并定位模板文件。
+    /// </summary>
+    /// <param name="packageContext">package 侧渲染上下文。</param>
+    /// <param name="scopeInput">作用域渲染输入（vars / module）。</param>
+    /// <param name="file">勾选模板文件，提供模板名定位。</param>
+    /// <returns>渲染后的相对输出路径。</returns>
+    /// <exception cref="GenerationException">输出路径模板渲染失败时抛出。</exception>
+    private string RenderScopedOutputPath(
+        TemplatePackageContext packageContext,
+        ScopeRenderInput scopeInput,
+        TemplateFileSelection file)
+    {
+        try
+        {
+            return _engine.RenderScopedPathTemplate(file.OutputPathTemplate, packageContext, scopeInput);
+        }
+        catch (TemplateRenderException exception)
+        {
+            throw new GenerationException($"输出路径模板渲染失败：{file.TemplateFileName}，原因：{exception.Message}", exception);
+        }
     }
 
     /// <summary>
