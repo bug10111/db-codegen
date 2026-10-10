@@ -9,6 +9,7 @@
     <RootNamespace>DbCodeGen.McpServer</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Version>1.0.0</Version>
+    <ApplicationIcon>..\DbCodeGen.App\Assets\cd.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

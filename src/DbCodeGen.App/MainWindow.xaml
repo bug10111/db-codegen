@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:avalonedit="http://icsharpcode.net/sharpdevelop/avalonedit"
         Title="DbCodeGen 代码生成器"
+        Icon="Assets/cd.ico"
         Height="880"
         Width="1440"
         FontSize="14"
