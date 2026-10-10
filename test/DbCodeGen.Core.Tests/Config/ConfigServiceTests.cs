@@ -4,6 +4,7 @@ using System.Text.Json;
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Security;
+using DbCodeGen.Core.Threading;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace DbCodeGen.Core.Tests.Config;
@@ -579,6 +580,56 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Empty(errors);
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(configPath));
         Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    /// <summary>
+    /// 跨进程配置锁被另一线程持有的命名句柄占用时，Save 应按注入短超时抛 ConfigSaveException 且内存原值保留；
+    /// 占用释放后保存恢复正常，验证超时确由跨进程锁等待产生（桌面端与 MCP 服务端双开互斥的基础）。
+    /// </summary>
+    [Fact]
+    public void Save_CrossProcessLockHeld_ThrowsConfigSaveExceptionAndPreservesValue()
+    {
+        string directory = Path.Combine(_tempRoot, Guid.NewGuid().ToString("N"));
+        string configPath = Path.Combine(directory, "config.json");
+        ConfigService service = new(
+            _protector,
+            NullLogger<ConfigService>.Instance,
+            configPath,
+            defaultTemplatesDirectory: null,
+            appDataRootOverride: Path.Combine(_tempRoot, "appdata"),
+            crossProcessLockTimeout: TimeSpan.FromMilliseconds(200));
+        _services.Add(service);
+
+        AppConfig config = service.Load();
+        config.WorkspaceRoot = @"D:\workspace";
+
+        // 以独立线程的命名句柄占住该配置文件的跨进程锁，模拟另一进程正持有配置文件锁；
+        // 占用必须在其它线程进行：命名 Mutex 对同一线程可重入，同线程占用无法验证互斥
+        string lockName = CrossProcessLockNames.ForConfigFile(configPath);
+        using Mutex holder = new(initiallyOwned: false, lockName);
+        using var acquired = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        Thread holderThread = new Thread(() =>
+        {
+            holder.WaitOne();
+            acquired.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            holder.ReleaseMutex();
+        });
+        holderThread.Start();
+        Assert.True(acquired.Wait(TimeSpan.FromSeconds(5)));
+
+        ConfigSaveException exception = Assert.Throws<ConfigSaveException>(() => service.Save());
+        Assert.Contains("等待跨进程配置锁超时", exception.Message);
+
+        // 超时失败后内存原值保留；占用释放后同一实例保存恢复正常并落盘
+        Assert.Equal(@"D:\workspace", service.Current.WorkspaceRoot);
+        release.Set();
+        holderThread.Join(TimeSpan.FromSeconds(5));
+
+        service.Save();
+        Assert.True(File.Exists(configPath));
+        Assert.Equal(@"D:\workspace", service.Current.WorkspaceRoot);
     }
 
     /// <summary>

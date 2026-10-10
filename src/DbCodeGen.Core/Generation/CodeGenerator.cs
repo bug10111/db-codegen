@@ -119,7 +119,8 @@ public sealed class CodeGenerator : ICodeGenerator
         List<GenerationLogEntry> mergedLogs = BuildSkipLogs(preview, request.DuplicateFileStrategy);
         mergedLogs.AddRange(writeResult.Logs);
 
-        if (!writeResult.IsCancelled)
+        // 记忆回写受请求开关控制：默认开保持桌面端"生成后记忆下次默认值"行为，MCP 等无记忆态调用方关闭
+        if (!writeResult.IsCancelled && request.PersistLastUsedPaths)
         {
             WriteBackOutputRoot(request.WorkspaceRoot, request.CodeDirectory ?? request.RelativeOutputRoot, mergedLogs);
         }

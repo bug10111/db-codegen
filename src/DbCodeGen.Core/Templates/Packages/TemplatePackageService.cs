@@ -290,6 +290,17 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     }
 
     /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> SaveTemplateContentAsync(
+        string packageName, string templateRelativePath, string content, CancellationToken cancellationToken)
+    {
+        // 正文为 null 属调用方契约违约，显式快速失败：禁止静默落空串清空既有模板正文
+        ArgumentNullException.ThrowIfNull(content);
+        return await _gate.ExecuteExclusiveAsync(
+            token => SaveTemplateContentCoreAsync(packageName, templateRelativePath, content, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<TemplatePackageOperationResult> RenamePackageAsync(
         string packageName, string newName, CancellationToken cancellationToken)
     {
@@ -887,6 +898,58 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             RollbackWrittenFiles(writtenFiles);
             _logger.LogError(exception, "批量追加模板文件失败，包 {PackageName}。", packageName);
             return TemplatePackageOperationResult.Failure($"批量追加模板失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 保存正文核心流程：加载包并校验内置只读 → 路径安全校验 → 目标文件须已存在（新建文件走新增模板接口）→
+    /// 覆写模板文件内容（UTF-8 无 BOM，清单条目不动）→ 重新校验返回更新后的包。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> SaveTemplateContentCoreAsync(
+        string packageName, string templateRelativePath, string content, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可修改模板内容。");
+        }
+
+        string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
+        if (normalizedTemplate is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
+        }
+
+        try
+        {
+            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedTemplate);
+            if (!File.Exists(templateFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedTemplate}");
+            }
+
+            // 仅覆写既有模板正文，不触碰 manifest：清单条目与文件名、输出路径均不受本次保存影响
+            await File.WriteAllTextAsync(
+                templateFullPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("已保存模板内容，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Success(updated);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(exception, "保存模板内容失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Failure($"保存模板内容失败：{exception.Message}");
         }
     }
 

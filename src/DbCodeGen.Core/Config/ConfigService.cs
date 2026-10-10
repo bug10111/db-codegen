@@ -6,20 +6,28 @@ using System.Text.Json.Serialization;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Security;
 using DbCodeGen.Core.Templates;
+using DbCodeGen.Core.Threading;
 using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.Core.Config;
 
 /// <summary>
 /// 配置持久化服务实现，是 config.json 的唯一读写方，单例注入。
-/// 公共门面为同步方法，文件 IO 在内部以异步 API 执行；Load/Save/Current 均在信号量锁内操作保证并发安全。
+/// 公共门面为同步方法，文件 IO 在内部以异步 API 执行；Load/Save/Current 均在信号量锁内操作保证并发安全；
+/// 磁盘读写额外经同机同用户域的跨进程命名互斥锁串行化，使桌面端与 MCP 服务端共享同一份 config.json 不互相撕裂。
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class ConfigService : IConfigService, IDisposable
 {
+    /// <summary>
+    /// 跨进程配置锁默认等待超时（毫秒）：另一进程异常长时间持锁时按保存失败结构化抛出，避免调用方无限阻塞。
+    /// </summary>
+    internal const int DefaultCrossProcessLockTimeoutMilliseconds = 15_000;
+
     private readonly CredentialProtector _protector;
     private readonly ILogger<ConfigService> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly TimeSpan _crossProcessLockTimeout;
 
     private AppConfig? _current;
 
@@ -66,12 +74,14 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// <param name="configFilePath">配置文件绝对路径；为空时经定位文件解析或回退默认路径。</param>
     /// <param name="defaultTemplatesDirectory">默认模板目录，为空时回退 AppData 根下 DbCodeGen\Templates。</param>
     /// <param name="appDataRootOverride">AppData 根目录，为空时取系统 ApplicationData。</param>
+    /// <param name="crossProcessLockTimeout">跨进程配置锁等待超时，为空时取默认值；测试注入短超时验证互斥行为。</param>
     internal ConfigService(
         CredentialProtector credentialProtector,
         ILogger<ConfigService> logger,
         string? configFilePath,
         string? defaultTemplatesDirectory,
-        string? appDataRootOverride)
+        string? appDataRootOverride,
+        TimeSpan? crossProcessLockTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(credentialProtector);
         ArgumentNullException.ThrowIfNull(logger);
@@ -82,6 +92,30 @@ public sealed class ConfigService : IConfigService, IDisposable
         ConfigFilePath = configFilePath is null
             ? ResolveEffectiveConfigPath(_appDataRoot)
             : configFilePath;
+        _crossProcessLockTimeout = crossProcessLockTimeout ?? TimeSpan.FromMilliseconds(DefaultCrossProcessLockTimeoutMilliseconds);
+    }
+
+    /// <summary>
+    /// 在跨进程命名互斥锁内执行磁盘读写动作：锁名按当前配置文件路径派生，
+    /// 桌面端与 MCP 服务端以相同锁名串行化同一份 config.json 的磁盘访问；超时按保存失败结构化抛出。
+    /// 必须在进程内信号量锁内调用（锁序恒为信号量→命名互斥，无反向获取路径）。
+    /// </summary>
+    /// <param name="action">受跨进程锁保护的磁盘读写动作。</param>
+    private void RunUnderCrossProcessLock(Action action)
+    {
+        // 锁名随当前配置路径动态派生：数据目录切换后保护的是切换后的配置文件
+        string lockName = CrossProcessLockNames.ForConfigFile(ConfigFilePath);
+        try
+        {
+            using CrossProcessMutexScope mutexScope = CrossProcessMutexScope.Wait(lockName, _crossProcessLockTimeout);
+            action();
+        }
+        catch (TimeoutException exception)
+        {
+            // 超时按保存失败结构化抛出，调用方沿用既有 ConfigSaveException 处理通道，内存原值保持不变
+            throw new ConfigSaveException(
+                $"等待跨进程配置锁超时（{(long)_crossProcessLockTimeout.TotalMilliseconds}ms），另一进程可能正持有配置文件锁。", exception);
+        }
     }
 
     /// <inheritdoc />
@@ -110,8 +144,9 @@ public sealed class ConfigService : IConfigService, IDisposable
         {
             EnsureLoadedLocked();
 
-            // 同步门面按契约在锁内桥接内部异步文件 IO，原子写失败抛 ConfigSaveException 且内存原值不变
-            SaveToDiskAsync(_current!).GetAwaiter().GetResult();
+            // 同步门面按契约在锁内桥接内部异步文件 IO，原子写失败抛 ConfigSaveException 且内存原值不变；
+            // 写盘段经跨进程命名互斥锁串行化，防止桌面端与 MCP 服务端并发写同一份 config.json 互相覆盖撕裂
+            RunUnderCrossProcessLock(() => SaveToDiskAsync(_current!).GetAwaiter().GetResult());
         }
         finally
         {
@@ -220,31 +255,36 @@ public sealed class ConfigService : IConfigService, IDisposable
             return;
         }
 
-        try
+        // 数据目录切换全程（配置复制、模板目录迁移、定位文件与落盘）经跨进程互斥锁，
+        // 与其它进程对同一配置文件与模板库的磁盘访问串行化，避免迁移中途被并发读写
+        RunUnderCrossProcessLock(() =>
         {
-            // 新配置路径与当前路径不同且当前配置存在时，先把当前配置原样复制到新路径，保证全部设置随目录迁移
-            string newConfigPath = Path.Combine(normalizedNew, "config.json");
-            string currentPath = ConfigFilePath;
-            if (File.Exists(currentPath)
-                && !string.Equals(Path.GetFullPath(currentPath), Path.GetFullPath(newConfigPath), StringComparison.OrdinalIgnoreCase))
+            try
             {
-                Directory.CreateDirectory(normalizedNew);
-                File.Copy(currentPath, newConfigPath, overwrite: true);
+                // 新配置路径与当前路径不同且当前配置存在时，先把当前配置原样复制到新路径，保证全部设置随目录迁移
+                string newConfigPath = Path.Combine(normalizedNew, "config.json");
+                string currentPath = ConfigFilePath;
+                if (File.Exists(currentPath)
+                    && !string.Equals(Path.GetFullPath(currentPath), Path.GetFullPath(newConfigPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    Directory.CreateDirectory(normalizedNew);
+                    File.Copy(currentPath, newConfigPath, overwrite: true);
+                }
+
+                MigrateDefaultTemplatesDirectory(normalizedNew);
+
+                // 更新内存数据目录与配置路径，随后写定位文件并落盘到新位置，使内存与磁盘一致指向新目录
+                _current.DataDirectory = normalizedNew;
+                ConfigFilePath = newConfigPath;
+                WriteLocationFile(normalizedNew);
+                SaveToDiskAsync(_current).GetAwaiter().GetResult();
             }
-
-            MigrateDefaultTemplatesDirectory(normalizedNew);
-
-            // 更新内存数据目录与配置路径，随后写定位文件并落盘到新位置，使内存与磁盘一致指向新目录
-            _current.DataDirectory = normalizedNew;
-            ConfigFilePath = newConfigPath;
-            WriteLocationFile(normalizedNew);
-            SaveToDiskAsync(_current).GetAwaiter().GetResult();
-        }
-        catch (Exception exception) when (exception is not ArgumentException and not ConfigSaveException)
-        {
-            // 复制或迁移阶段出现 IO/权限异常时收敛为结构化保存异常，调用方统一按保存失败处理，避免原生异常逃逸到 UI 层
-            throw new ConfigSaveException($"数据目录切换失败：{exception.Message}", exception);
-        }
+            catch (Exception exception) when (exception is not ArgumentException and not ConfigSaveException)
+            {
+                // 复制或迁移阶段出现 IO/权限异常时收敛为结构化保存异常，调用方统一按保存失败处理，避免原生异常逃逸到 UI 层
+                throw new ConfigSaveException($"数据目录切换失败：{exception.Message}", exception);
+            }
+        });
     }
 
     /// <summary>
@@ -452,7 +492,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     }
 
     /// <summary>
-    /// 在锁内确保配置已加载，未加载时从磁盘读取或生成默认配置。
+    /// 在锁内确保配置已加载，未加载时从磁盘读取或生成默认配置；磁盘读取段经跨进程命名互斥锁串行化。
     /// </summary>
     private void EnsureLoadedLocked()
     {
@@ -462,8 +502,9 @@ public sealed class ConfigService : IConfigService, IDisposable
             return;
         }
 
-        // 同步门面桥接内部异步文件 IO，锁内阻塞等待完成；内部 await 均已 ConfigureAwait(false)，避免 UI 线程死锁
-        _current = LoadCoreAsync().GetAwaiter().GetResult();
+        // 同步门面桥接内部异步文件 IO，锁内阻塞等待完成；内部 await 均已 ConfigureAwait(false)，避免 UI 线程死锁；
+        // 磁盘读取经跨进程互斥锁，与其它进程对同一配置文件的写盘串行化，避免读到半截内容
+        RunUnderCrossProcessLock(() => _current = LoadCoreAsync().GetAwaiter().GetResult());
     }
 
     /// <summary>

@@ -1679,4 +1679,109 @@ public sealed class TemplatePackageServiceTests : IDisposable
         Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
         Assert.True(File.Exists(Path.Combine(userLibrary, "pkg", "main.tpl")));
     }
+
+    /// <summary>
+    /// 保存用户包既有模板正文应覆写文件内容且清单条目保持不变，返回更新后的包。
+    /// </summary>
+    [Fact]
+    public async Task SaveTemplateContentAsync_UserPackage_WritesContentAndKeepsManifest()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "edit-pkg");
+
+        TemplatePackageOperationResult result = await service.SaveTemplateContentAsync(
+            "edit-pkg", "entity.java.scriban", "public class {{table.className}} { /* edited */ }", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.Equal(
+            "public class {{table.className}} { /* edited */ }",
+            await File.ReadAllTextAsync(Path.Combine(userLibrary, "edit-pkg", "entity.java.scriban")));
+
+        // 清单条目不受正文保存影响：路径与输出模板保持原样
+        TemplateFileInfo file = Assert.Single(result.Package!.Files);
+        Assert.Equal("entity.java.scriban", file.RelativeTemplatePath);
+        Assert.Equal("{{package.dir}}/entity/{{table.className}}.java", file.OutputPath);
+
+        TemplatePackageInfo reloaded = await service.LoadPackageAsync("edit-pkg", CancellationToken.None);
+        Assert.Single(reloaded.Files);
+    }
+
+    /// <summary>
+    /// 保存内置包模板正文应只读拒绝，文件内容保持不变。
+    /// </summary>
+    [Fact]
+    public async Task SaveTemplateContentAsync_Builtin_Rejected()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(builtinRoot, "builtin-pkg", "ORIGINAL");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.SaveTemplateContentAsync(
+            "builtin-pkg", "entity.java.scriban", "TAMPERED", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.BuiltinConflict, result.Status);
+        Assert.Equal("ORIGINAL", await File.ReadAllTextAsync(Path.Combine(builtinRoot, "builtin-pkg", "entity.java.scriban")));
+    }
+
+    /// <summary>
+    /// 保存到不存在的包应返回失败，不产生任何文件。
+    /// </summary>
+    [Fact]
+    public async Task SaveTemplateContentAsync_PackageNotExists_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        TemplatePackageOperationResult result = await service.SaveTemplateContentAsync(
+            "ghost-pkg", "entity.java.scriban", "content", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.Contains("模板包不存在", result.Message);
+    }
+
+    /// <summary>
+    /// 保存路径含目录穿越、绝对路径或非法文件名字符应返回 Invalid，不改动任何文件。
+    /// </summary>
+    [Theory]
+    [InlineData("../evil.scriban")]
+    [InlineData("a/../../evil.scriban")]
+    [InlineData("C:\\windows\\main.scriban")]
+    [InlineData("main|bad.scriban")]
+    public async Task SaveTemplateContentAsync_PathTraversal_ReturnsInvalid(string templatePath)
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "edit-pkg");
+
+        TemplatePackageOperationResult result = await service.SaveTemplateContentAsync(
+            "edit-pkg", templatePath, "content", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
+        Assert.True(File.Exists(Path.Combine(userLibrary, "edit-pkg", "entity.java.scriban")));
+        Assert.False(Directory.Exists(Path.Combine(userLibrary, "evil.scriban")));
+        Assert.False(File.Exists(Path.Combine(userLibrary, "evil.scriban")));
+    }
+
+    /// <summary>
+    /// 保存到包内不存在的模板文件应返回失败（新建文件走新增模板接口），不产生新文件。
+    /// </summary>
+    [Fact]
+    public async Task SaveTemplateContentAsync_FileNotExists_ReturnsFailure()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await CreatePackageAsync(userLibrary, "edit-pkg");
+
+        TemplatePackageOperationResult result = await service.SaveTemplateContentAsync(
+            "edit-pkg", "missing.scriban", "content", CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Failed, result.Status);
+        Assert.False(File.Exists(Path.Combine(userLibrary, "edit-pkg", "missing.scriban")));
+    }
 }

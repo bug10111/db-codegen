@@ -146,4 +146,19 @@ public interface ITemplatePackageService
     /// <returns>追加操作结果，成功时 Package 携带更新后的包信息。</returns>
     Task<TemplatePackageOperationResult> AppendTemplateFilesAsync(
         string packageName, IReadOnlyList<TemplateFileWriteEntry> files, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 保存用户模板包内既有模板文件的正文内容：仅覆写模板文件内容，不改动 manifest 清单条目。
+    /// 内置包只读拒绝；路径做防目录穿越安全校验；目标文件必须已存在（新建文件走新增模板文件接口）；
+    /// 操作在包变更串行门与跨进程互斥锁内执行，成功后重新校验并返回更新后的包信息。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="templateRelativePath">待保存模板文件相对包根路径，可含分组目录。</param>
+    /// <param name="content">模板正文内容，Scriban 语法文本，以 UTF-8 无 BOM 落盘。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>保存操作结果，成功时 Package 携带更新后的包信息；包不存在或加载失败、内置包、
+    /// 路径不合法、文件不存在分别返回对应失败状态。</returns>
+    /// <exception cref="ArgumentNullException">content 为 null 时抛出，禁止以空引用静默清空既有模板正文。</exception>
+    Task<TemplatePackageOperationResult> SaveTemplateContentAsync(
+        string packageName, string templateRelativePath, string content, CancellationToken cancellationToken);
 }

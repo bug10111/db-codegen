@@ -340,6 +340,53 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
+    /// 生成请求默认（不设置回写开关）应保持桌面端既有行为：成功后回写工作区根与最近输出根并保存。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_PersistLastUsedPathsByDefault_WritesBackMemory()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
+        (CodeGenerator generator, FakeConfigService configService) = CreateGenerator();
+
+        GenerationResult result = await generator.GenerateAsync(
+            CreateRequest(package, workspaceRoot, "gen", files), null, CancellationToken.None);
+
+        Assert.False(result.IsCancelled);
+        Assert.Equal(workspaceRoot, configService.Current.WorkspaceRoot);
+        Assert.Equal("gen", configService.Current.LastRelativeOutputRoot);
+        Assert.True(configService.SaveCount >= 1);
+    }
+
+    /// <summary>
+    /// 生成请求显式关闭记忆回写开关时，成功生成后不应触碰配置（不回写最近路径、不触发保存），
+    /// 供 MCP 等无记忆态调用方实现零配置副作用。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_PersistLastUsedPathsDisabled_SkipsMemoryWriteBack()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateDefaultPackageAsync();
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "out/{{table.variableName}}.java", true) };
+        (CodeGenerator generator, FakeConfigService configService) = CreateGenerator();
+        configService.Current.WorkspaceRoot = "preserved-root";
+        configService.Current.LastRelativeOutputRoot = "preserved-output";
+
+        GenerationRequest request = CreateRequest(
+            package, workspaceRoot, "gen", files, persistLastUsedPaths: false);
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        // 写盘照常完成，但配置记忆保持原值且零保存调用
+        Assert.False(result.IsCancelled);
+        Assert.Equal(1, result.Generated);
+        Assert.True(File.Exists(Path.Combine(outputRoot, "out", "sysUser.java")));
+        Assert.Equal("preserved-root", configService.Current.WorkspaceRoot);
+        Assert.Equal("preserved-output", configService.Current.LastRelativeOutputRoot);
+        Assert.Equal(0, configService.SaveCount);
+    }
+
+    /// <summary>
     /// 跳过策略下内容不同的既有文件应分类为跳过，dry-run 只保留新增与跳过计数。
     /// </summary>
     [Fact]
@@ -579,17 +626,20 @@ public sealed class CodeGeneratorTests : IDisposable
     /// <param name="relativeOutputRoot">相对输出根。</param>
     /// <param name="files">勾选模板文件集合。</param>
     /// <param name="duplicateFileStrategy">同名文件处理策略，默认覆盖。</param>
+    /// <param name="persistLastUsedPaths">生成后是否回写最近生成路径记忆，默认 true 与桌面端一致。</param>
     /// <returns>生成请求。</returns>
     private static GenerationRequest CreateRequest(
         TemplatePackageInfo package,
         string workspaceRoot,
         string relativeOutputRoot,
         IReadOnlyList<TemplateFileSelection> files,
-        DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite)
+        DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite,
+        bool persistLastUsedPaths = true)
     {
         return new GenerationRequest(
             package, new[] { CreateTable() }, files, workspaceRoot, relativeOutputRoot,
-            duplicateFileStrategy: duplicateFileStrategy);
+            duplicateFileStrategy: duplicateFileStrategy,
+            persistLastUsedPaths: persistLastUsedPaths);
     }
 
     /// <summary>

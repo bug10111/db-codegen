@@ -66,6 +66,9 @@ public partial class App : Application
         services.AddSingleton<CredentialProtector>();
         services.AddSingleton<IConfigService, ConfigService>();
         services.AddSingleton<IDataSourceService, DataSourceService>();
+
+        // 数据源连接管理服务：连接增删改、唯一名校验与密码加密的唯一 Core 通道，桌面端与 MCP 数据源管理共用
+        services.AddSingleton<IDataSourceManagementService, DataSourceManagementService>();
         services.AddSingleton<SqlExecutor>();
 
         // 全局类型映射服务：承载"全局映射表>包typeMap>兜底"解析链与生成前未映射预检

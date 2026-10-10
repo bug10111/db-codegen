@@ -20,6 +20,7 @@ public sealed class GenerationRequest
     /// <param name="dataSource">当前数据源配置，用于生成前补全表列元数据；可为空，为空时表按传入元数据原样使用。</param>
     /// <param name="codeDirectory">本次生成的代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common），生成完成后写回为最近记忆；可为空。</param>
     /// <param name="duplicateFileStrategy">同名目标文件处理策略，默认覆盖；dry-run 分类与写盘按此策略执行。</param>
+    /// <param name="persistLastUsedPaths">生成成功后是否回写最近生成路径记忆（工作区根与代码目录写回配置并落盘），默认 true 保持桌面端既有行为；MCP 等无记忆态调用方显式置 false 实现零配置副作用。</param>
     /// <exception cref="ArgumentNullException">package、tables 或 selectedFiles 为 null 时抛出。</exception>
     public GenerationRequest(
         TemplatePackageInfo package,
@@ -30,7 +31,8 @@ public sealed class GenerationRequest
         string? basePackageOverride = null,
         DataSourceConfig? dataSource = null,
         string? codeDirectory = null,
-        DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite)
+        DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite,
+        bool persistLastUsedPaths = true)
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentNullException.ThrowIfNull(tables);
@@ -44,6 +46,7 @@ public sealed class GenerationRequest
         DataSource = dataSource;
         CodeDirectory = codeDirectory;
         DuplicateFileStrategy = duplicateFileStrategy;
+        PersistLastUsedPaths = persistLastUsedPaths;
     }
 
     /// <summary>
@@ -90,4 +93,11 @@ public sealed class GenerationRequest
     /// 同名目标文件处理策略：覆盖则替换内容不同的既有文件，跳过则只写新增文件。
     /// </summary>
     public DuplicateFileStrategy DuplicateFileStrategy { get; }
+
+    /// <summary>
+    /// 生成成功后是否回写最近生成路径记忆（工作区根与代码目录写回配置并落盘）。
+    /// 默认 true 保持桌面端"生成后记忆下次默认值"的既有行为；MCP 等无记忆态调用方置 false，
+    /// 生成全程不触碰 config.json 的最近路径字段。
+    /// </summary>
+    public bool PersistLastUsedPaths { get; }
 }

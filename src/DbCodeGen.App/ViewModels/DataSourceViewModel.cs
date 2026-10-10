@@ -3,10 +3,8 @@ using System.Diagnostics.CodeAnalysis;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DbCodeGen.App.Services;
-using DbCodeGen.Core.Config;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
-using DbCodeGen.Core.Security;
 
 namespace DbCodeGen.App.ViewModels;
 
@@ -45,7 +43,8 @@ public sealed partial class DataSourceListItemViewModel : ObservableObject
 
 /// <summary>
 /// 数据源管理窗口视图模型，承载连接配置的增删改查、测试连接、保存落盘与当前连接设置。
-/// 密码明文只在表单输入与加密/测试的瞬态存在，列表与持久化只持有 DPAPI 密文。
+/// 连接增删改与唯一名校验、密码加密经 Core 连接管理服务完成（与 MCP 数据源管理共用同一权威通道）；
+/// 密码明文只在表单输入与测试连接的瞬态存在，列表与持久化只持有 DPAPI 密文。
 /// 测试连接成功才允许保存为固定强制规则，任何表单变更后须重新测试。
 /// </summary>
 public sealed partial class DataSourceViewModel : ObservableObject
@@ -65,12 +64,11 @@ public sealed partial class DataSourceViewModel : ObservableObject
     /// </summary>
     private const string UntestedStatusText = "尚未测试连接，请先测试连接后再保存。";
 
-    private readonly IConfigService _configService;
+    private readonly IDataSourceManagementService _dataSourceManagementService;
     private readonly IDataSourceService _dataSourceService;
     private readonly ICurrentDataSourceService _currentDataSourceService;
     private readonly IDialogService _dialogService;
     private readonly IConfirmDialogService _confirmDialogService;
-    private readonly CredentialProtector _credentialProtector;
 
     /// <summary>
     /// 本次测试连接是否成功，保存前的固定强制前置条件。
@@ -195,40 +193,35 @@ public sealed partial class DataSourceViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 使用配置服务、数据源服务、当前连接服务与对话框服务构造数据源管理视图模型，
+    /// 使用连接管理服务、数据源服务、当前连接服务与对话框服务构造数据源管理视图模型，
     /// 并立即加载已保存的连接列表与默认表单。
     /// </summary>
-    /// <param name="configService">配置持久化服务，连接列表读写的唯一通道。</param>
+    /// <param name="dataSourceManagementService">Core 连接管理服务，连接增删改与唯一名校验、密码加密的唯一通道。</param>
     /// <param name="dataSourceService">连接测试服务，用于保存前的连接可用性验证。</param>
     /// <param name="currentDataSourceService">当前连接共享状态服务，用于设为当前与删除联动清除。</param>
     /// <param name="dialogService">消息提示服务，用于校验与操作结果反馈。</param>
     /// <param name="confirmDialogService">二次确认服务，用于删除连接前的确认。</param>
-    /// <param name="credentialProtector">Windows DPAPI 凭据保护器，用于密码加密落盘。</param>
     /// <exception cref="ArgumentNullException">任一依赖参数为 null 时抛出。</exception>
     public DataSourceViewModel(
-        IConfigService configService,
+        IDataSourceManagementService dataSourceManagementService,
         IDataSourceService dataSourceService,
         ICurrentDataSourceService currentDataSourceService,
         IDialogService dialogService,
-        IConfirmDialogService confirmDialogService,
-        CredentialProtector credentialProtector)
+        IConfirmDialogService confirmDialogService)
     {
-        ArgumentNullException.ThrowIfNull(configService);
+        ArgumentNullException.ThrowIfNull(dataSourceManagementService);
         ArgumentNullException.ThrowIfNull(dataSourceService);
         ArgumentNullException.ThrowIfNull(currentDataSourceService);
         ArgumentNullException.ThrowIfNull(dialogService);
         ArgumentNullException.ThrowIfNull(confirmDialogService);
-        ArgumentNullException.ThrowIfNull(credentialProtector);
 
-        _configService = configService;
+        _dataSourceManagementService = dataSourceManagementService;
         _dataSourceService = dataSourceService;
         _currentDataSourceService = currentDataSourceService;
         _dialogService = dialogService;
         _confirmDialogService = confirmDialogService;
-        _credentialProtector = credentialProtector;
 
-        // 确保配置已加载，随后订阅当前连接变更以同步列表中的当前标记
-        _configService.Load();
+        // 订阅当前连接变更以同步列表中的当前标记；连接列表经管理服务加载，首次访问触发配置加载
         _currentDataSourceService.CurrentChanged += OnCurrentChanged;
         ResetToNewMode();
         ReloadDataSourceList();
@@ -284,29 +277,20 @@ public sealed partial class DataSourceViewModel : ObservableObject
             return;
         }
 
-        // 从配置快照移除并落盘，本地工具无外键关联，不级联删除已生成代码
-        AppConfig config = _configService.Current;
-        int removedIndex = config.DataSources.FindIndex(existing =>
-            string.Equals(existing.Name, target.Name, StringComparison.Ordinal));
-        if (removedIndex < 0)
+        // 删除经 Core 连接管理服务执行（内存移除与落盘、失败回滚在服务内收敛），本地工具无外键关联，不级联删除已生成代码
+        DataSourceOperationResult result = _dataSourceManagementService.Delete(target.Name);
+        if (result.Status == DataSourceOperationStatus.NotFound)
         {
-            // 目标连接已不在内存列表中，仅刷新列表保证界面与内存一致
+            // 目标连接已不在列表中，仅刷新列表保证界面与内存一致
             ReloadDataSourceList();
             return;
         }
 
-        DataSourceConfig removed = config.DataSources[removedIndex];
-        config.DataSources.RemoveAt(removedIndex);
-        try
+        if (result.Status == DataSourceOperationStatus.SaveFailed)
         {
-            _configService.Save();
-        }
-        catch (ConfigSaveException exception)
-        {
-            // 写盘失败回滚删除并刷新列表，保证界面与内存一致
-            config.DataSources.Insert(removedIndex, removed);
+            // 写盘失败已由服务回滚内存，刷新列表保证界面与内存一致
             ReloadDataSourceList();
-            _dialogService.ShowError($"删除连接失败：{exception.Message}");
+            _dialogService.ShowError($"删除连接失败：{result.Message}");
             return;
         }
 
@@ -388,7 +372,7 @@ public sealed partial class DataSourceViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 保存连接：校验表单与测试前置条件，密码加密落盘后刷新列表。
+    /// 保存连接：校验表单与测试前置条件，经 Core 连接管理服务加密落盘后刷新列表。
     /// </summary>
     [RelayCommand]
     private void Save()
@@ -406,96 +390,45 @@ public sealed partial class DataSourceViewModel : ObservableObject
             return;
         }
 
-        int port = int.Parse(PortText.Trim());
-        DateTime now = DateTime.Now;
-        AppConfig config = _configService.Current;
+        // 连接字段落草稿交 Core 连接管理服务：唯一名校验、密码加密、落盘与失败回滚在服务内收敛，
+        // 与 MCP 数据源管理共用同一权威通道与校验规则
         bool isNew = _editingOriginalName is null;
+        var draft = new DataSourceConnectionDraft(
+            Name, SelectedType, Host, int.Parse(PortText.Trim()), Database, UserId,
+            PasswordInput, _editingOriginalName);
+        DataSourceOperationResult result = _dataSourceManagementService.Save(draft);
 
-        // 编辑场景先定位原配置并留存原值，保存失败时用于回滚内存快照
-        int? editingIndex = null;
-        DataSourceConfig? original = null;
-        if (!isNew)
+        switch (result.Status)
         {
-            editingIndex = config.DataSources.FindIndex(existing =>
-                string.Equals(existing.Name, _editingOriginalName, StringComparison.Ordinal));
-            if (editingIndex < 0)
-            {
-                // 原连接已不在内存列表中（例如先删除后编辑），刷新列表并回到新增模式避免继续操作失效目标
+            case DataSourceOperationStatus.Invalid:
+            case DataSourceOperationStatus.NameConflict:
+                // 服务端权威校验拒绝（与表单校验同规则，防并发与无界面调用方绕过），提示后保持表单
+                _dialogService.ShowError(result.Message);
+                return;
+
+            case DataSourceOperationStatus.OriginalMissing:
+                // 原连接已不在列表中（例如先删除后编辑），刷新列表并回到新增模式避免继续操作失效目标
                 _dialogService.ShowError($"原连接“{_editingOriginalName}”已不存在，请刷新列表后重试。");
                 ReloadDataSourceList();
                 ResetToNewMode();
                 return;
-            }
 
-            original = CloneDataSourceConfig(config.DataSources[editingIndex.Value]);
-        }
-
-        DataSourceConfig target;
-        if (isNew)
-        {
-            // 新增连接：构造新配置并追加到列表，创建与更新时间统一取当前时间
-            target = new DataSourceConfig
-            {
-                Name = Name.Trim(),
-                Type = SelectedType,
-                Host = Host.Trim(),
-                Port = port,
-                Database = Database.Trim(),
-                UserId = UserId.Trim(),
-                CreatedAt = now,
-                UpdatedAt = now
-            };
-            config.DataSources.Add(target);
-        }
-        else
-        {
-            // 编辑连接：覆写可编辑字段并保留创建时间，目标对象仍在原列表位置
-            target = config.DataSources[editingIndex!.Value];
-            target.Name = Name.Trim();
-            target.Type = SelectedType;
-            target.Host = Host.Trim();
-            target.Port = port;
-            target.Database = Database.Trim();
-            target.UserId = UserId.Trim();
-            target.UpdatedAt = now;
-        }
-
-        // 密码输入了新值才重新加密覆盖，留空保持原密文
-        if (!string.IsNullOrWhiteSpace(PasswordInput))
-        {
-            target.PasswordCipher = _credentialProtector.Encrypt(PasswordInput);
-        }
-
-        try
-        {
-            _configService.Save();
-        }
-        catch (ConfigSaveException exception)
-        {
-            // 写盘失败回滚内存快照：新增移除、编辑恢复原值，随后刷新列表保证界面与内存一致
-            if (isNew)
-            {
-                config.DataSources.Remove(target);
-            }
-            else
-            {
-                config.DataSources[editingIndex!.Value] = original!;
-            }
-
-            ReloadDataSourceList();
-            _dialogService.ShowError($"配置保存失败：{exception.Message}");
-            return;
+            case DataSourceOperationStatus.SaveFailed:
+                // 写盘失败已由服务回滚内存快照，刷新列表保证界面与内存一致
+                ReloadDataSourceList();
+                _dialogService.ShowError($"配置保存失败：{result.Message}");
+                return;
         }
 
         // 编辑的正是当前连接时刷新当前连接快照，保证消费方读到最新配置
         if (!isNew && string.Equals(_currentDataSourceService.Current?.Name, _editingOriginalName, StringComparison.Ordinal))
         {
-            _currentDataSourceService.SetCurrent(target);
+            _currentDataSourceService.SetCurrent(result.Config!);
         }
 
         ReloadDataSourceList();
         ResetToNewMode();
-        _dialogService.ShowInfo(isNew ? $"已新增连接“{target.Name}”。" : $"已更新连接“{target.Name}”。");
+        _dialogService.ShowInfo(isNew ? $"已新增连接“{result.Config!.Name}”。" : $"已更新连接“{result.Config!.Name}”。");
     }
 
     /// <summary>
@@ -554,17 +487,14 @@ public sealed partial class DataSourceViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 从配置快照重建连接列表，并同步各行的当前连接标记。
+    /// 经连接管理服务重建连接列表，并同步各行的当前连接标记。
     /// </summary>
     private void ReloadDataSourceList()
     {
         DataSources.Clear();
-        foreach (DataSourceConfig config in _configService.Current.DataSources)
+        foreach (DataSourceConfig config in _dataSourceManagementService.List())
         {
-            if (config is not null)
-            {
-                DataSources.Add(new DataSourceListItemViewModel(config));
-            }
+            DataSources.Add(new DataSourceListItemViewModel(config));
         }
 
         RefreshCurrentFlags();
@@ -606,26 +536,6 @@ public sealed partial class DataSourceViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 复制数据源配置为等值新实例，用于保存失败时回滚被编辑的原值。
-    /// </summary>
-    /// <param name="source">需要复制的数据源连接配置。</param>
-    private static DataSourceConfig CloneDataSourceConfig(DataSourceConfig source)
-    {
-        return new DataSourceConfig
-        {
-            Name = source.Name,
-            Type = source.Type,
-            Host = source.Host,
-            Port = source.Port,
-            Database = source.Database,
-            UserId = source.UserId,
-            PasswordCipher = source.PasswordCipher,
-            CreatedAt = source.CreatedAt,
-            UpdatedAt = source.UpdatedAt
-        };
-    }
-
-    /// <summary>
     /// 校验表单字段，任一不合法时输出可读错误消息。
     /// </summary>
     /// <param name="errorMessage">校验失败的可读消息；校验通过为 null。</param>
@@ -637,9 +547,10 @@ public sealed partial class DataSourceViewModel : ObservableObject
             return false;
         }
 
-        // 名称唯一性校验：与列表中除自身以外的连接比较，忽略大小写避免下拉引用歧义
+        // 名称唯一性校验：与列表中除自身以外的连接比较，忽略大小写避免下拉引用歧义；
+        // 与 Core 连接管理服务的服务端唯一名校验同规则，表单侧先行提示保证即时反馈
         string trimmedName = Name.Trim();
-        bool nameExists = _configService.Current.DataSources.Any(existing =>
+        bool nameExists = _dataSourceManagementService.List().Any(existing =>
             !string.Equals(existing.Name, _editingOriginalName, StringComparison.Ordinal) &&
             string.Equals(existing.Name, trimmedName, StringComparison.OrdinalIgnoreCase));
         if (nameExists)
