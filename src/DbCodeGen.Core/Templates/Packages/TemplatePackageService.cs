@@ -32,7 +32,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     private readonly ILogger<TemplatePackageService> _logger;
     private readonly string _builtinRootPath;
     private readonly string _importTempRoot;
-    private readonly PackageOperationGate _gate = new();
+    private readonly PackageOperationGate _gate;
 
     /// <summary>
     /// 创建模板包管理服务实例。
@@ -54,6 +54,7 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         _logger = logger;
         _builtinRootPath = Path.GetFullPath(builtinRootPath ?? BuiltinTemplatePackages.GetDefaultRootPath());
         _importTempRoot = importTempRootOverride ?? Path.Combine(Path.GetTempPath(), "DbCodeGen", "Imports");
+        _gate = new PackageOperationGate(logger);
     }
 
     /// <summary>

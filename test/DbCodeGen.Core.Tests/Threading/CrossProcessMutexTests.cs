@@ -1,12 +1,14 @@
 using System.Runtime.Versioning;
 using DbCodeGen.Core.Templates.Packages;
 using DbCodeGen.Core.Threading;
+using Microsoft.Extensions.Logging;
 
 namespace DbCodeGen.Core.Tests.Threading;
 
 /// <summary>
 /// 跨进程命名互斥锁与模板包串行门单元测试：覆盖同进程串行语义不回退、命名锁对其它句柄可见、
-/// 跨进程锁被占时的超时契约、持有进程崩溃后的 abandoned 恢复与锁名派生稳定性。
+/// 跨进程锁被占时的超时契约、持有进程崩溃后的 abandoned 恢复与锁名派生稳定性，
+/// 以及锁等待全程可观测契约（进入等待/等待心跳/获得或超时收敛三态日志与超时诊断文案）。
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class CrossProcessMutexTests : IDisposable
@@ -206,11 +208,126 @@ public sealed class CrossProcessMutexTests : IDisposable
     }
 
     /// <summary>
+    /// 跨进程锁被另一持有方占用时，等待方应逐态产生可观测信号：进入等待（已等待 0ms）与
+    /// 获得锁（等待耗时）日志先后出现；持锁释放后等待方正常完成操作，等待/超时语义不受可观测改造影响。
+    /// </summary>
+    [Fact]
+    public async Task PackageOperationGate_LockContended_EmitsWaitingAndAcquiredLogs()
+    {
+        string lockName = BuildUniqueLockName();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using PackageOperationGate holdingGate = new(lockName, TimeSpan.FromSeconds(10));
+
+        Task holdingOperation = holdingGate.ExecuteExclusiveAsync(async token =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(token);
+        }, CancellationToken.None);
+        await entered.Task;
+
+        var capturingLogger = new CapturingLogger();
+        using PackageOperationGate waitingGate = new(lockName, TimeSpan.FromSeconds(10), capturingLogger);
+
+        // 持锁 1.2 秒后释放：等待方在分片等待中先落进入等待日志，获得后落获得日志
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1200);
+            release.SetResult();
+        });
+
+        await waitingGate.ExecuteExclusiveAsync(token => Task.CompletedTask, CancellationToken.None);
+        await holdingOperation;
+
+        Assert.Contains(capturingLogger.Messages, message =>
+            message.Contains("仍在等待跨进程模板包操作锁") && message.Contains("已等待 0ms"));
+        Assert.Contains(capturingLogger.Messages, message =>
+            message.Contains("后获得") && message.Contains(lockName));
+    }
+
+    /// <summary>
+    /// 锁立即可得的常态快速路径应零等待日志：不产生等待与获得日志，保持常态零噪音。
+    /// </summary>
+    [Fact]
+    public async Task PackageOperationGate_NoContention_EmitsNoWaitingLogs()
+    {
+        var capturingLogger = new CapturingLogger();
+        using PackageOperationGate gate = new(BuildUniqueLockName(), TimeSpan.FromSeconds(10), capturingLogger);
+
+        await gate.ExecuteExclusiveAsync(token => Task.CompletedTask, CancellationToken.None);
+
+        Assert.DoesNotContain(capturingLogger.Messages, message => message.Contains("仍在等待跨进程模板包操作锁"));
+        Assert.DoesNotContain(capturingLogger.Messages, message => message.Contains("后获得"));
+    }
+
+    /// <summary>
+    /// 跨进程锁被占且等待超时时，收敛异常与错误日志应携带诊断信息：
+    /// 等待时长、锁名与疑似持锁者线索齐全，既有超时异常契约（模板包异常）保持不变。
+    /// </summary>
+    [Fact]
+    public async Task PackageOperationGate_Timeout_ExceptionAndLogCarryDiagnostics()
+    {
+        string lockName = BuildUniqueLockName();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using PackageOperationGate holdingGate = new(lockName, TimeSpan.FromSeconds(10));
+
+        Task holdingOperation = holdingGate.ExecuteExclusiveAsync(async token =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(token);
+        }, CancellationToken.None);
+        await entered.Task;
+
+        var capturingLogger = new CapturingLogger();
+        using PackageOperationGate waitingGate = new(lockName, TimeSpan.FromMilliseconds(200), capturingLogger);
+        TemplatePackageException exception = await Assert.ThrowsAsync<TemplatePackageException>(
+            () => waitingGate.ExecuteExclusiveAsync(token => Task.CompletedTask, CancellationToken.None));
+
+        // 异常文案携带等待时长、锁名与疑似持锁者线索；既有超时文案前缀保持不变
+        Assert.Contains("等待跨进程模板包操作锁超时", exception.Message);
+        Assert.Contains("已等待 200ms", exception.Message);
+        Assert.Contains(lockName, exception.Message);
+        Assert.Contains("疑似持锁者线索", exception.Message);
+
+        // 错误日志同样携带等待时长与锁名，供日志侧取证
+        Assert.Contains(capturingLogger.Messages, message =>
+            message.Contains("等待跨进程模板包操作锁超时") && message.Contains("已等待 200ms") && message.Contains(lockName));
+
+        release.SetResult();
+        await holdingOperation;
+    }
+
+    /// <summary>
     /// 构造当前测试独占的跨进程锁名，避免与真实桌面端/其它测试实例互相干扰。
     /// </summary>
     /// <returns>全局唯一的内核命名对象名。</returns>
     private static string BuildUniqueLockName()
     {
         return $"Global\\DbCodeGen.Tests.PackageGate.{Guid.NewGuid():N}";
+    }
+
+    /// <summary>
+    /// 测试用捕获日志器：把全部日志记录按格式化文本收集到内存清单，供断言锁等待三态日志。
+    /// </summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        /// <summary>
+        /// 已记录的格式化日志文本清单（含级别前缀）。
+        /// </summary>
+        public List<string> Messages { get; } = new();
+
+        /// <inheritdoc />
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        /// <inheritdoc />
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        /// <inheritdoc />
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Messages.Add($"[{logLevel}] {formatter(state, exception)}");
+        }
     }
 }

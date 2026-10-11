@@ -38,7 +38,7 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
     private readonly ILogger<BackupRestoreService> _logger;
     private readonly string _defaultTemplateDirectory;
     private readonly string _restoreTempRoot;
-    private readonly PackageOperationGate _gate = new();
+    private readonly PackageOperationGate _gate;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -75,6 +75,7 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "DbCodeGen",
             "Templates"));
+        _gate = new PackageOperationGate(logger);
     }
 
     /// <summary>

@@ -1,0 +1,26 @@
+# 行尾治理：本仓库以 LF 为唯一行尾事实源。
+# 背景：全局 core.autocrlf=true 检出时把 LF 翻成 CRLF，造成工作区与仓库 blob 行尾不一致，
+# 干扰「渲染逐字节 diff」类验证（CR 差异伪影）。本文件按仓库实际文件类型显式落条款，
+# 文本类统一 text + eol=lf（入库与检出均 LF），二进制类标 binary 兜底防误判。
+# 兜底条款：未显式列出的文本文件经 text=auto 自动判定，检出同样统一 LF。
+
+* text=auto eol=lf
+
+# 源码与工程
+*.cs text eol=lf
+*.xaml text eol=lf
+*.csproj text eol=lf
+*.sln text eol=lf
+*.ps1 text eol=lf
+*.gitignore text eol=lf
+
+# 模板与配置
+*.scriban text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
+
+# 二进制
+*.png binary
+*.ico binary
