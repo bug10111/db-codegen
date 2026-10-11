@@ -53,12 +53,17 @@ builder.Services.AddMcpServer(options =>
         Name = "DbCodeGen",
         Version = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "1.0.0"
     };
-    options.ServerInstructions = "DbCodeGen 代码生成器 MCP 服务端（只读枚举工具面）："
-        + "先 list_template_packages / list_templates 选择模板，read_template 查看正文；"
-        + "list_datasources / list_tables / get_table_detail 查询连接与表结构；"
-        + "生成前用 check_type_mapping 预检未映射类型。内置模板包只读；"
-        + "模板包管理走 create_template_package / delete_template_package / rename_template_package / "
-        + "update_template_package_metadata / copy_template_package（删除需 confirm=true，内置包复制转可写用户包用 copy_template_package）。";
+    options.ServerInstructions = "DbCodeGen 代码生成器 MCP 服务端：模板驱动的批量代码生成工具面，六组能力——"
+        + "只读枚举：list_template_packages/list_templates/read_template 查包与模板正文，list_datasources/list_tables/get_table_detail 查连接与表结构，get_type_map/check_type_mapping 查看与预检类型映射；"
+        + "模板编辑：save_template_content/create_template_file/rename_template_file/delete_template_file（内置包只读拒绝）；"
+        + "模板包管理：create_template_package/copy_template_package/rename_template_package/update_template_package_metadata/delete_template_package（删除需 confirm=true，内置包复制为可写用户包用 copy_template_package）；"
+        + "渲染预览：render_template 单模板渲染（免连库，variables 注入 vars.*，modules 渲染 module 作用域片段——手写域/无表场景 table 可省略）、preview_generation 批量 dry-run 零写盘；"
+        + "代码生成：generate 批量生成并写盘（内部先重算 dry-run）；"
+        + "数据源管理：add_datasource/update_datasource/delete_datasource/test_connection。"
+        + "推荐工作流：list_template_packages 选包 → list_templates/read_template 查模板 → 查表两条路（在线 list_tables/get_table_detail；离线合成直接传 tables[].columns，无需连接数据库）→ check_type_mapping 预检未映射类型 → preview_generation 确认文件计划 → generate 写盘。"
+        + "关键语义：generate 与 preview_generation 的 tables 必填非空；模板 scope 三作用域（table 按表集逐表 / module 按 modules 清单逐个 / project 整次一次，同次可混跑）；"
+        + "files 为模板过滤清单，传则仅生成清单内模板，省略时选包内全部启用条目；"
+        + "duplicateStrategy 仅 overwrite/skip 两值——对含手写代码的输出目录必须用 skip 防覆盖手写文件。";
 })
     .WithStdioServerTransport()
     // 加性注册：程序集内一切带 [McpServerToolType] 的工具类自动发现并注册（工具类按需经构造注入上述 Core 服务）。

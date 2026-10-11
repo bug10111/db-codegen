@@ -2,6 +2,7 @@ using System.ComponentModel;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace DbCodeGen.McpServer.Tools;
@@ -39,9 +40,9 @@ public sealed class TableQueryTools
     /// <param name="datasource">已保存的数据源连接名称（可用 list_datasources 查询）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>表摘要列表。</returns>
-    [McpServerTool(Name = "list_tables", ReadOnly = true)]
+    [McpServerTool(Name = "list_tables", Title = "列出数据表", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("列出指定数据源下的全部表（原始表名、类名、变量名、注释；不含列元数据）。datasource 为已保存连接名。")]
-    public async Task<object> ListTablesAsync(string datasource, CancellationToken cancellationToken)
+    public async Task<ListTablesResult> ListTablesAsync(string datasource, CancellationToken cancellationToken)
     {
         try
         {
@@ -65,8 +66,10 @@ public sealed class TableQueryTools
         }
         catch (Exception exception)
         {
-            _logger.LogError(exception, "list_tables 执行失败，连接 {ConnectionName}。", datasource);
-            return ToolError.From(exception, cancellationToken);
+            // 错误走 MCP 标准执行错误通道（isError=true）：结构化输出工具不再以成功载体混装错误对象
+            McpException mapped = QueryToolExceptionMapper.Map(exception, cancellationToken);
+            _logger.LogError(mapped, "list_tables 执行失败，连接 {ConnectionName}。", datasource);
+            throw mapped;
         }
     }
 
@@ -77,9 +80,9 @@ public sealed class TableQueryTools
     /// <param name="table">目标表名（与 list_tables 返回的 name 一致）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>表详情（含完整列元数据与主键列名清单）。</returns>
-    [McpServerTool(Name = "get_table_detail", ReadOnly = true)]
+    [McpServerTool(Name = "get_table_detail", Title = "查询表结构", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("读取指定表的完整列元数据（列名、数据库类型、主键、自增、可空、长度/精度/小数位、注释）。列字段 name/rawDbType 与生成工具入参 tables[].columns[] 同名，可原样透传。")]
-    public async Task<object> GetTableDetailAsync(string datasource, string table, CancellationToken cancellationToken)
+    public async Task<GetTableDetailResult> GetTableDetailAsync(string datasource, string table, CancellationToken cancellationToken)
     {
         try
         {
@@ -121,8 +124,10 @@ public sealed class TableQueryTools
         }
         catch (Exception exception)
         {
-            _logger.LogError(exception, "get_table_detail 执行失败，连接 {ConnectionName}，表 {TableName}。", datasource, table);
-            return ToolError.From(exception, cancellationToken);
+            // 错误走 MCP 标准执行错误通道（isError=true）：结构化输出工具不再以成功载体混装错误对象
+            McpException mapped = QueryToolExceptionMapper.Map(exception, cancellationToken);
+            _logger.LogError(mapped, "get_table_detail 执行失败，连接 {ConnectionName}，表 {TableName}。", datasource, table);
+            throw mapped;
         }
     }
 
@@ -154,7 +159,7 @@ public sealed class TableQueryTools
 /// <param name="ClassName">按表名推导的 PascalCase 类名。</param>
 /// <param name="VariableName">按表名推导的 camelCase 变量名。</param>
 /// <param name="Comment">表注释，无注释时为 null。</param>
-internal sealed record TableSummary(
+public sealed record TableSummary(
     string Name,
     string? Schema,
     string ClassName,
@@ -166,7 +171,7 @@ internal sealed record TableSummary(
 /// </summary>
 /// <param name="Datasource">数据源连接名。</param>
 /// <param name="Tables">表摘要列表。</param>
-internal sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSummary> Tables);
+public sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSummary> Tables);
 
 /// <summary>
 /// 列元数据 DTO，字段名与生成入参 tables[].columns[]（name/rawDbType）一致，调用方可将本应答列条目原样透传。
@@ -181,7 +186,7 @@ internal sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSu
 /// <param name="Length">列长度，无长度语义时为 null。</param>
 /// <param name="Precision">精度，无精度语义时为 null。</param>
 /// <param name="Scale">小数位，无精度语义时为 null。</param>
-internal sealed record ColumnDetail(
+public sealed record ColumnDetail(
     string Name,
     string PropertyName,
     string RawDbType,
@@ -204,7 +209,7 @@ internal sealed record ColumnDetail(
 /// <param name="Comment">表注释。</param>
 /// <param name="Columns">完整列元数据。</param>
 /// <param name="PrimaryKeyColumns">主键列名清单。</param>
-internal sealed record GetTableDetailResult(
+public sealed record GetTableDetailResult(
     string Datasource,
     string Name,
     string? Schema,

@@ -37,10 +37,10 @@ public sealed class TemplateQueryTools
     /// 列出全部可用模板包（内置包 + 用户包），携带内置只读标记与文件数，供生成前选择包。
     /// </summary>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>模板包摘要列表。</returns>
-    [McpServerTool(Name = "list_template_packages", ReadOnly = true, Idempotent = true)]
+    /// <returns>模板包摘要列表（结构化内容，输出结构由 ListTemplatePackagesResult 声明）。</returns>
+    [McpServerTool(Name = "list_template_packages", Title = "列出模板包", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("列出全部模板包（内置包与用户包），含名称、说明、内置只读标记、文件数与修改时间。")]
-    public async Task<object> ListTemplatePackagesAsync(CancellationToken cancellationToken)
+    public async Task<ListTemplatePackagesResult> ListTemplatePackagesAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -65,8 +65,9 @@ public sealed class TemplateQueryTools
         }
         catch (Exception exception)
         {
+            // 强类型查询工具的错误走协议 isError 通道，避免错误负载混入结构化成功应答破坏输出契约
             _logger.LogError(exception, "list_template_packages 执行失败。");
-            return ToolError.From(exception, cancellationToken);
+            throw ToolError.AsMcpException(exception, cancellationToken);
         }
     }
 
@@ -78,10 +79,10 @@ public sealed class TemplateQueryTools
     /// <param name="group">可选分组前缀，匹配模板相对路径的子目录前缀，如 "controller"、子目录多级用正斜杠分隔。</param>
     /// <param name="type">可选语言段过滤，取值 java / csharp / xml / sql / json / plain，对应模板文件名语言段约定。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>模板条目列表（含过滤后总数）。</returns>
-    [McpServerTool(Name = "list_templates", ReadOnly = true, Idempotent = true)]
+    /// <returns>模板条目列表（含过滤后总数；结构化内容，输出结构由 ListTemplatesResult 声明）。</returns>
+    [McpServerTool(Name = "list_templates", Title = "列出模板文件", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言），可按分组前缀与语言段过滤。")]
-    public async Task<object> ListTemplatesAsync(
+    public async Task<ListTemplatesResult> ListTemplatesAsync(
         string package,
         string? group = null,
         string? type = null,
@@ -133,8 +134,9 @@ public sealed class TemplateQueryTools
         }
         catch (Exception exception)
         {
+            // 强类型查询工具的错误走协议 isError 通道，避免错误负载混入结构化成功应答破坏输出契约
             _logger.LogError(exception, "list_templates 执行失败，包名 {PackageName}。", package);
-            return ToolError.From(exception, cancellationToken);
+            throw ToolError.AsMcpException(exception, cancellationToken);
         }
     }
 
@@ -145,7 +147,7 @@ public sealed class TemplateQueryTools
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致，可含分组目录）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板正文全文与条目元数据。</returns>
-    [McpServerTool(Name = "read_template", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "read_template", Title = "读取模板", ReadOnly = true, Idempotent = true, Destructive = false)]
     [Description("读取指定模板文件的正文全文（Scriban 源文本）；path 取 list_templates 返回的相对路径。")]
     public async Task<object> ReadTemplateAsync(string package, string path, CancellationToken cancellationToken)
     {
@@ -264,7 +266,7 @@ public sealed class TemplateQueryTools
 /// <param name="IsBuiltin">是否内置包（只读，不可编辑删除）。</param>
 /// <param name="FileCount">包内模板文件数。</param>
 /// <param name="ModifiedTime">包目录最近修改时间。</param>
-internal sealed record TemplatePackageSummary(
+public sealed record TemplatePackageSummary(
     string Name,
     string Description,
     string Engine,
@@ -277,7 +279,7 @@ internal sealed record TemplatePackageSummary(
 /// list_template_packages 应答 DTO。
 /// </summary>
 /// <param name="Packages">模板包摘要列表。</param>
-internal sealed record ListTemplatePackagesResult(IReadOnlyList<TemplatePackageSummary> Packages);
+public sealed record ListTemplatePackagesResult(IReadOnlyList<TemplatePackageSummary> Packages);
 
 /// <summary>
 /// 模板条目 DTO。
@@ -286,7 +288,7 @@ internal sealed record ListTemplatePackagesResult(IReadOnlyList<TemplatePackageS
 /// <param name="Output">输出相对路径模板，支持 {{变量}} 占位。</param>
 /// <param name="Enabled">是否默认参与生成。</param>
 /// <param name="Language">按文件名语言段推导的目标语言（HighlightLanguage 口径）。</param>
-internal sealed record TemplateEntry(string Path, string Output, bool Enabled, string Language);
+public sealed record TemplateEntry(string Path, string Output, bool Enabled, string Language);
 
 /// <summary>
 /// list_templates 应答 DTO。
@@ -295,7 +297,7 @@ internal sealed record TemplateEntry(string Path, string Output, bool Enabled, s
 /// <param name="IsBuiltin">是否内置包。</param>
 /// <param name="BasePackage">基础包名，未配置时为 null。</param>
 /// <param name="Templates">过滤后命中的模板条目列表。</param>
-internal sealed record ListTemplatesResult(
+public sealed record ListTemplatesResult(
     string Package,
     bool IsBuiltin,
     string? BasePackage,

@@ -42,10 +42,11 @@ public sealed class DataSourceManageTools
     /// <param name="password">密码明文，仅瞬态用于加密入库，不回显；缺省表示空密码。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带连接摘要；失败携带结构化错误（InvalidArgument / NameConflict / SaveFailed）。</returns>
-    [McpServerTool(Name = "add_datasource")]
+    [McpServerTool(Name = "add_datasource", Title = "新增数据源", Destructive = false)]
     [Description("新增数据源连接并保存（名称需唯一）。密码经 DPAPI 加密入库且不回显；先用 test_connection 直测参数可用，再以此工具保存。")]
     public Task<object> AddDataSourceAsync(
         string name,
+        [Description("数据库类型：mysql / postgresql。")]
         string type,
         string host,
         int port,
@@ -89,11 +90,12 @@ public sealed class DataSourceManageTools
     /// <param name="password">新密码明文；缺省或空白保持已保存密码。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带更新后的连接摘要；失败携带结构化错误（InvalidArgument / NameConflict / OriginalMissing / SaveFailed）。</returns>
-    [McpServerTool(Name = "update_datasource")]
+    [McpServerTool(Name = "update_datasource", Title = "更新数据源", Destructive = false, Idempotent = true)]
     [Description("按 originalName 定位并更新已保存连接：只传需要修改的字段，未传字段保持原值；password 留空表示保持已保存密码。")]
     public Task<object> UpdateDataSourceAsync(
         string originalName,
         string? name = null,
+        [Description("数据库类型（mysql / postgresql）；缺省保持原值。")]
         string? type = null,
         string? host = null,
         int? port = null,
@@ -146,7 +148,7 @@ public sealed class DataSourceManageTools
     /// <param name="name">待删除连接的名称（区分大小写精确匹配）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带被删除连接的摘要；失败携带结构化错误（NotFound / SaveFailed）。</returns>
-    [McpServerTool(Name = "delete_datasource")]
+    [McpServerTool(Name = "delete_datasource", Title = "删除数据源", Destructive = true)]
     [Description("按名称删除已保存的数据源连接（区分大小写精确匹配，不存在时返回 NotFound）。")]
     public Task<object> DeleteDataSourceAsync(string name, CancellationToken cancellationToken = default)
     {

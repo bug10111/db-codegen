@@ -2,6 +2,7 @@ using System.ComponentModel;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace DbCodeGen.McpServer.Tools;
@@ -35,9 +36,9 @@ public sealed class DataSourceQueryTools
     /// </summary>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>数据源连接摘要列表。</returns>
-    [McpServerTool(Name = "list_datasources", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "list_datasources", Title = "列出数据源", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("列出全部已保存的数据源连接（名称、类型、主机、端口、库、用户、时间戳）；密码与密文永不回显。")]
-    public Task<object> ListDataSourcesAsync(CancellationToken cancellationToken)
+    public Task<ListDataSourcesResult> ListDataSourcesAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -58,12 +59,14 @@ public sealed class DataSourceQueryTools
             }
 
             _logger.LogInformation("list_datasources 完成，连接数 {DataSourceCount}。", items.Count);
-            return Task.FromResult<object>(new ListDataSourcesResult(items));
+            return Task.FromResult(new ListDataSourcesResult(items));
         }
         catch (Exception exception)
         {
-            _logger.LogError(exception, "list_datasources 执行失败。");
-            return Task.FromResult<object>(ToolError.From(exception, cancellationToken));
+            // 错误走 MCP 标准执行错误通道（isError=true）：结构化输出工具不再以成功载体混装错误对象
+            McpException mapped = QueryToolExceptionMapper.Map(exception, cancellationToken);
+            _logger.LogError(mapped, "list_datasources 执行失败。");
+            throw mapped;
         }
     }
 }
@@ -79,7 +82,7 @@ public sealed class DataSourceQueryTools
 /// <param name="UserId">用户名。</param>
 /// <param name="CreatedAt">创建时间。</param>
 /// <param name="UpdatedAt">最近更新时间。</param>
-internal sealed record DataSourceSummary(
+public sealed record DataSourceSummary(
     string Name,
     string Type,
     string Host,
@@ -93,4 +96,31 @@ internal sealed record DataSourceSummary(
 /// list_datasources 应答 DTO。
 /// </summary>
 /// <param name="Datasources">数据源连接摘要列表。</param>
-internal sealed record ListDataSourcesResult(IReadOnlyList<DataSourceSummary> Datasources);
+public sealed record ListDataSourcesResult(IReadOnlyList<DataSourceSummary> Datasources);
+
+/// <summary>
+/// 结构化查询工具（list_datasources / list_tables / get_table_detail / get_type_map）共享的错误通道映射器：
+/// 将工具执行异常映射为 MCP 标准执行错误异常（SDK 转 CallToolResult(isError=true) 应答），
+/// 消息文本沿用既有结构化错误的脱敏语义，保证错误可诊断且不携带敏感字段。
+/// </summary>
+internal static class QueryToolExceptionMapper
+{
+    /// <summary>
+    /// 将工具执行异常映射为 MCP 执行错误异常；requestToken 为本次请求关联的取消令牌，
+    /// 用于区分「调用方主动取消」与「连接超时兜底触发的链式取消」两类同形态异常。
+    /// </summary>
+    /// <param name="exception">工具执行中抛出的异常。</param>
+    /// <param name="requestToken">请求关联取消令牌；未置位时收到取消异常即判内部超时。</param>
+    /// <returns>携带脱敏消息的 MCP 执行错误异常。</returns>
+    public static McpException Map(Exception exception, CancellationToken? requestToken = null) => exception switch
+    {
+        // 调用方未取消却收到取消异常：来源为连接的超时兜底（内部链式取消令牌触发），
+        // 固定文案给出可诊断指引，与桌面端测试连接的超时反馈语义对齐
+        OperationCanceledException when requestToken is null || !requestToken.Value.IsCancellationRequested =>
+            new McpException("连接超时（10 秒兜底触发），请检查主机地址、端口与网络后重试。", exception),
+        // 调用方主动取消：请求关联取消令牌已置位，保留取消语义文案
+        OperationCanceledException => new McpException("操作已取消。", exception),
+        // 其余异常消息经 Core 层脱敏后透出：参数校验与领域错误消息自解释，供调用方自纠
+        _ => new McpException(exception.Message, exception)
+    };
+}

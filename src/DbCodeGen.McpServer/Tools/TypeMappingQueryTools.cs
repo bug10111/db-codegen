@@ -5,6 +5,7 @@ using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace DbCodeGen.McpServer.Tools;
@@ -54,9 +55,9 @@ public sealed class TypeMappingQueryTools
     /// <param name="package">可选模板包包名；提供时一并返回该包清单声明的 typeMap。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>全局与包级映射条目及未命中兜底类型。</returns>
-    [McpServerTool(Name = "get_type_map", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "get_type_map", Title = "查看类型映射", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("查看生效的类型映射表：全局映射条目与可选包级 typeMap；未映射类型生成时回落 defaultType。")]
-    public async Task<object> GetTypeMapAsync(string? package = null, CancellationToken cancellationToken = default)
+    public async Task<GetTypeMapResult> GetTypeMapAsync(string? package = null, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -89,8 +90,10 @@ public sealed class TypeMappingQueryTools
         }
         catch (Exception exception)
         {
-            _logger.LogError(exception, "get_type_map 执行失败，包名 {PackageName}。", package);
-            return ToolError.From(exception, cancellationToken);
+            // 错误走 MCP 标准执行错误通道（isError=true）：结构化输出工具不再以成功载体混装错误对象
+            McpException mapped = QueryToolExceptionMapper.Map(exception, cancellationToken);
+            _logger.LogError(mapped, "get_type_map 执行失败，包名 {PackageName}。", package);
+            throw mapped;
         }
     }
 
@@ -103,7 +106,7 @@ public sealed class TypeMappingQueryTools
     /// <param name="package">目标模板包包名，预检与生成须使用同一包的 typeMap 口径。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>未映射类型清单与是否全部命中。</returns>
-    [McpServerTool(Name = "check_type_mapping", ReadOnly = true)]
+    [McpServerTool(Name = "check_type_mapping", Title = "预检类型映射", ReadOnly = true, Idempotent = true, Destructive = false)]
     [Description("生成前预检：检查指定表集合在当前映射链（包 typeMap>全局>兜底）下的未映射数据库类型，避免生成出回落 String 的列。")]
     public async Task<object> CheckTypeMappingAsync(
         string datasource,
@@ -164,7 +167,7 @@ public sealed class TypeMappingQueryTools
 /// <param name="Import">可选导包，无导包需求时为 null。</param>
 /// <param name="Remark">可选备注。</param>
 /// <param name="DatabaseType">适用数据库类型；null 表示通用条目（对所有数据库生效）。</param>
-internal sealed record TypeMappingEntryDto(
+public sealed record TypeMappingEntryDto(
     string DbType,
     string TargetType,
     string? Import,
@@ -176,7 +179,7 @@ internal sealed record TypeMappingEntryDto(
 /// </summary>
 /// <param name="DbType">数据库原始类型。</param>
 /// <param name="TargetType">目标语言类型。</param>
-internal sealed record PackageTypeMapEntryDto(string DbType, string TargetType);
+public sealed record PackageTypeMapEntryDto(string DbType, string TargetType);
 
 /// <summary>
 /// get_type_map 应答 DTO。
@@ -185,7 +188,7 @@ internal sealed record PackageTypeMapEntryDto(string DbType, string TargetType);
 /// <param name="Package">包名；未指定包时为空串。</param>
 /// <param name="PackageTypeMap">包级 typeMap 条目；未指定包时为 null。</param>
 /// <param name="DefaultType">全部未命中时的兜底目标类型。</param>
-internal sealed record GetTypeMapResult(
+public sealed record GetTypeMapResult(
     IReadOnlyList<TypeMappingEntryDto> Global,
     string Package,
     IReadOnlyList<PackageTypeMapEntryDto>? PackageTypeMap,

@@ -35,7 +35,7 @@ public sealed class TemplateEditTools
     /// <param name="content">模板正文全文（Scriban 源文本，UTF-8 无 BOM 落盘）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>保存成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "save_template_content")]
+    [McpServerTool(Name = "save_template_content", Title = "保存模板内容", Destructive = false, Idempotent = true)]
     [Description("保存用户模板包内既有模板文件的正文（整篇覆写，Scriban 源文本）。内置包只读拒绝；文件须已存在，新建文件用 create_template_file。")]
     public async Task<object> SaveTemplateContentAsync(
         string package,
@@ -76,7 +76,7 @@ public sealed class TemplateEditTools
     /// <param name="outputPath">新增模板的输出相对路径模板，支持 {{变量}} 占位（如 src/{{table.variableName}}/User.java）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>新增成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "create_template_file")]
+    [McpServerTool(Name = "create_template_file", Title = "新建模板文件", Destructive = false)]
     [Description("向用户模板包新增一个空模板文件（enabled=true，正文随后用 save_template_content 写入）。path 可含分组目录；outputPath 为输出相对路径模板，支持 {{变量}} 占位。")]
     public async Task<object> CreateTemplateFileAsync(
         string package,
@@ -117,7 +117,7 @@ public sealed class TemplateEditTools
     /// <param name="path">待删除模板文件相对包根路径。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>删除成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "delete_template_file")]
+    [McpServerTool(Name = "delete_template_file", Title = "删除模板文件", Destructive = true)]
     [Description("从用户模板包删除一个模板文件（物理删除并同步移除清单条目，不可恢复）。内置包只读拒绝；允许删除最后一个模板（包变空包）。")]
     public async Task<object> DeleteTemplateFileAsync(
         string package,
@@ -154,7 +154,7 @@ public sealed class TemplateEditTools
     /// <param name="newPath">新模板文件相对包根路径，可移动分组目录，须防目录穿越安全。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>重命名成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "rename_template_file")]
+    [McpServerTool(Name = "rename_template_file", Title = "重命名模板文件", Destructive = false)]
     [Description("重命名/移动用户模板包内的一个模板文件（物理改名并同步更新清单条目，勾选记忆不迁移）。内置包只读拒绝；newPath 可含新分组目录。")]
     public async Task<object> RenameTemplateFileAsync(
         string package,

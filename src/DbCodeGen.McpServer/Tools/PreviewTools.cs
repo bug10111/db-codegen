@@ -48,18 +48,19 @@ public sealed class PreviewTools
     /// 以合成表上下文渲染单个模板（无需数据库连接），返回渲染后全文或结构化语法错误（含行列定位）。
     /// 传入 table 时按表上下文渲染（现状行为）；省略 table 时按作用域片段渲染——传 modules 取首元素为 module 上下文，
     /// 未传 modules 按 project 型上下文（vars + 空 tables 汇总）；渲染返回文本不落盘。
+    /// 与 generate/preview_generation 的 tables 必填非空语义不同，本工具 table 可省略（手写域/无表场景）。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致）。</param>
-    /// <param name="table">合成表上下文：原始表名必填，列集合可选；module/project 型片段渲染可省略。</param>
+    /// <param name="table">合成表上下文：原始表名必填，列集合可选；可省略（手写域/无表场景），省略时按作用域片段渲染。</param>
     /// <param name="column">可选的当前列上下文，供模板内 column 变量消费（列级模板用）；仅在传入 table 时可用。</param>
     /// <param name="basePackageOverride">本次渲染的基础包名覆盖值；为空时使用模板包 manifest 基础包名。</param>
     /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*；键与保留命名空间冲突时结构化拒绝。</param>
     /// <param name="modules">可选的模块清单（如 [{"name":"account"}]）；片段渲染单次仅支持一个模块上下文，取首元素（name 必填，其余字段原样注入 module.*）；与 table 互斥。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>渲染结果全文（PreviewResult 全量字段）。</returns>
-    [McpServerTool(Name = "render_template", ReadOnly = true, Idempotent = true)]
-    [Description("以合成表上下文渲染单个模板（无需数据库连接）：返回渲染后全文；模板语法错误时返回 errorMessage 与 errorLine/errorColumn 行列定位。支持可选 variables（注入 vars.*）与 modules（module 作用域片段渲染，返回文本不落盘）。")]
+    [McpServerTool(Name = "render_template", Title = "渲染模板", ReadOnly = true, Idempotent = true, Destructive = false)]
+    [Description("以合成表上下文渲染单个模板（无需数据库连接）：返回渲染后全文；模板语法错误时返回 errorMessage 与 errorLine/errorColumn 行列定位。table 可省略（手写域/无表场景）：不传 table 时传 modules 按 module 作用域渲染片段、未传 modules 按 project 上下文（vars + 空 tables 汇总）渲染——generate/preview_generation 的 tables 必填非空，本工具可省略，这是两者的关键差异。支持可选 variables（注入 vars.*）与 modules（module 作用域片段渲染，返回文本不落盘）。")]
     public async Task<object> RenderTemplateAsync(
         string package,
         string path,
@@ -169,26 +170,30 @@ public sealed class PreviewTools
     /// 三种作用域可混跑；渲染后按目标状态分类为 new/overwrite/skip），全程零写盘。
     /// </summary>
     /// <param name="package">模板包包名。</param>
-    /// <param name="tables">合成表集合，至少一张表。</param>
+    /// <param name="tables">合成表集合，必填非空（至少一张表）；离线合成场景直接内联表结构即可，无需连接数据库。</param>
     /// <param name="workspaceRoot">工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建）。</param>
-    /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）。</param>
+    /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）；经源根标记拆分为相对输出根与基础包名，包间输出路径配方以包清单声明的输出路径形态为准。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
-    /// <param name="files">模板相对路径清单；省略时默认选择包内全部启用条目。</param>
+    /// <param name="files">模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite / skip，影响 overwrite/skip 分类。</param>
     /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；键与保留命名空间冲突时结构化拒绝。</param>
     /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>文件计划条目与分类计数、未映射类型清单。</returns>
-    [McpServerTool(Name = "preview_generation", ReadOnly = true, Idempotent = true)]
-    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）及未映射类型清单，确认后再调 generate。")]
+    [McpServerTool(Name = "preview_generation", Title = "预览生成", ReadOnly = true, Idempotent = true, Destructive = false)]
+    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）及未映射类型清单，确认后再调 generate；tables 必填非空（至少一张表）。files 为模板过滤清单：传则仅预览清单内模板，省略时选包内全部启用条目。")]
     public async Task<object> PreviewGenerationAsync(
         string package,
+        [Description("合成表集合，必填非空（至少一张表）；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
         IReadOnlyList<SyntheticTableInput> tables,
         string workspaceRoot,
+        [Description("代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）：按源根标记（java/kotlin/groovy/scala/src）拆分为相对输出根与基础包名，纯包名形态输出根固定 src/main/java；包间输出路径配方差异以包清单 files[].output 形态为准（经 list_templates 查看）。")]
         string codeDirectory,
         string? basePackageOverride = null,
+        [Description("模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。")]
         IReadOnlyList<string>? files = null,
-        string duplicateStrategy = "overwrite",
+        [Description("同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）；对含手写代码的输出目录用 skip 防覆盖手写文件。")]
+        DuplicateFileStrategy duplicateStrategy = DuplicateFileStrategy.Overwrite,
         IReadOnlyDictionary<string, object?>? variables = null,
         IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
@@ -197,7 +202,7 @@ public sealed class PreviewTools
         {
             GenerationRequest request = await GenerationRequestFactory.CreateAsync(
                 _packageService, package, tables, files, workspaceRoot, codeDirectory,
-                basePackageOverride, duplicateStrategy, persistLastUsedPaths: false,
+                basePackageOverride, duplicateStrategy.ToString().ToLowerInvariant(), persistLastUsedPaths: false,
                 variables, modules, cancellationToken);
 
             // dry-run 只计算文件计划，不产生任何写盘动作

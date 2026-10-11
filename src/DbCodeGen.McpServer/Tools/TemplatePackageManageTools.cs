@@ -39,7 +39,7 @@ public sealed class TemplatePackageManageTools
     /// <param name="firstOutputPath">首模板文件输出相对路径模板，支持 {{变量}} 占位。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>创建成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "create_template_package")]
+    [McpServerTool(Name = "create_template_package", Title = "新建模板包", Destructive = false)]
     [Description("新建用户模板包（写 template.json 清单，固定 scriban 引擎，可设包说明 description、基础包名 basePackage 与包级类型映射 typeMap（数据库原始类型→目标语言类型，生成时优先于全局映射表命中），basePackage 传空串表示清空）。可选传 firstTemplatePath+firstOutputPath 顺带创建首个空模板文件（两者须同时提供），正文随后用 save_template_content 写入；不传则创建空包。与内置包/既有用户包同名拒绝。")]
     public async Task<object> CreateTemplatePackageAsync(
         string package,
@@ -79,7 +79,7 @@ public sealed class TemplatePackageManageTools
     /// <param name="confirm">删除确认开关，必须显式传 true 才执行。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>删除成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "delete_template_package")]
+    [McpServerTool(Name = "delete_template_package", Title = "删除模板包", Destructive = true)]
     [Description("删除用户模板包（物理删除整个包目录，不可恢复）。防误删保护：confirm 必须显式传 true 才执行；内置包只读拒绝删除。")]
     public async Task<object> DeleteTemplatePackageAsync(
         string package,
@@ -115,7 +115,7 @@ public sealed class TemplatePackageManageTools
     /// <param name="newName">新模板包包名，须符合目录名规则。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>重命名成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "rename_template_package")]
+    [McpServerTool(Name = "rename_template_package", Title = "重命名模板包", Destructive = false)]
     [Description("重命名用户模板包（物理改目录名并同步重写清单包名）。勾选记忆不迁移：包展示顺序记忆与模板勾选记忆不随改名迁移，与 rename_template_file 文件级先例一致；桌面端旧名记忆条目需自行重建。内置包只读拒绝；新名与既有包同名拒绝。")]
     public async Task<object> RenameTemplatePackageAsync(
         string package,
@@ -158,7 +158,7 @@ public sealed class TemplatePackageManageTools
     /// 传空对象 {} 清空映射表。该映射在生成时优先于全局映射表命中（解析链：包 typeMap &gt; 库专属 &gt; 通用 &gt; 兜底）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>更新成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "update_template_package_metadata")]
+    [McpServerTool(Name = "update_template_package_metadata", Title = "更新模板包元数据", Destructive = false, Idempotent = true)]
     [Description("更新用户模板包元数据（包说明 description、基础包名 basePackage 与包级类型映射 typeMap）：只传需要修改的字段，未传字段保持不变；basePackage 传空串表示清空；typeMap 传空对象 {} 表示清空映射表，非空对象整体覆盖（键为数据库原始类型、值为目标语言类型，生成时优先于全局映射表命中）。内置包只读拒绝。")]
     public async Task<object> UpdateTemplatePackageMetadataAsync(
         string package,
@@ -199,7 +199,7 @@ public sealed class TemplatePackageManageTools
     /// <param name="overwrite">是否允许覆盖同名用户包。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>复制成功摘要或结构化错误。</returns>
-    [McpServerTool(Name = "copy_template_package")]
+    [McpServerTool(Name = "copy_template_package", Title = "复制模板包", Destructive = true)]
     [Description("复制模板包为新用户包：内置包可一键复制为可写用户包后自定义修改。新包名与内置包同名拒绝；与用户包同名需 overwrite=true 覆盖确认。")]
     public async Task<object> CopyTemplatePackageAsync(
         string sourcePackage,

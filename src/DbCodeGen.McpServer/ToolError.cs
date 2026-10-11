@@ -1,4 +1,5 @@
 using DbCodeGen.Core.Templates.Packages;
+using ModelContextProtocol;
 
 namespace DbCodeGen.McpServer;
 
@@ -44,5 +45,29 @@ public static ToolErrorResult From(Exception exception, CancellationToken? reque
     OperationCanceledException => new ToolErrorResult(ToolErrorResult.ErrorMarker, "Cancelled", "操作已取消。"),
     // 其余异常统一归类内部错误，消息经 Core 层脱敏后透出
     _ => new ToolErrorResult(ToolErrorResult.ErrorMarker, "InternalError", exception.Message)
+};
+
+/// <summary>
+/// 结构化错误应答的 MCP 协议化载体：带错误分类标签的人类可读消息封装为 McpException 抛出。
+/// 供声明 outputSchema 的强类型查询工具使用——此类工具的成功应答承载结构化内容，
+/// 失败信息必须走协议 isError 通道而非混入成功负载，否则将破坏输出结构契约。
+/// 标签前缀保留 ToolErrorResult.ErrorType 的分类语义，保证错误可诊断性不因通道切换而降级。
+/// </summary>
+/// <param name="exception">工具执行中抛出的异常。</param>
+/// <param name="requestToken">请求关联取消令牌；未置位时收到取消异常即判内部超时，分类口径与 From 一致。</param>
+/// <returns>携带分类标签消息的 McpException，由调用方抛出经 SDK 转为 isError 应答。</returns>
+public static McpException AsMcpException(Exception exception, CancellationToken? requestToken = null) => exception switch
+{
+    // 参数非法：路径穿越、空参数、非法枚举值等入参问题
+    ArgumentException => new McpException($"[InvalidArgument] {exception.Message}"),
+    // 模板包域错误：包不存在、清单校验失败、路径越界等
+    TemplatePackageException => new McpException($"[TemplatePackageError] {exception.Message}"),
+    // 调用方未取消却收到取消异常：来源为内部链路超时兜底，归类超时并给出可诊断文案
+    OperationCanceledException when requestToken is null || !requestToken.Value.IsCancellationRequested =>
+        new McpException("[Timeout] 操作超时，请重试或缩小请求范围。"),
+    // 调用方主动取消：请求关联取消令牌已置位，结构化告知取消
+    OperationCanceledException => new McpException("[Cancelled] 操作已取消。"),
+    // 其余异常统一归类内部错误，消息经 Core 层脱敏后透出
+    _ => new McpException($"[InternalError] {exception.Message}")
 };
 }

@@ -48,10 +48,11 @@ public sealed class ConnectionTestTools
     /// <param name="password">直测模式密码明文，仅瞬态用于本次连接，不入库不回显；缺省按空密码尝试。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>连接测试结果（成功与否、可读信息、服务端版本、耗时毫秒）。</returns>
-    [McpServerTool(Name = "test_connection", ReadOnly = true)]
+    [McpServerTool(Name = "test_connection", Title = "测试连接", ReadOnly = true, Idempotent = true, Destructive = false)]
     [Description("测试数据库连接可用性（10 秒超时）。两模式二选一：传 datasource 按已保存连接测试；或传 type/host/port/database/userId（password 可选）完整明文直测——不入库、不保存任何信息。")]
     public async Task<object> TestConnectionAsync(
         string? datasource = null,
+        [Description("直测模式数据库类型：mysql / postgresql；传 datasource 按已保存连接测试时忽略本参数。")]
         string? type = null,
         string? host = null,
         int? port = null,
