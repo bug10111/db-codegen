@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- 目标框架取 net8.0-windows：McpServer 工程（net8.0-windows）的项目引用兼容前提，供工具面内部组件单元测试直达 -->
+    <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -23,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DbCodeGen.Core\DbCodeGen.Core.csproj" />
+    <ProjectReference Include="..\..\src\DbCodeGen.McpServer\DbCodeGen.McpServer.csproj" />
   </ItemGroup>
 
 </Project>

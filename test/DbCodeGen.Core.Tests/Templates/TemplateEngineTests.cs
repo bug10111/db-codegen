@@ -767,8 +767,114 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// RenderScoped project 型输入（无 module）下模板误引用 module.* 应渲染失败并结构化定位（undefined member 拒绝）。
+    /// RenderScoped project 型输入携带 modules 清单时应注入 modules 集合，模板可循环并访问与 module.* 同构的 name 字段。
     /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScope_ModulesLoop_RendersAllModuleNames()
+    {
+        var scope = ScopeRenderInput.Create(
+            null, null, null,
+            new[] { new ModuleContext("asset"), new ModuleContext("user-center") });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ for m in modules }}[{{ m.name }}]{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("[asset][user-center]", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped project 型输入未传 modules 时模板对 modules 的空值守卫应走缺失分支（undefined 全局变量与 null 比较为真，不抛运行期错误）。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScope_ModulesAbsent_GuardBranchRenders()
+    {
+        var scope = ScopeRenderInput.Create(new Dictionary<string, object?> { ["appName"] = "demo" });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ if modules == null }}missing{{ else }}{{ for m in modules }}{{ m.name }}{{ end }}{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("missing", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped project 型输入 modules 元素名应原样保留大小写（注入源与 module 作用域目录名同源同值，大小写天然解耦）。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScope_ModulesCasePreserved()
+    {
+        var scope = ScopeRenderInput.Create(
+            null, null, null,
+            new[] { new ModuleContext("Asset") });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ for m in modules }}{{ m.name }}{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("Asset", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped project 型输入同时携带显式 variables.modules 与注入 modules 时两命名空间互不遮蔽：
+    /// 模板循环根变量 modules 取注入清单，vars.modules 仍可独立引用（显式 variables.modules 不覆盖注入源）。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScope_ExplicitVarsModules_CoexistsWithInjectedModules()
+    {
+        var scope = ScopeRenderInput.Create(
+            new Dictionary<string, object?> { ["modules"] = new[] { new Dictionary<string, object?> { ["name"] = "ghost" } } },
+            null, null,
+            new[] { new ModuleContext("real") });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ for m in modules }}{{ m.name }}{{ end }}|{{ for m in vars.modules }}{{ m.name }}{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("real|ghost", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped module 型输入不携带 modules 清单时不得注入 modules 集合（module 作用域既有行为零变化）：
+    /// 裸引用渲染为空、循环零迭代。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ModuleScope_ModulesNotInjected()
+    {
+        var scope = ScopeRenderInput.Create(null, new ModuleContext("account"));
+
+        PreviewResult result = _engine.RenderScoped(
+            "module={{ module.name }} list=[{{ modules }}]{{ for m in modules }}{{ m.name }}{{ end }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("module=account list=[]", result.Output);
+    }
+
+    /// <summary>
+    /// RenderScoped project 型输入携带 modules 时模板误引用 module.* 仍应结构化失败
+    /// （modules 集合注入不改变单模块 module.* 的缺省缺席语义）。
+    /// </summary>
+    [Fact]
+    public void RenderScoped_ProjectScopeWithModules_ModuleReferenceStillFails()
+    {
+        var scope = ScopeRenderInput.Create(
+            null, null, null,
+            new[] { new ModuleContext("asset") });
+
+        PreviewResult result = _engine.RenderScoped(
+            "{{ module.name }}",
+            CreatePackageContext(), scope, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("module.name", result.ErrorMessage);
+    }
+
+
     [Fact]
     public void RenderScoped_ProjectScope_ModuleReferenceFails()
     {

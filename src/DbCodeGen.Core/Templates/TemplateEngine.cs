@@ -76,12 +76,13 @@ public sealed class TemplateEngine
 
     /// <summary>
     /// 按作用域渲染模板正文（module / project 作用域片段与生成共用）：不注入 table / column 单表上下文，
-    /// 注入 package / tool 与作用域变量 vars? / module? / tables?；渲染管线（共享函数文件、空行规整、结构化错误）与
-    /// 表作用域 Render 完全一致。
+    /// 注入 package / tool 与作用域变量 vars? / module? / tables? / modules?（modules 由调用方按输入决定携带，
+    /// 批量生成管线中仅 project 作用域输入携带）；
+    /// 渲染管线（共享函数文件、空行规整、结构化错误）与表作用域 Render 完全一致。
     /// </summary>
     /// <param name="templateText">模板文本。</param>
     /// <param name="packageContext">package 侧渲染上下文。</param>
-    /// <param name="scopeContext">作用域渲染输入，承载 vars / module / tables。</param>
+    /// <param name="scopeContext">作用域渲染输入，承载 vars / module / tables / modules。</param>
     /// <param name="cancellationToken">取消标记，渲染被取消时抛 OperationCanceledException。</param>
     /// <param name="templateName">模板名，用于错误定位展示；为空时使用包名。</param>
     /// <returns>渲染结果，成功时含真实代码，失败时含错误描述与行列。</returns>
@@ -132,6 +133,20 @@ public sealed class TemplateEngine
         string sourceName)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
+
+        // 渲染前集合消费守卫：调用方 variables 标量值被 for 迭代时 Scriban 会逐字符产出垃圾内容，
+        // 此处按模板 AST 定位后结构化拒绝，行列指向模板内集合消费表达式
+        (string GuardMessage, int GuardLine, int GuardColumn)? guardError =
+            CollectionIterationGuard.FindScalarIteration(template, root);
+        if (guardError is not null)
+        {
+            stopwatch.Stop();
+            return PreviewResult.Error(
+                FormatErrorMessage(sourceName, guardError.Value.GuardMessage, guardError.Value.GuardLine, guardError.Value.GuardColumn),
+                guardError.Value.GuardLine,
+                guardError.Value.GuardColumn,
+                stopwatch.ElapsedMilliseconds);
+        }
 
         // 解析包内共享函数文件：约定文件不存在时为 null，渲染管线零改动，保证无共享文件包行为不变
         string? sharedFunctionsPath = ResolveSharedFunctionsPath(packageContext);
@@ -405,8 +420,9 @@ public sealed class TemplateEngine
     }
 
     /// <summary>
-    /// 组装作用域（module / project）内容渲染根上下文：注入 package / tool 与 vars? / module? / tables?，
-    /// 不注入单表 table / column；tool 的数据库类型取全表汇总中首个非空值（同次生成通常同库）。
+    /// 组装作用域（module / project）内容渲染根上下文：注入 package / tool 与 vars? / module? / tables? / modules?
+    /// （modules 由调用方按输入决定携带，批量生成管线中仅 project 作用域输入携带），不注入单表 table / column；
+    /// tool 的数据库类型取全表汇总中首个非空值（同次生成通常同库）。
     /// </summary>
     /// <param name="packageContext">package 侧渲染上下文。</param>
     /// <param name="scopeContext">作用域渲染输入。</param>
@@ -423,7 +439,8 @@ public sealed class TemplateEngine
 
     /// <summary>
     /// 向渲染根上下文注入作用域变量：vars.*（键值经 Scriban 值转换）、module.*（name + 附加属性）、
-    /// tables（全表汇总，元素字段与 table.* 同构）；各集合仅在调用方提供时注入。
+    /// tables（全表汇总，元素字段与 table.* 同构）、modules（全模块清单，project 作用域聚合循环消费，
+    /// 元素字段与 module.* 同构）；各集合仅在调用方提供时注入。
     /// </summary>
     /// <param name="root">渲染根上下文。</param>
     /// <param name="scopeContext">作用域渲染输入，可为空（空时不注入任何作用域变量，行为与既有一致）。</param>
@@ -458,6 +475,19 @@ public sealed class TemplateEngine
             }
 
             root.SetValue("tables", tablesArray, true);
+        }
+
+        // 全模块清单注入 modules 集合：元素字段与 module.* 同构，供 project 模板循环模块聚合段；
+        // 与用户显式传入的 vars.modules 分属根变量与 vars 子键两个命名空间，同名互不遮蔽
+        if (scopeContext.Modules is not null)
+        {
+            var modulesArray = new ScriptArray();
+            foreach (ModuleContext module in scopeContext.Modules)
+            {
+                modulesArray.Add(BuildModuleObject(module)!);
+            }
+
+            root.SetValue("modules", modulesArray, true);
         }
     }
 

@@ -745,6 +745,159 @@ public sealed class CodeGeneratorTests : IDisposable
     }
 
     /// <summary>
+    /// 纯 project 作用域生成且未传任何表时应正常产出工程条目（表仅作为 tables 汇总注入，空集合合法），
+    /// 支撑 MCP 面纯 module/project 作用域包省略 tables 的分型语义。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ProjectScopeOnlyWithEmptyTables_ProducesProjectEntries()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("app-context.cs.scriban", "src/Data/AppDbContext.cs", "context {{vars.appName}}\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("app-context.cs.scriban", "src/Data/AppDbContext.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = new GenerationRequest(
+            package, Array.Empty<TableInfo>(), files, workspaceRoot, "gen");
+        request = WithModules(request, variables: new Dictionary<string, object?> { ["appName"] = "demo" }, modules: null);
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(request, null, CancellationToken.None);
+
+        GenerationFileEntry entry = Assert.Single(preview.Entries);
+        Assert.Equal(string.Empty, entry.TableName);
+        Assert.Equal(Path.Combine(workspaceRoot, "src", "Data", "AppDbContext.cs"), entry.AbsolutePath);
+    }
+
+    /// <summary>
+    /// project 模板循环 modules 清单渲染的聚合段应与 module 作用域按同一清单产出的目录名逐字一致
+    /// （同一数据源同值，目录名与聚合段大小写天然解耦）。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_ProjectScopeModulesLoop_MatchesModuleDirectoryNames()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"));
+        _tempRoots.Add(tempRoot);
+        string packageDir = Path.Combine(tempRoot, "user-pkg");
+        Directory.CreateDirectory(packageDir);
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "module-info.cs.scriban"), "module={{module.name}}\n");
+        await File.WriteAllTextAsync(Path.Combine(packageDir, "project-aggregate.cs.scriban"), "{{ for m in modules }}module={{ m.name }};{{ end }}\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName),
+            """
+            {
+              "name": "user-pkg",
+              "description": "mixed scope test package",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "typeMap": { "bigint": "Long" },
+              "files": [
+                { "template": "module-info.cs.scriban", "output": "gen/Modules/{{module.name}}/Info.cs", "scope": "module" },
+                { "template": "project-aggregate.cs.scriban", "output": "aggregate.cs", "scope": "project" }
+              ]
+            }
+            """);
+        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, isBuiltin: false, CancellationToken.None);
+        (string workspaceRoot, string outputRoot) = CreateWorkspace(tempRoot);
+        var files = package.Files.Select(file => new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, true, file.Scope)).ToList();
+        (CodeGenerator generator, _) = CreateGenerator();
+        var request = WithModules(
+            CreateRequest(package, workspaceRoot, "gen", files),
+            variables: null,
+            modules: new[] { new ModuleContext("asset"), new ModuleContext("billing") });
+
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        Assert.Equal(0, result.Failed);
+
+        // module 作用域按清单产出目录：gen/Modules/asset/Info.cs 与 gen/Modules/billing/Info.cs
+        Assert.True(File.Exists(Path.Combine(outputRoot, "gen", "Modules", "asset", "Info.cs")));
+        Assert.True(File.Exists(Path.Combine(outputRoot, "gen", "Modules", "billing", "Info.cs")));
+
+        // project 模板循环注入的 modules 清单，聚合段与目录名逐字一致
+        string projectContent = File.ReadAllText(Path.Combine(workspaceRoot, "aggregate.cs"));
+        Assert.Equal("module=asset;module=billing;", projectContent.TrimEnd('\r', '\n'));
+    }
+
+    /// <summary>
+    /// 仅勾选 project 作用域模板且未传 modules 时应走模板空值守卫分支（配置缺失注释在场，不抛运行期错误、不产聚合条目）。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_ProjectScopeOnlyWithoutModules_RendersGuardBranch()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("project-aggregate.cs.scriban", "aggregate.cs", "{{ if modules == null }}<!-- modules missing -->{{ else }}{{ for m in modules }}{{ m.name }}{{ end }}{{ end }}\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("project-aggregate.cs.scriban", "aggregate.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = WithModules(
+            CreateRequest(package, workspaceRoot, "gen", files),
+            variables: null,
+            modules: null);
+
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        Assert.Equal(0, result.Failed);
+        string content = File.ReadAllText(Path.Combine(workspaceRoot, "aggregate.cs"));
+        Assert.Contains("<!-- modules missing -->", content);
+    }
+
+    /// <summary>
+    /// project 作用域注入 modules 的元素名应原样保留大小写：modules=["Asset"] 时聚合段与 module 作用域目录
+    /// 同取 "Asset"，大小写由唯一数据源决定。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_ProjectScopeModulesCasePreserved()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("project-aggregate.cs.scriban", "aggregate.cs", "{{ for m in modules }}module={{ m.name }};{{ end }}\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("project-aggregate.cs.scriban", "aggregate.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        var request = WithModules(
+            CreateRequest(package, workspaceRoot, "gen", files),
+            variables: null,
+            modules: new[] { new ModuleContext("Asset") });
+
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        Assert.Equal(0, result.Failed);
+        string projectContent = File.ReadAllText(Path.Combine(workspaceRoot, "aggregate.cs"));
+        Assert.Contains("module=Asset;", projectContent);
+    }
+
+    /// <summary>
+    /// project 作用域同时显式传 variables.modules 与 modules 时以注入 modules 为准：
+    /// 聚合循环渲染注入清单，显式镜像键仅在 vars 命名空间内可见、不遮蔽注入源。
+    /// </summary>
+    [Fact]
+    public async Task GenerateAsync_ProjectScope_ExplicitVarsModules_InjectedModulesWin()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreateTempPackageAsync(new[]
+        {
+            ("project-aggregate.cs.scriban", "aggregate.cs", "{{ for m in modules }}{{ m.name }};{{ end }}\n")
+        }, projectScope: true);
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("project-aggregate.cs.scriban", "aggregate.cs", true, TemplateScope.Project) };
+        (CodeGenerator generator, _) = CreateGenerator();
+        GenerationRequest request = WithModules(
+            CreateRequest(package, workspaceRoot, "gen", files),
+            variables: new Dictionary<string, object?> { ["modules"] = new[] { new Dictionary<string, object?> { ["name"] = "ghost" } } },
+            modules: new[] { new ModuleContext("real") });
+
+        GenerationResult result = await generator.GenerateAsync(request, null, CancellationToken.None);
+
+        Assert.Equal(0, result.Failed);
+        string content = File.ReadAllText(Path.Combine(workspaceRoot, "aggregate.cs"));
+        Assert.Contains("real;", content);
+        Assert.DoesNotContain("ghost", content);
+    }
+
+    /// <summary>
     /// 构造生成服务与配置服务测试替身。
     /// </summary>
     /// <returns>生成服务与可断言的配置服务。</returns>

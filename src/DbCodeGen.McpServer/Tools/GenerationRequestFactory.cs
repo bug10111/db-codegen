@@ -16,45 +16,41 @@ internal static class GenerationRequestFactory
     /// <summary>
     /// 组装批量生成请求：校验并解析全部显式入参，加载模板包、按清单解析文件选择、
     /// 由代码目录推导相对输出根与基础包名，构造 Core 生成请求。
+    /// tables 按生效模板集合分型校验：仅当所选模板（files 过滤后）含 table 作用域条目时要求至少一张表，
+    /// 纯 module/project 作用域集合允许省略 tables。
     /// </summary>
     /// <param name="packageService">模板包服务，承载包加载与校验。</param>
     /// <param name="package">模板包包名。</param>
-    /// <param name="tables">合成表输入集合，至少一张表。</param>
+    /// <param name="tables">合成表输入集合；所选模板含 table 作用域条目时至少一张，纯 module/project 作用域集合可为 null。</param>
     /// <param name="files">模板相对路径清单；null 或空清单时默认选择包内全部启用条目。</param>
     /// <param name="workspaceRoot">工作区根目录绝对路径。</param>
     /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略文本：overwrite / skip。</param>
     /// <param name="persistLastUsedPaths">生成成功后是否回写最近生成路径记忆；MCP 调用方应传 false。</param>
-    /// <param name="variables">调用方注入变量对象，逐键注入渲染上下文 vars.* 命名空间；可省略。</param>
+    /// <param name="variables">调用方注入变量对象，逐键注入渲染上下文 vars.* 命名空间；值支持任意 JSON 类型，可为省略。</param>
     /// <param name="modules">模块清单（如 [{"name":"account"}]），module 作用域模板按此逐个渲染；可省略。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>可直接提交 Core 生成服务的请求。</returns>
-    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径或 variables/modules 元素结构非法时抛出。</exception>
+    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径、所选模板含 table 作用域条目但未提供表或 variables/modules 元素结构非法时抛出。</exception>
     public static async Task<GenerationRequest> CreateAsync(
         ITemplatePackageService packageService,
         string package,
-        IReadOnlyList<SyntheticTableInput> tables,
+        IReadOnlyList<SyntheticTableInput>? tables,
         IReadOnlyList<string>? files,
         string workspaceRoot,
         string codeDirectory,
         string? basePackageOverride,
         string duplicateStrategy,
         bool persistLastUsedPaths,
-        IReadOnlyDictionary<string, object?>? variables,
+        IReadOnlyDictionary<string, JsonElement>? variables,
         IReadOnlyList<Dictionary<string, object?>>? modules,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(packageService);
-        ArgumentNullException.ThrowIfNull(tables);
         if (string.IsNullOrWhiteSpace(package))
         {
             throw new ArgumentException("模板包名（package）不能为空。");
-        }
-
-        if (tables.Count == 0)
-        {
-            throw new ArgumentException("请至少提供一张表（tables）。");
         }
 
         if (string.IsNullOrWhiteSpace(workspaceRoot))
@@ -77,14 +73,24 @@ internal static class GenerationRequestFactory
         TemplatePackageInfo packageInfo = await packageService.LoadPackageAsync(package.Trim(), cancellationToken);
         IReadOnlyList<TemplateFileSelection> selections = BuildSelections(packageInfo, files);
 
+        // tables 非空要求按生效模板集合分型：仅当所选模板（files 过滤后）含 table 作用域条目时要求至少一张表，
+        // 纯 module/project 作用域集合（模板不消费表）允许省略 tables
+        IReadOnlyList<SyntheticTableInput> providedTables = tables ?? Array.Empty<SyntheticTableInput>();
+        if (HasTableScopeSelection(selections) && providedTables.Count == 0)
+        {
+            throw new ArgumentException(
+                "本次所选模板包含 table 作用域条目（按表集逐表渲染），必须提供至少一张合成表（tables，tables[].name 必填）；"
+                + "仅当所选模板全部为 module/project 作用域时才可省略 tables。请补充 tables 后重试，或先经 list_templates 核对所选模板作用域。");
+        }
+
         // 代码目录拆分为相对输出根与基础包名（与桌面端同一解析器），显式覆盖值优先于派生值
         (string derivedBasePackage, string relativeOutputRoot) = CodeDirectoryParser.Split(codeDirectory);
         string? effectiveBasePackage = string.IsNullOrWhiteSpace(basePackageOverride)
             ? derivedBasePackage
             : basePackageOverride.Trim();
 
-        List<TableInfo> tableInfos = new(tables.Count);
-        foreach (SyntheticTableInput tableInput in tables)
+        List<TableInfo> tableInfos = new(providedTables.Count);
+        foreach (SyntheticTableInput tableInput in providedTables)
         {
             tableInfos.Add(SyntheticTableMapper.ToTableInfo(tableInput));
         }
@@ -106,12 +112,13 @@ internal static class GenerationRequestFactory
     }
 
     /// <summary>
-    /// 解析调用方变量对象：拒绝空白键，逐键保留原始值（值经 Core 渲染侧 Scriban 值转换后供模板消费）。
+    /// 解析调用方变量对象：拒绝空白键，逐键保留 JsonElement 原值（值经 Core 渲染侧 Scriban 值转换后供模板消费，
+    /// JsonElement 按数组/对象/布尔/数值/字符串类别递归转换，天然支持非字符串类型）。
     /// </summary>
     /// <param name="variables">调用方传入的变量对象，可空。</param>
     /// <returns>归一化后的变量字典；入参为空或空对象时返回 null。</returns>
     /// <exception cref="ArgumentException">变量对象含空白键时抛出。</exception>
-    internal static IReadOnlyDictionary<string, object?>? ParseVariables(IReadOnlyDictionary<string, object?>? variables)
+    internal static IReadOnlyDictionary<string, object?>? ParseVariables(IReadOnlyDictionary<string, JsonElement>? variables)
     {
         if (variables is null || variables.Count == 0)
         {
@@ -119,7 +126,7 @@ internal static class GenerationRequestFactory
         }
 
         var parsed = new Dictionary<string, object?>(variables.Count);
-        foreach (KeyValuePair<string, object?> pair in variables)
+        foreach (KeyValuePair<string, JsonElement> pair in variables)
         {
             if (string.IsNullOrWhiteSpace(pair.Key))
             {
@@ -210,6 +217,25 @@ internal static class GenerationRequestFactory
             "skip" => DuplicateFileStrategy.Skip,
             _ => throw new ArgumentException($"无效的同名文件处理策略：{duplicateStrategy}；合法取值为 overwrite / skip。")
         };
+    }
+
+    /// <summary>
+    /// 判定所选模板集合是否包含 table 作用域条目：缺省 scope 声明的条目按 table 作用域计
+    /// （枚举缺省值即 table，与生成编排分组口径一致）。
+    /// </summary>
+    /// <param name="selections">files 过滤后的生效模板选择集合，非空。</param>
+    /// <returns>含 table 作用域条目时为 true。</returns>
+    private static bool HasTableScopeSelection(IReadOnlyList<TemplateFileSelection> selections)
+    {
+        foreach (TemplateFileSelection selection in selections)
+        {
+            if (selection.Scope == TemplateScope.Table)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

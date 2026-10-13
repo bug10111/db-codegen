@@ -115,8 +115,10 @@ public sealed class CodeGenerator : ICodeGenerator
         // 逐文件写盘，单文件失败由写盘服务独立兜底后继续其余文件（部分失败）
         GenerationResult writeResult = await _fileWriter.WriteFilesAsync(writeEntries, progress, cancellationToken).ConfigureAwait(false);
 
-        // 跳过日志与写盘日志合并为最终日志，跳过计数并入最终统计
+        // 跳过日志与输出路径告警日志、写盘日志合并为最终日志，跳过计数并入最终统计；
+        // 坏路径告警不阻断写盘，但必须在生成日志中可见
         List<GenerationLogEntry> mergedLogs = BuildSkipLogs(preview, request.DuplicateFileStrategy);
+        mergedLogs.AddRange(BuildPathWarningLogs(preview.PathWarnings));
         mergedLogs.AddRange(writeResult.Logs);
 
         // 记忆回写受请求开关控制：默认开保持桌面端"生成后记忆下次默认值"行为，MCP 等无记忆态调用方关闭
@@ -219,12 +221,16 @@ public sealed class CodeGenerator : ICodeGenerator
         TemplatePackageContext packageContext = TemplatePackageContext.From(request.Package, request.BasePackageOverride);
 
         // 作用域渲染输入构造：variables 键的保留命名空间冲突在此结构化拒绝；
-        // 仅有表作用域且未传 variables 时保持 null（既有渲染路径零改动）
+        // 仅有表作用域且未传 variables 时保持 null（既有渲染路径零改动）；
+        // project 作用域注入全模块清单（modules 根变量），project 模板聚合段与 module 作用域目录名同源同值
         bool hasScopeWork = moduleFiles.Count > 0 || projectFiles.Count > 0 || request.Variables is not null;
         ScopeRenderInput? tableScopeInput = hasScopeWork ? ScopeRenderInput.Create(request.Variables, null, tables) : null;
-        ScopeRenderInput? projectScopeInput = projectFiles.Count > 0 ? ScopeRenderInput.Create(request.Variables, null, tables) : null;
+        ScopeRenderInput? projectScopeInput = projectFiles.Count > 0
+            ? ScopeRenderInput.Create(request.Variables, null, tables, request.Modules)
+            : null;
 
         var entries = new List<GenerationFileEntry>();
+        var pathWarnings = new List<PathWarningInfo>();
         int total = (tableFiles.Count > 0 ? tables.Count * tableFiles.Count : 0)
             + (moduleFiles.Count > 0 ? modules.Count * moduleFiles.Count : 0)
             + projectFiles.Count;
@@ -248,6 +254,9 @@ public sealed class CodeGenerator : ICodeGenerator
 
                 // 输出路径模板占位渲染，失败定位到具体模板文件
                 string renderedRelativePath = RenderOutputPath(table, packageContext, file);
+
+                // 输出路径坏路径预检（空包段/连续分隔符），归并进 dry-run 告警清单，不阻断生成
+                CollectPathWarnings(pathWarnings, file, packageContext, renderedRelativePath);
 
                 // 解析绝对路径并校验防目录穿越，越界即整单失败
                 string absolutePath = ResolveAbsolutePath(request.WorkspaceRoot, request.RelativeOutputRoot, renderedRelativePath);
@@ -278,6 +287,10 @@ public sealed class CodeGenerator : ICodeGenerator
 
                 // 路径基准按 B 裁决：module 作用域相对输出根（现状管线），路径可引用 module.* / vars.*
                 string renderedRelativePath = RenderScopedOutputPath(packageContext, scopeInput, file);
+
+                // 输出路径坏路径预检（空包段/连续分隔符），归并进 dry-run 告警清单，不阻断生成
+                CollectPathWarnings(pathWarnings, file, packageContext, renderedRelativePath);
+
                 string absolutePath = ResolveAbsolutePath(request.WorkspaceRoot, request.RelativeOutputRoot, renderedRelativePath);
 
                 progress?.Report(new GenerationProgress(GenerationStage.Previewing, completed, total, renderedRelativePath));
@@ -287,7 +300,7 @@ public sealed class CodeGenerator : ICodeGenerator
             }
         }
 
-        // 工程作用域：整次渲染一次，渲染上下文含 vars.* / tables 汇总（无 module）
+        // 工程作用域：整次渲染一次，渲染上下文含 vars.* / tables 汇总 / modules 全模块清单（无单模块 module）
         foreach (TemplateFileSelection file in projectFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -300,6 +313,10 @@ public sealed class CodeGenerator : ICodeGenerator
 
             // 路径基准按 B 裁决：project 作用域相对工作区根（拼空相对输出根复用同一防穿越校验）
             string renderedRelativePath = RenderScopedOutputPath(packageContext, projectScopeInput!, file);
+
+            // 输出路径坏路径预检（空包段/连续分隔符），归并进 dry-run 告警清单，不阻断生成
+            CollectPathWarnings(pathWarnings, file, packageContext, renderedRelativePath);
+
             string absolutePath = ResolveAbsolutePath(request.WorkspaceRoot, string.Empty, renderedRelativePath);
 
             progress?.Report(new GenerationProgress(GenerationStage.Previewing, completed, total, renderedRelativePath));
@@ -316,7 +333,97 @@ public sealed class CodeGenerator : ICodeGenerator
         int newCount = entries.Count(entry => entry.Action == GenerationAction.New);
         int overwriteCount = entries.Count(entry => entry.Action == GenerationAction.Overwrite);
         int skipCount = entries.Count(entry => entry.Action == GenerationAction.Skip);
-        return new GenerationPreview(entries, newCount, overwriteCount, skipCount, unmappedTypes);
+        return new GenerationPreview(entries, newCount, overwriteCount, skipCount, unmappedTypes, pathWarnings);
+    }
+
+    /// <summary>
+    /// 对单条渲染后输出路径执行坏路径预检并归并告警：检测一为输出路径模板引用包段占位（package.dir）
+    /// 但本次包段解析为空（典型诱因：codeDirectory 传 "." 等无包段输入，基础包名退化为空）；
+    /// 检测二为渲染后路径含连续路径分隔符（如 src/main/java//X.cs，路径归一化后文件将丢失包层级直接落在上级目录）。
+    /// 告警不阻断生成，仅归并进 dry-run 回执供调用方可见。
+    /// </summary>
+    /// <param name="warnings">本次生成累计的告警清单，命中时就地归并。</param>
+    /// <param name="file">勾选模板文件，提供输出路径模板与模板名定位。</param>
+    /// <param name="packageContext">package 侧渲染上下文，提供包段占位解析值。</param>
+    /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
+    private static void CollectPathWarnings(
+        List<PathWarningInfo> warnings,
+        TemplateFileSelection file,
+        TemplatePackageContext packageContext,
+        string renderedRelativePath)
+    {
+        // 包段空检测：输出路径模板引用 package.dir 占位但包段解析为空，占位渲染为空串必然产生坏路径
+        if (file.OutputPathTemplate.Contains("package.dir", StringComparison.Ordinal)
+            && string.IsNullOrEmpty(packageContext.Dir))
+        {
+            AppendPathWarning(
+                warnings,
+                PathWarningInfo.EmptyPackageDir,
+                file.TemplateFileName,
+                renderedRelativePath,
+                "输出路径引用了包段占位（package.dir），但本次基础包名解析为空；请检查 codeDirectory / 基础包名是否有效（如传 \".\" 会退化为空包段）。");
+        }
+
+        // 连续分隔符检测：渲染后相对路径含连续路径分隔符（正反斜杠均检测）
+        if (renderedRelativePath.Contains("//", StringComparison.Ordinal)
+            || renderedRelativePath.Contains("\\\\", StringComparison.Ordinal))
+        {
+            AppendPathWarning(
+                warnings,
+                PathWarningInfo.ConsecutiveSeparators,
+                file.TemplateFileName,
+                renderedRelativePath,
+                "输出路径含连续路径分隔符，通常由空包段或路径模板拼接错误导致，路径归一化后文件将丢失包层级直接落在上级目录；请核对模板 outputPath 与包段配置。");
+        }
+    }
+
+    /// <summary>
+    /// 归并一条路径告警：同一模板同一告警种类只保留首条记录，后续出现仅累计次数（与未映射类型清单同款归并口径）。
+    /// </summary>
+    /// <param name="warnings">告警清单。</param>
+    /// <param name="kind">告警种类标识。</param>
+    /// <param name="templateName">模板文件相对路径。</param>
+    /// <param name="samplePath">首次出现的渲染后路径样例。</param>
+    /// <param name="message">人类可读告警说明。</param>
+    private static void AppendPathWarning(
+        List<PathWarningInfo> warnings,
+        string kind,
+        string templateName,
+        string samplePath,
+        string message)
+    {
+        PathWarningInfo? existing = warnings.FirstOrDefault(warning => warning.Kind == kind && warning.TemplateName == templateName);
+        if (existing is not null)
+        {
+            existing.Occurrences++;
+            return;
+        }
+
+        warnings.Add(new PathWarningInfo
+        {
+            Kind = kind,
+            TemplateName = templateName,
+            SamplePath = samplePath,
+            Occurrences = 1,
+            Message = message
+        });
+    }
+
+    /// <summary>
+    /// 生成输出路径预检告警的日志条目：坏路径不阻断写盘，但必须在生成日志中可见。
+    /// </summary>
+    /// <param name="warnings">dry-run 预检归并后的告警清单。</param>
+    /// <returns>警告级日志列表。</returns>
+    private static List<GenerationLogEntry> BuildPathWarningLogs(IReadOnlyList<PathWarningInfo> warnings)
+    {
+        var logs = new List<GenerationLogEntry>(warnings.Count);
+        foreach (PathWarningInfo warning in warnings)
+        {
+            logs.Add(GenerationLogEntry.Warning(
+                $"输出路径告警（{warning.Kind}）：{warning.Message}（模板 {warning.TemplateName}，示例路径 {warning.SamplePath}，共 {warning.Occurrences} 处）"));
+        }
+
+        return logs;
     }
 
     /// <summary>

@@ -61,9 +61,17 @@ builder.Services.AddMcpServer(options =>
         + "代码生成：generate 批量生成并写盘（内部先重算 dry-run）；"
         + "数据源管理：add_datasource/update_datasource/delete_datasource/test_connection。"
         + "推荐工作流：list_template_packages 选包 → list_templates/read_template 查模板 → 查表两条路（在线 list_tables/get_table_detail；离线合成直接传 tables[].columns，无需连接数据库）→ check_type_mapping 预检未映射类型 → preview_generation 确认文件计划 → generate 写盘。"
-        + "关键语义：generate 与 preview_generation 的 tables 必填非空；模板 scope 三作用域（table 按表集逐表 / module 按 modules 清单逐个 / project 整次一次，同次可混跑）；"
+        + "关键语义：generate 与 preview_generation 的 tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；模板 scope 三作用域（table 按表集逐表 / module 按 modules 清单逐个 / project 整次一次，同次可混跑）；"
         + "files 为模板过滤清单，传则仅生成清单内模板，省略时选包内全部启用条目；"
-        + "duplicateStrategy 仅 overwrite/skip 两值——对含手写代码的输出目录必须用 skip 防覆盖手写文件。";
+        + "duplicateStrategy 仅 overwrite/skip 两值——对含手写代码的输出目录必须用 skip 防覆盖手写文件。"
+        + "脚手架包生成协议（包内 README.md.scriban 为该包传参契约的唯一权威，经 read_template 可读；以下为工具面通用契约）："
+        + "①业务模块清单经 modules 参数传递且为唯一事实源（如 [{\"name\":\"asset\",\"desc\":\"资料\"}]，元素 name 必填、desc 等其余字段原样注入 module.* 与全部聚合段）；project 作用域模板以根变量 modules 消费，module 作用域仅注入 module.* 单模块上下文、不注入 modules 根变量（多模块聚合段属 project 作用域模板）；显式传 variables 同名键时以 modules 参数为准（该 vars 键已退役，仅作普通透传）。"
+        + "②variables 纪律：按包 README 全量传键；值支持任意 JSON 类型；集合消费键必须传真实数组（如 {\"modules\":[...]}，传字符串将被结构化拒绝），布尔键必须传布尔值（勿传 \"true\" 字符串——非空字符串按真值判定）。"
+        + "③路径语义：workspaceRoot 传工程父目录（生成根锚点）；codeDirectory 必须传 src/main/java/<完整包路径>（如 src/main/java/com/simple/demosso），package.dir 由此派生，禁止传 \".\"（包段丢失，Java 文件散落源根）。"
+        + "④输出根解析：project 作用域输出根以 workspaceRoot 根锚定；module 作用域 outputPath 相对输出根解析，模板内 ../../../ 可自输出根逃逸到工作区根；table 作用域按 codeDirectory 相对解析。"
+        + "⑤pathWarnings（EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符）为坏路径预检告警：收到告警必须先修正 codeDirectory 或输出路径参数并重新生成，再行写盘。"
+        + "⑥缺失守卫：缺 modules 或缺关键 vars 键时，部分包模板产出「配置缺失」守卫注释而不是报错；交付前对生成产物全文检索「配置缺失」确认零残留。"
+        + "⑦模板编辑限制：create_template_file 的 outputPath 渲染前校验并拒绝管道表达式；module 作用域元数据不可经工具面补设——模板文件删除重建即丢 module 作用域标记；save_template_content 仅整篇覆写，覆写前后文件行尾形态可能变化。";
 })
     .WithStdioServerTransport()
     // 加性注册：程序集内一切带 [McpServerToolType] 的工具类自动发现并注册（工具类按需经构造注入上述 Core 服务）。

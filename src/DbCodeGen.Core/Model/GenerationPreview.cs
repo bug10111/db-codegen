@@ -31,13 +31,15 @@ public sealed class GenerationPreview
     /// <param name="overwriteCount">覆盖条目数，覆盖策略下内容不同的同名文件写盘时替换。</param>
     /// <param name="skipCount">跳过条目数。</param>
     /// <param name="unmappedTypes">生成预检发现的未映射类型清单，可为空。</param>
+    /// <param name="pathWarnings">输出路径预检告警清单（空包段/连续分隔符等坏路径，非阻断），缺省为空清单。</param>
     /// <exception cref="ArgumentNullException">entries 或 unmappedTypes 为 null 时抛出。</exception>
     public GenerationPreview(
         IReadOnlyList<GenerationFileEntry> entries,
         int newCount,
         int overwriteCount,
         int skipCount,
-        IReadOnlyList<UnmappedTypeInfo> unmappedTypes)
+        IReadOnlyList<UnmappedTypeInfo> unmappedTypes,
+        IReadOnlyList<PathWarningInfo>? pathWarnings = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(unmappedTypes);
@@ -46,6 +48,7 @@ public sealed class GenerationPreview
         OverwriteCount = overwriteCount;
         SkipCount = skipCount;
         UnmappedTypes = unmappedTypes;
+        PathWarnings = pathWarnings ?? Array.Empty<PathWarningInfo>();
     }
 
     /// <summary>
@@ -72,4 +75,10 @@ public sealed class GenerationPreview
     /// 生成预检发现的未映射类型清单，供界面弹窗提示用户补映射；全部命中时为空列表。
     /// </summary>
     public IReadOnlyList<UnmappedTypeInfo> UnmappedTypes { get; }
+
+    /// <summary>
+    /// 输出路径预检发现的坏路径告警清单（包段为空/连续分隔符），非阻断、不改变文件计划，
+    /// 供回执可见提示修复；无告警时为空列表。
+    /// </summary>
+    public IReadOnlyList<PathWarningInfo> PathWarnings { get; }
 }

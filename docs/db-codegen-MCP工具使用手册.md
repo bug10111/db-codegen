@@ -79,7 +79,7 @@ get_table_detail → check_type_mapping → list_templates → read_template
 5. `preview_generation`：dry-run 出文件计划——表 × 模板笛卡尔积、每条目标路径与 `new/overwrite/skip` 分类、未映射类型清单。**零写盘**，确认前零风险。
 6. `generate`：确认文件计划后落盘。`generate` 内部会强制重算 dry-run 再写盘，**无确认弹窗**，所以第 5 步 preview 是唯一的人工/智能体把关点。
 
-参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 必填（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据）；`files` 省略时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`workspaceRoot`/`codeDirectory` 指定输出位置；`duplicateStrategy` 控制 `overwrite`（覆盖）/`skip`（同名一律跳过），缺省 `overwrite`。
+参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`workspaceRoot`/`codeDirectory` 指定输出位置；`duplicateStrategy` 控制 `overwrite`（覆盖）/`skip`（同名一律跳过），缺省 `overwrite`。
 
 ### 3.4 流D：模板维护
 
@@ -540,7 +540,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
 | `package` | string | 是 | — | 模板包包名 |
-| `tables` | array of object | 是 | — | 合成表集合，至少一张（结构见本章开头）；需要完整列时先用 `get_table_detail` 取回后传入 |
+| `tables` | array of object | 条件必填 | null | 合成表集合；所选模板（`files` 过滤后）含 table 作用域条目时必填非空（至少一张，结构见本章开头；需要完整列时先用 `get_table_detail` 取回后传入），纯 module/project 作用域集合可省略 |
 | `workspaceRoot` | string | 是 | — | 工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建） |
 | `codeDirectory` | string | 是 | — | 代码目录：项目内完整相对路径含包名（如 `src/main/java/com/example/demo`）；解析出基础包名与相对输出根，basePackage 末段即「模块」 |
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
@@ -566,12 +566,18 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `unmappedTypes[].table` | string | 出现该类型的表名 |
 | `unmappedTypes[].column` | string | 出现该类型的列名 |
 | `unmappedTypes[].occurrences` | integer | 出现次数 |
+| `pathWarnings` | array | 输出路径告警清单（坏路径预检，**非阻断**、不改变文件计划，但生成前必须核对）；无告警时为空列表 |
+| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空，典型诱因 `codeDirectory` 传 `.` 等无包段输入）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符，如 `src/main/java//X.cs`） |
+| `pathWarnings[].template` | string | 首次出现该告警的模板相对路径 |
+| `pathWarnings[].samplePath` | string | 首次出现的渲染后路径样例 |
+| `pathWarnings[].occurrences` | integer | 该告警在本次生成范围内的总出现次数（同模板同种类跨表归并） |
+| `pathWarnings[].message` | string | 人类可读告警说明（中文，含修复指引） |
 
 `action` 分类语义：`new` = 目标不存在（将新增写盘）；`overwrite` = 目标存在且内容不同（将覆盖，非 UTF-8 遗留文件按覆盖处理）；`skip` = 目标存在但不写盘——`skip` 策略下同名一律跳过；`overwrite` 策略下内容相同（行尾归一化后比较）也跳过。
 
 **模板作用域与路径基准**：作用域由包清单 `files[].scope` 声明（`table` 缺省 / `module` / `project`）。`table` 与 `module` 作用域的 `output` 相对输出根（工作区根 + codeDirectory 派生的相对输出根）；`project` 作用域的 `output` 相对 `workspaceRoot`。`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作。防目录穿越对三种作用域一致：解析后必须落在工作区根内。
 
-**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空；`files` 含包外路径；`duplicateStrategy` 非法；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
+**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空——所选模板含 table 作用域条目时；`files` 含包外路径；`duplicateStrategy` 非法；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
 
 **调用示例**：
 
@@ -593,7 +599,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 **用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。
 
-参数与 `preview_generation` 完全一致（`package` / `tables` / `workspaceRoot` / `codeDirectory` 必填，`basePackageOverride` / `files` / `duplicateStrategy` / `variables` / `modules` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
+参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `duplicateStrategy` / `variables` / `modules` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
 
 **返回**：
 
@@ -764,7 +770,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 | errorType | 含义 | 典型触发场景 |
 | --- | --- | --- |
-| `InvalidArgument` | 入参非法 | 路径穿越/绝对路径/盘符前缀、空参数、非法枚举值（语言段/策略/数据库类型）、数据源不存在、`tables` 为空、端口越界、两模式混用 |
+| `InvalidArgument` | 入参非法 | 路径穿越/绝对路径/盘符前缀、空参数、非法枚举值（语言段/策略/数据库类型）、数据源不存在、`tables` 为空（所选模板含 table 作用域条目时）、端口越界、两模式混用 |
 | `TemplatePackageError` | 模板包域/生成域错误 | 包不存在、模板路径未在包清单声明、内置包只读拒绝、模板文件同名冲突、模板渲染失败（含行列）、生成输出路径越出工作区根 |
 | `Timeout` | 连接超时 | Core 连接 10 秒兜底超时触发（**内部超时，不等于调用方取消**）；固定文案「连接超时（10 秒兜底触发），请检查主机地址、端口与网络后重试。」 |
 | `Cancelled` | 调用方取消 | 客户端主动取消本次请求 |

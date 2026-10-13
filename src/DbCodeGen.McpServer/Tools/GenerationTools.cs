@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates.Packages;
@@ -38,33 +39,35 @@ public sealed class GenerationTools
     /// <summary>
     /// 执行批量生成并写盘（内部强制先重算 dry-run，写盘无确认弹窗）。
     /// 全部参数显式传入：不读配置记忆态、生成后不回写 config.json。
+    /// tables 按生效模板集合分型：仅当所选模板（files 过滤后）含 table 作用域条目时必填非空。
     /// </summary>
     /// <param name="package">模板包包名。</param>
-    /// <param name="tables">合成表集合，必填非空（至少一张表）；需要完整列时建议先用 get_table_detail 取回后传入，离线合成场景直接内联表结构即可，无需连接数据库。</param>
     /// <param name="workspaceRoot">工作区根目录绝对路径（输出文件的根前缀）。</param>
     /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）；经源根标记拆分为相对输出根与基础包名，包间输出路径配方以包清单声明的输出路径形态为准。</param>
+    /// <param name="tables">合成表集合；所选模板含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；需要完整列时建议先用 get_table_detail 取回后传入，离线合成场景直接内联表结构即可，无需连接数据库。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板过滤清单：传则仅生成清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）。</param>
-    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；键与保留命名空间冲突时结构化拒绝。</param>
+    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；值支持任意 JSON 类型（字符串/数组/布尔/对象），集合消费键必须传真实数组；键与保留命名空间冲突时结构化拒绝。</param>
     /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>写盘结果统计与生成日志。</returns>
     [McpServerTool(Name = "generate", Title = "批量生成", Destructive = true)]
-    [Description("执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。建议先 preview_generation 确认文件计划；tables 必填非空（至少一张表；无表的手写域场景不适用本工具，片段渲染用 render_template）。files 为模板过滤清单：传则仅生成清单内模板，省略时选包内全部启用条目。全参数显式，不读不写配置记忆。")]
+    [Description("执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。建议先 preview_generation 确认文件计划；tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略（无表的手写域片段渲染用 render_template）。files 为模板过滤清单：传则仅生成清单内模板，省略时选包内全部启用条目。全参数显式，不读不写配置记忆。")]
     public async Task<object> GenerateAsync(
         string package,
-        [Description("合成表集合，必填非空（至少一张表）；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
-        IReadOnlyList<SyntheticTableInput> tables,
         string workspaceRoot,
         [Description("代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）：按源根标记（java/kotlin/groovy/scala/src）拆分为相对输出根与基础包名，纯包名形态输出根固定 src/main/java；包间输出路径配方差异以包清单 files[].output 形态为准（经 list_templates 查看）。")]
         string codeDirectory,
+        [Description("合成表集合；所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
+        IReadOnlyList<SyntheticTableInput>? tables = null,
         string? basePackageOverride = null,
         [Description("模板过滤清单：传则仅生成清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。")]
         IReadOnlyList<string>? files = null,
         [Description("同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）；对含手写代码的输出目录用 skip 防覆盖手写文件。")]
         DuplicateFileStrategy duplicateStrategy = DuplicateFileStrategy.Overwrite,
-        IReadOnlyDictionary<string, object?>? variables = null,
+        [Description("调用方变量对象，逐键注入渲染上下文 vars.*（如 {\"appName\":\"demo\"}）；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。")]
+        IReadOnlyDictionary<string, JsonElement>? variables = null,
         IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
     {
