@@ -60,4 +60,19 @@ public static class TemplateScopeParser
         throw new TemplatePackageException(
             $"模板文件 {templateRelativePath} 的 scope 非法：{scopeText}；合法取值为 table / module / project（缺省 table）。");
     }
+
+    /// <summary>
+    /// 将作用域枚举转为清单契约文本（小写：table / module / project），供工具面透出条目作用域。
+    /// </summary>
+    /// <param name="scope">作用域枚举。</param>
+    /// <returns>契约文本。</returns>
+    public static string ToContractText(TemplateScope scope)
+    {
+        return scope switch
+        {
+            TemplateScope.Module => "module",
+            TemplateScope.Project => "project",
+            _ => "table"
+        };
+    }
 }

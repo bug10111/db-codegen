@@ -148,6 +148,10 @@ public sealed class TemplateEngine
                 stopwatch.ElapsedMilliseconds);
         }
 
+        // 渲染前空迭代分析：for 迭代源为空集合 / null 的零迭代收集为非阻断告警（守卫文案设计附带降噪指引），
+        // 随成功结果透出供三入口（render/preview/generate）回执可见
+        IReadOnlyList<EmptyIterationWarning> emptyIterations = EmptyIterationGuard.FindEmptyIterations(template, root);
+
         // 解析包内共享函数文件：约定文件不存在时为 null，渲染管线零改动，保证无共享文件包行为不变
         string? sharedFunctionsPath = ResolveSharedFunctionsPath(packageContext);
         Template? sharedFunctionsTemplate = null;
@@ -185,7 +189,13 @@ public sealed class TemplateEngine
 
             string output = NormalizeBlankLines(template.Render(context));
             stopwatch.Stop();
-            return PreviewResult.Success(output, stopwatch.ElapsedMilliseconds);
+            var warnings = new List<string>(emptyIterations.Count);
+            foreach (EmptyIterationWarning warning in emptyIterations)
+            {
+                warnings.Add(warning.Message);
+            }
+
+            return PreviewResult.Success(output, stopwatch.ElapsedMilliseconds, warnings);
         }
         catch (ScriptAbortException exception)
         {

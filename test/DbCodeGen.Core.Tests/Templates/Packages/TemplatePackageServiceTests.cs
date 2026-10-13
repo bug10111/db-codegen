@@ -1325,10 +1325,10 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
-    /// 批量追加输出路径含非法文件名字符或为空应返回 Invalid，且不写入任何文件。
+    /// 批量追加输出路径为空应返回 Invalid 且不写入任何文件；
+    /// 含 | 管道等模板表达式形态的 outputPath 属合法（渲染期表达式合法化，字面量非法字符由生成侧产物路径校验拦截）。
     /// </summary>
     [Theory]
-    [InlineData("out|bad.tpl")]
     [InlineData("")]
     public async Task AppendTemplateFilesAsync_InvalidOutputPath_ReturnsInvalid(string outputPath)
     {
@@ -1344,6 +1344,28 @@ public sealed class TemplatePackageServiceTests : IDisposable
 
         Assert.Equal(TemplatePackageOperationStatus.Invalid, result.Status);
         Assert.False(File.Exists(Path.Combine(userLibrary, "pkg", "safe.tpl")));
+    }
+
+    /// <summary>
+    /// 批量追加输出路径含管道表达式（| 过滤器）应放行并原样写入清单，供生成侧渲染期求值。
+    /// </summary>
+    [Fact]
+    public async Task AppendTemplateFilesAsync_PipelineExpressionOutputPath_Succeeds()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+        await service.CreatePackageAsync("pkg", "", "main.tpl", "main.tpl", CancellationToken.None);
+
+        TemplatePackageOperationResult result = await service.AppendTemplateFilesAsync(
+            "pkg",
+            new List<TemplateFileWriteEntry> { new("safe.tpl", "out/{{ table.variableName | string.upcase }}.tpl", "content") },
+            CancellationToken.None);
+
+        Assert.Equal(TemplatePackageOperationStatus.Succeeded, result.Status);
+        Assert.Equal(
+            "out/{{ table.variableName | string.upcase }}.tpl",
+            Assert.Single(result.Package!.Files, file => file.RelativeTemplatePath == "safe.tpl").OutputPath);
     }
 
     /// <summary>

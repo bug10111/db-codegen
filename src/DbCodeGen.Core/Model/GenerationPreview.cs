@@ -77,7 +77,8 @@ public sealed class GenerationPreview
     public IReadOnlyList<UnmappedTypeInfo> UnmappedTypes { get; }
 
     /// <summary>
-    /// 输出路径预检发现的坏路径告警清单（包段为空/连续分隔符），非阻断、不改变文件计划，
+    /// 生成前预检发现的告警清单（EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 /
+    /// EmptyIteration 模板空迭代），非阻断、不改变文件计划，
     /// 供回执可见提示修复；无告警时为空列表。
     /// </summary>
     public IReadOnlyList<PathWarningInfo> PathWarnings { get; }

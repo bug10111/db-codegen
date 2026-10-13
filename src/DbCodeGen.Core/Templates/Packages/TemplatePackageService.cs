@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DbCodeGen.Core.Config;
 using Microsoft.Extensions.Logging;
 
@@ -267,10 +268,11 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
     /// <inheritdoc />
     public async Task<TemplatePackageOperationResult> AddTemplateFileAsync(
-        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken)
+        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken,
+        string? scope = null)
     {
         return await _gate.ExecuteExclusiveAsync(
-            token => AddTemplateFileCoreAsync(packageName, templateRelativePath, outputPath, token),
+            token => AddTemplateFileCoreAsync(packageName, templateRelativePath, outputPath, scope, token),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -300,6 +302,18 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
         ArgumentNullException.ThrowIfNull(content);
         return await _gate.ExecuteExclusiveAsync(
             token => SaveTemplateContentCoreAsync(packageName, templateRelativePath, content, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<TemplatePackageOperationResult> EditTemplateContentAsync(
+        string packageName, string templateRelativePath, string oldText, string newText,
+        string? expectedContentHash, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(oldText);
+        ArgumentNullException.ThrowIfNull(newText);
+        return await _gate.ExecuteExclusiveAsync(
+            token => EditTemplateContentCoreAsync(packageName, templateRelativePath, oldText, newText, expectedContentHash, token),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -444,11 +458,11 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     }
 
     /// <summary>
-    /// 新增文件核心流程：加载包并校验内置只读 → 路径校验 → 目标已存在拒绝 →
+    /// 新增文件核心流程：加载包并校验内置只读 → 路径校验与作用域声明校验 → 目标已存在拒绝 →
     /// 建空文件并追加 manifest 条目重写 → 重新校验返回。
     /// </summary>
     private async Task<TemplatePackageOperationResult> AddTemplateFileCoreAsync(
-        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken)
+        string packageName, string templateRelativePath, string outputPath, string? scope, CancellationToken cancellationToken)
     {
         TemplatePackageInfo package;
         try
@@ -477,6 +491,13 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             return TemplatePackageOperationResult.Invalid($"输出路径不合法（禁止绝对路径与盘符前缀，.. 仅限工作区根内）：{outputPath}");
         }
 
+        // 作用域声明收口：空白不写清单字段（加载缺省 table），非空归一小写并校验合法取值，非法结构化拒绝
+        string? normalizedScope = NormalizeOptionalScope(scope);
+        if (scope is not null && normalizedScope is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板作用域（scope）非法：{scope}；合法取值为 table / module / project（空白表示缺省 table）。");
+        }
+
         try
         {
             string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedTemplate);
@@ -496,8 +517,8 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
             try
             {
-                // 追加 manifest 条目并重写清单，保证清单与磁盘文件一致
-                await AppendManifestFileEntryAsync(package, normalizedTemplate, normalizedOutput, cancellationToken).ConfigureAwait(false);
+                // 追加 manifest 条目并重写清单，保证清单与磁盘文件一致；scope 非空时随条目声明写入
+                await AppendManifestFileEntryAsync(package, normalizedTemplate, normalizedOutput, normalizedScope, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -921,7 +942,8 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
     /// <summary>
     /// 保存正文核心流程：加载包并校验内置只读 → 路径安全校验 → 目标文件须已存在（新建文件走新增模板接口）→
-    /// 覆写模板文件内容（UTF-8 无 BOM，清单条目不动）→ 重新校验返回更新后的包。
+    /// 行尾保真归一（宿主文件非空且传入内容行尾形态与宿主不一致时转换，消除 CRLF→LF 非预期全文件 diff；
+    /// 空宿主文件按传入内容原样落盘）→ 覆写模板文件内容（UTF-8 无 BOM，清单条目不动）→ 重新校验返回更新后的包。
     /// </summary>
     private async Task<TemplatePackageOperationResult> SaveTemplateContentCoreAsync(
         string packageName, string templateRelativePath, string content, CancellationToken cancellationToken)
@@ -955,9 +977,13 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
                 return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedTemplate}");
             }
 
+            // 行尾保真：读取宿主既有正文检测其行尾形态，传入内容行尾形态不一致时归一为宿主形态
+            string existingContent = await File.ReadAllTextAsync(templateFullPath, cancellationToken).ConfigureAwait(false);
+            string contentToWrite = AlignContentToHostLineEndings(existingContent, content);
+
             // 仅覆写既有模板正文，不触碰 manifest：清单条目与文件名、输出路径均不受本次保存影响
             await File.WriteAllTextAsync(
-                templateFullPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+                templateFullPath, contentToWrite, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
 
             TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(
                 package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
@@ -969,6 +995,177 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             _logger.LogError(exception, "保存模板内容失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
             return TemplatePackageOperationResult.Failure($"保存模板内容失败：{exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// 将传入内容行尾对齐到宿主文件行尾形态：宿主正文非空且行尾形态（CRLF/LF）与传入内容不一致时，
+    /// 归一传入内容为宿主形态（消除整篇覆写引入的 CRLF→LF 非预期全文件 diff）；宿主为空文件（新建）时
+    /// 按传入内容原样落盘（新建文件行尾策略：与调用方传入形态一致）；混合行尾正文按"含 CRLF 即 CRLF 宿主"
+    /// 口径判定，与渲染空行规整的行尾探测口径一致。
+    /// </summary>
+    /// <param name="existingContent">宿主文件既有正文。</param>
+    /// <param name="content">调用方传入的正文全文。</param>
+    /// <returns>行尾对齐后的待写正文。</returns>
+    private static string AlignContentToHostLineEndings(string existingContent, string content)
+    {
+        // 空宿主文件（新建）：无既有行尾形态可遵循，按传入内容原样落盘
+        if (existingContent.Length == 0 || content.Length == 0)
+        {
+            return content;
+        }
+
+        string hostNewline = existingContent.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        string contentNewline = content.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        if (hostNewline == contentNewline)
+        {
+            return content;
+        }
+
+        // 先归一为 LF 再统一为宿主形态，消除 \r\n 与孤立 \r 的形态混杂
+        string normalized = content.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        return normalized.Replace("\n", hostNewline, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 模板局部编辑核心流程：加载包并校验内置只读 → 路径安全校验 → 条件写乐观锁校验（可选）→
+    /// oldText 行尾归一化匹配（CRLF/LF 形态差异不阻断）→ 恰 1 次命中才替换（0 次未找到、多次歧义保护）→
+    /// newText 对齐宿主行尾后拼接写回（UTF-8 无 BOM）→ 返回编辑证据（新摘要、字符数与上下文快照）。
+    /// </summary>
+    private async Task<TemplatePackageOperationResult> EditTemplateContentCoreAsync(
+        string packageName, string templateRelativePath, string oldText, string newText,
+        string? expectedContentHash, CancellationToken cancellationToken)
+    {
+        TemplatePackageInfo package;
+        try
+        {
+            package = await LoadPackageAsync(packageName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TemplatePackageException exception)
+        {
+            return TemplatePackageOperationResult.Failure($"模板包加载失败：{exception.Message}");
+        }
+
+        if (package.IsBuiltin)
+        {
+            return TemplatePackageOperationResult.BuiltinReadonly($"内置包 {packageName} 只读，不可编辑模板内容。");
+        }
+
+        string? normalizedTemplate = NormalizeSafeRelativePath(templateRelativePath);
+        if (normalizedTemplate is null)
+        {
+            return TemplatePackageOperationResult.Invalid($"模板文件路径不合法（禁止绝对路径、.. 段与盘符前缀）：{templateRelativePath}");
+        }
+
+        if (oldText.Length == 0)
+        {
+            return TemplatePackageOperationResult.Invalid("待替换原文子串（oldText）不能为空串；删除内容请以 newText 传空串承载。");
+        }
+
+        try
+        {
+            string templateFullPath = TemplatePackageLoader.ResolveWithinRoot(package.RootPath, normalizedTemplate);
+            if (!File.Exists(templateFullPath))
+            {
+                return TemplatePackageOperationResult.Failure($"模板文件不存在：{normalizedTemplate}");
+            }
+
+            string originalText = await File.ReadAllTextAsync(templateFullPath, cancellationToken).ConfigureAwait(false);
+
+            // 条件写乐观锁：调用方提供期望摘要时与当前正文摘要精确比对，不一致拒绝编辑防并发覆盖
+            string currentHash = TemplateContentHash.Compute(originalText);
+            if (!string.IsNullOrWhiteSpace(expectedContentHash)
+                && !string.Equals(expectedContentHash.Trim(), currentHash, StringComparison.Ordinal))
+            {
+                return TemplatePackageOperationResult.ContentConflict(
+                    $"内容已被其它写入方更新，期望摘要 {expectedContentHash.Trim()} 与当前摘要 {currentHash} 不一致；请重读模板后以新摘要重试。");
+            }
+
+            // 行尾归一化匹配：oldText 先归一为 LF，换行位置展开为 \r?\n 模式，CRLF/LF 宿主均命中
+            MatchCollection matches = BuildLineEndingTolerantRegex(oldText).Matches(originalText);
+            if (matches.Count == 0)
+            {
+                return TemplatePackageOperationResult.NotFound(
+                    $"待替换原文子串在模板正文中未找到（0 次命中）；请核对 oldText 与模板正文（含缩进与标点）是否一致。");
+            }
+
+            if (matches.Count > 1)
+            {
+                return TemplatePackageOperationResult.Invalid(
+                    $"待替换原文子串在模板正文中命中 {matches.Count} 处，为防误伤已拒绝（歧义保护）；请扩展 oldText 上下文使其唯一。");
+            }
+
+            Match match = matches[0];
+
+            // 替换落地遵循宿主行尾形态：newText 行尾统一为宿主形态后再拼接
+            string hostNewline = originalText.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+            string replacement = AlignTextToHostNewline(newText, hostNewline);
+            string updatedText = originalText.Substring(0, match.Index) + replacement + originalText.Substring(match.Index + match.Length);
+
+            await File.WriteAllTextAsync(
+                templateFullPath, updatedText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken).ConfigureAwait(false);
+
+            string contextBefore = ExtractContext(originalText, match.Index, isBefore: true);
+            string contextAfter = ExtractContext(originalText, match.Index + match.Length, isBefore: false);
+            string updatedHash = TemplateContentHash.Compute(updatedText);
+            TemplatePackageInfo updated = await TemplatePackageLoader.LoadFromDirectoryAsync(
+                package.RootPath, isBuiltin: false, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "已局部编辑模板内容，包 {PackageName}，相对路径 {RelativePath}，字符数 {CharCount}。",
+                packageName, normalizedTemplate, updatedText.Length);
+            return TemplatePackageOperationResult.EditSuccess(updated, updatedHash, updatedText.Length, contextBefore, contextAfter);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or TemplatePackageException)
+        {
+            _logger.LogError(exception, "局部编辑模板内容失败，包 {PackageName}，相对路径 {RelativePath}。", packageName, normalizedTemplate);
+            return TemplatePackageOperationResult.Failure($"局部编辑模板内容失败：{exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 构建 oldText 的行尾容忍匹配正则：oldText 归一为 LF 后按换行切分、逐段转义，
+    /// 再以 <c>\r?\n</c> 模式重新连接换行位置（Regex.Escape 会把换行转义为字面 \n 序列，
+    /// 无法直接对模式字符串做换行替换，故按段转义后拼接），保证 CRLF 与 LF 宿主正文均可命中同一子串。
+    /// </summary>
+    /// <param name="oldText">待替换原文子串。</param>
+    /// <returns>行尾容忍匹配正则。</returns>
+    private static Regex BuildLineEndingTolerantRegex(string oldText)
+    {
+        string normalizedOld = oldText.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        string[] literalSegments = normalizedOld.Split('\n');
+        string pattern = string.Join(@"\r?\n", literalSegments.Select(Regex.Escape));
+        return new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(10));
+    }
+
+    /// <summary>
+    /// 将替换文本行尾统一为宿主形态：先归一为 LF，再替换为宿主行尾。
+    /// </summary>
+    /// <param name="text">替换文本原文。</param>
+    /// <param name="hostNewline">宿主行尾形态。</param>
+    /// <returns>行尾对齐后的替换文本。</returns>
+    private static string AlignTextToHostNewline(string text, string hostNewline)
+    {
+        string normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        return normalized.Replace("\n", hostNewline, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 从原文本指定位置提取上下文快照（约 60 字符），供替换后就地核对；边界不足时截取到文本端。
+    /// </summary>
+    /// <param name="source">原文本。</param>
+    /// <param name="position">替换点边界位置。</param>
+    /// <param name="isBefore">true 取位置之前快照，false 取位置之后快照。</param>
+    /// <returns>上下文快照文本。</returns>
+    private static string ExtractContext(string source, int position, bool isBefore)
+    {
+        const int ContextLength = 60;
+        if (isBefore)
+        {
+            int start = Math.Max(0, position - ContextLength);
+            return source.Substring(start, position - start);
+        }
+
+        int length = Math.Min(ContextLength, source.Length - position);
+        return length <= 0 ? string.Empty : source.Substring(position, length);
     }
 
     /// <summary>
@@ -1145,12 +1342,13 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
 
     /// <summary>
     /// 规范化并校验输出相对路径骨架安全（允许 .. 段），返回规范化路径；不合法返回 null。
-    /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移；
-    /// 规范化后逐段校验非法文件名字符，避免 Path.GetFullPath 抛出未处理异常并落盘脏数据。
-    /// .. 段允许存在，最终由生成侧解析时限定在工作区根内，可越出代码根落到资源目录。
+    /// 原始输入含绝对路径、盘符前缀或根标记时直接拒绝，避免规范化吞掉前导分隔符造成语义漂移。
+    /// outputPath 为输出路径模板（支持 {{变量}} 占位与管道表达式），本阶段不做非法文件名字符检查——
+    /// 表达式在渲染期合法化，非法字符校验收敛到生成侧渲染后产物路径单点（CodeGenerator.ResolveAbsolutePath），
+    /// 避免「|」管道等合法模板表达式被误拒。
     /// </summary>
     /// <param name="relativePath">待校验的输出相对路径，可为空（为空视为未提供路径，返回 null）。</param>
-    /// <returns>规范化后的安全输出相对路径；为空或含绝对路径、盘符前缀、非法字符时返回 null。</returns>
+    /// <returns>规范化后的安全输出相对路径；为空或含绝对路径、盘符前缀时返回 null。</returns>
     private static string? NormalizeSafeOutputPath(string? relativePath)
     {
         if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath) || relativePath.Contains(':'))
@@ -1164,17 +1362,24 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
             return null;
         }
 
-        // 逐段校验非法文件名字符（含 | * ? < > 等与控制字符），防 Windows 路径解析抛未处理异常
-        char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
-        foreach (string segment in normalized.Split('/'))
+        return normalized;
+    }
+
+    /// <summary>
+    /// 作用域声明收口：非空输入归一为小写，属于合法取值时返回归一值，空白返回 null（不写清单字段），
+    /// 非法取值返回 null 由调用方按入参原文结构化拒绝。
+    /// </summary>
+    /// <param name="scope">原始作用域声明，可空。</param>
+    /// <returns>归一后的作用域文本；空白或非法取值为 null。</returns>
+    private static string? NormalizeOptionalScope(string? scope)
+    {
+        if (string.IsNullOrWhiteSpace(scope))
         {
-            if (segment.IndexOfAny(invalidFileNameChars) >= 0)
-            {
-                return null;
-            }
+            return null;
         }
 
-        return normalized;
+        string normalized = scope.Trim().ToLowerInvariant();
+        return normalized is "table" or "module" or "project" ? normalized : null;
     }
 
     /// <summary>
@@ -1183,18 +1388,26 @@ public sealed class TemplatePackageService : ITemplatePackageService, IDisposabl
     /// <param name="package">目标模板包运行时信息。</param>
     /// <param name="normalizedTemplate">规范化后的模板相对路径。</param>
     /// <param name="normalizedOutput">规范化后的输出相对路径。</param>
+    /// <param name="normalizedScope">归一后的作用域声明；null 表示不写清单字段（加载缺省 table）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     private static async Task AppendManifestFileEntryAsync(
-        TemplatePackageInfo package, string normalizedTemplate, string normalizedOutput, CancellationToken cancellationToken)
+        TemplatePackageInfo package, string normalizedTemplate, string normalizedOutput, string? normalizedScope, CancellationToken cancellationToken)
     {
         TemplateManifest manifest = await ReadManifestForUpdateAsync(package.ManifestPath, cancellationToken).ConfigureAwait(false);
-        manifest.Files.Add(new TemplateFileEntry
+        var entry = new TemplateFileEntry
         {
             Template = normalizedTemplate,
             Output = normalizedOutput,
             Enabled = true
-        });
+        };
 
+        // scope 仅在显式提供时写入，保持既有条目"无 scope 字段即缺省 table"的清单形态
+        if (normalizedScope is not null)
+        {
+            entry.Scope = normalizedScope;
+        }
+
+        manifest.Files.Add(entry);
         await WriteManifestAsync(package.ManifestPath, manifest, cancellationToken).ConfigureAwait(false);
     }
 

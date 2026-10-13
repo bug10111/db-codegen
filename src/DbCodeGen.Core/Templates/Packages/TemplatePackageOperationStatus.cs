@@ -26,6 +26,16 @@ public enum TemplatePackageOperationStatus
     Invalid,
 
     /// <summary>
+    /// 目标内容不存在：模板编辑场景下 oldText 在模板正文中未命中（0 次命中）。
+    /// </summary>
+    NotFound,
+
+    /// <summary>
+    /// 内容冲突：模板编辑场景下条件写期望哈希与当前正文哈希不一致（正文已被其它写入方更新）。
+    /// </summary>
+    ContentConflict,
+
+    /// <summary>
     /// IO 或其它异常导致操作失败。
     /// </summary>
     Failed

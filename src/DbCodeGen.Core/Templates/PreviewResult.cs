@@ -37,9 +37,15 @@ public sealed class PreviewResult
     public long RenderDurationMs { get; }
 
     /// <summary>
+    /// 渲染前静态分析产出的非阻断告警文案清单（当前为空迭代告警：for 循环迭代源为空集合/null 的零迭代信号）；
+    /// 无告警时为空列表。告警不改变渲染结果，仅提示调用方核对产物关键段是否缺失。
+    /// </summary>
+    public IReadOnlyList<string> Warnings { get; }
+
+    /// <summary>
     /// 使用完整字段构造渲染结果，仅由静态工厂方法调用。
     /// </summary>
-    private PreviewResult(bool isSuccess, string output, string errorMessage, int? errorLine, int? errorColumn, long renderDurationMs)
+    private PreviewResult(bool isSuccess, string output, string errorMessage, int? errorLine, int? errorColumn, long renderDurationMs, IReadOnlyList<string> warnings)
     {
         IsSuccess = isSuccess;
         Output = output;
@@ -47,6 +53,7 @@ public sealed class PreviewResult
         ErrorLine = errorLine;
         ErrorColumn = errorColumn;
         RenderDurationMs = renderDurationMs;
+        Warnings = warnings;
     }
 
     /// <summary>
@@ -57,7 +64,20 @@ public sealed class PreviewResult
     /// <returns>成功渲染结果。</returns>
     public static PreviewResult Success(string output, long renderDurationMs)
     {
-        return new PreviewResult(true, output, string.Empty, null, null, renderDurationMs);
+        return new PreviewResult(true, output, string.Empty, null, null, renderDurationMs, Array.Empty<string>());
+    }
+
+    /// <summary>
+    /// 创建渲染成功结果并附带渲染前静态分析告警。
+    /// </summary>
+    /// <param name="output">渲染后的真实代码。</param>
+    /// <param name="renderDurationMs">渲染耗时（毫秒）。</param>
+    /// <param name="warnings">非阻断告警文案清单，可为空。</param>
+    /// <returns>成功渲染结果。</returns>
+    public static PreviewResult Success(string output, long renderDurationMs, IReadOnlyList<string> warnings)
+    {
+        ArgumentNullException.ThrowIfNull(warnings);
+        return new PreviewResult(true, output, string.Empty, null, null, renderDurationMs, warnings);
     }
 
     /// <summary>
@@ -70,6 +90,6 @@ public sealed class PreviewResult
     /// <returns>失败渲染结果。</returns>
     public static PreviewResult Error(string errorMessage, int? errorLine, int? errorColumn, long renderDurationMs)
     {
-        return new PreviewResult(false, string.Empty, errorMessage, errorLine, errorColumn, renderDurationMs);
+        return new PreviewResult(false, string.Empty, errorMessage, errorLine, errorColumn, renderDurationMs, Array.Empty<string>());
     }
 }

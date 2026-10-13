@@ -126,9 +126,12 @@ public interface ITemplatePackageService
     /// <param name="templateRelativePath">新增模板文件相对包根路径，可含分组目录，须防目录穿越安全。</param>
     /// <param name="outputPath">新增模板文件的输出相对路径，同样防目录穿越校验。</param>
     /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="scope">模板作用域声明（table / module / project），可空；空白表示不声明（清单缺省，加载按 table），
+    /// 非空时归一为小写写入清单条目，非法取值返回 Invalid。尾部可选参数，保证既有按位置传参调用方源兼容。</param>
     /// <returns>新增操作结果，成功时 Package 携带更新后的包信息。</returns>
     Task<TemplatePackageOperationResult> AddTemplateFileAsync(
-        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken);
+        string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken,
+        string? scope = null);
 
     /// <summary>
     /// 从用户模板包删除一个模板文件：删除文件并同步移除 manifest files 对应条目后重写清单。
@@ -185,4 +188,25 @@ public interface ITemplatePackageService
     /// <exception cref="ArgumentNullException">content 为 null 时抛出，禁止以空引用静默清空既有模板正文。</exception>
     Task<TemplatePackageOperationResult> SaveTemplateContentAsync(
         string packageName, string templateRelativePath, string content, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 对用户模板包内既有模板文件执行子串级单处精确替换：oldText 按行尾归一化匹配正文
+    /// （CRLF/LF 形态差异不阻断匹配），恰命中 1 次才替换，0 次返回 NotFound、多次返回 Invalid（歧义保护并报命中次数）。
+    /// 替换落地遵循宿主文件行尾形态（newText 先归一化为 LF 再转为宿主行尾）；成功后返回新内容摘要
+    /// （SHA256 前 16 位 hex 小写）、字符数与替换点前后上下文快照。
+    /// expectedContentHash 非空时执行条件写乐观锁校验（与当前正文摘要不一致返回 ContentConflict 并附当前摘要）。
+    /// 内置包只读拒绝；文件不存在返回失败。
+    /// </summary>
+    /// <param name="packageName">目标用户模板包包名。</param>
+    /// <param name="templateRelativePath">待编辑模板文件相对包根路径，可含分组目录。</param>
+    /// <param name="oldText">待替换原文子串，须非空且在正文中恰好出现一次。</param>
+    /// <param name="newText">替换后子串；空串表示删除该子串。</param>
+    /// <param name="expectedContentHash">期望的当前内容摘要（SHA256 前 16 位 hex 小写，取自 read_template 回执）；
+    /// 空表示不做条件写校验。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    /// <returns>编辑操作结果，成功时携带编辑证据；失败按状态细分（NotFound / Invalid / ContentConflict / Failed 等）。</returns>
+    /// <exception cref="ArgumentNullException">oldText 或 newText 为 null 时抛出（newText 允许空串但不允许 null）。</exception>
+    Task<TemplatePackageOperationResult> EditTemplateContentAsync(
+        string packageName, string templateRelativePath, string oldText, string newText,
+        string? expectedContentHash, CancellationToken cancellationToken);
 }

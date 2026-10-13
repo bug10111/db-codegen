@@ -81,7 +81,7 @@ public sealed class TemplateQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板条目列表（含过滤后总数；结构化内容，输出结构由 ListTemplatesResult 声明）。</returns>
     [McpServerTool(Name = "list_templates", Title = "列出模板文件", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言），可按分组前缀与语言段过滤。")]
+    [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言、作用域 scope：table/module/project），可按分组前缀与语言段过滤。")]
     public async Task<ListTemplatesResult> ListTemplatesAsync(
         string package,
         string? group = null,
@@ -120,7 +120,8 @@ public sealed class TemplateQueryTools
                     file.RelativeTemplatePath,
                     file.OutputPath,
                     file.IsEnabled,
-                    language.ToString()));
+                    language.ToString(),
+                    TemplateScopeParser.ToContractText(file.Scope)));
             }
 
             _logger.LogInformation(
@@ -146,9 +147,9 @@ public sealed class TemplateQueryTools
     /// <param name="package">模板包包名。</param>
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致，可含分组目录）。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>模板正文全文与条目元数据。</returns>
+    /// <returns>模板正文全文、条目元数据与内容摘要。</returns>
     [McpServerTool(Name = "read_template", Title = "读取模板", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("读取指定模板文件的正文全文（Scriban 源文本）；path 取 list_templates 返回的相对路径。")]
+    [Description("读取指定模板文件的正文全文（Scriban 源文本）与正文内容摘要 contentHash（SHA256 前 16 位 hex 小写，供 save_template_edit 条件写作期望值）；path 取 list_templates 返回的相对路径。")]
     public async Task<object> ReadTemplateAsync(string package, string path, CancellationToken cancellationToken)
     {
         try
@@ -176,7 +177,8 @@ public sealed class TemplateQueryTools
                 entry.OutputPath,
                 entry.IsEnabled,
                 language.ToString(),
-                content);
+                content,
+                TemplateContentHash.Compute(content));
         }
         catch (Exception exception)
         {
@@ -288,7 +290,9 @@ public sealed record ListTemplatePackagesResult(IReadOnlyList<TemplatePackageSum
 /// <param name="Output">输出相对路径模板，支持 {{变量}} 占位。</param>
 /// <param name="Enabled">是否默认参与生成。</param>
 /// <param name="Language">按文件名语言段推导的目标语言（HighlightLanguage 口径）。</param>
-public sealed record TemplateEntry(string Path, string Output, bool Enabled, string Language);
+/// <param name="Scope">模板作用域：table（按表集逐表渲染）/ module（按模块清单逐个）/ project（整次一次）；
+/// manifest 缺省 scope 的条目显示 table。</param>
+public sealed record TemplateEntry(string Path, string Output, bool Enabled, string Language, string Scope);
 
 /// <summary>
 /// list_templates 应答 DTO。
@@ -312,10 +316,12 @@ public sealed record ListTemplatesResult(
 /// <param name="Enabled">是否默认参与生成。</param>
 /// <param name="Language">目标语言。</param>
 /// <param name="Content">模板正文全文。</param>
+/// <param name="ContentHash">正文内容摘要（SHA256 前 16 位 hex 小写），供 save_template_edit 条件写作期望值。</param>
 internal sealed record ReadTemplateResult(
     string Package,
     string Path,
     string Output,
     bool Enabled,
     string Language,
-    string Content);
+    string Content,
+    string ContentHash);

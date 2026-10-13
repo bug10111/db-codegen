@@ -285,7 +285,8 @@ public sealed class GenerationRequestFactoryTests : IDisposable
 
         /// <inheritdoc />
         public Task<TemplatePackageOperationResult> AddTemplateFileAsync(
-            string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken)
+            string packageName, string templateRelativePath, string outputPath, CancellationToken cancellationToken,
+            string? scope = null)
         {
             throw new NotSupportedException("测试替身不支持新增模板文件。");
         }
@@ -317,6 +318,14 @@ public sealed class GenerationRequestFactoryTests : IDisposable
             string packageName, string templateRelativePath, string content, CancellationToken cancellationToken)
         {
             throw new NotSupportedException("测试替身不支持保存模板正文。");
+        }
+
+        /// <inheritdoc />
+        public Task<TemplatePackageOperationResult> EditTemplateContentAsync(
+            string packageName, string templateRelativePath, string oldText, string newText,
+            string? expectedContentHash, CancellationToken cancellationToken)
+        {
+            throw new NotSupportedException("测试替身不支持局部编辑模板正文。");
         }
     }
 }

@@ -18,7 +18,13 @@ public sealed class PathWarningInfo
     public const string ConsecutiveSeparators = "ConsecutiveSeparators";
 
     /// <summary>
-    /// 告警种类标识：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）。
+    /// 告警种类：模板内 for 循环迭代源为空集合 / null，循环体零迭代（渲染产物中该段为空）。
+    /// 非阻断告警；守卫文案设计（空集合时产物含说明文字属预期）场景按告警文案指引忽略。
+    /// </summary>
+    public const string EmptyIteration = "EmptyIteration";
+
+    /// <summary>
+    /// 告警种类标识：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/ EmptyIteration（模板空迭代）。
     /// </summary>
     public string Kind { get; set; } = string.Empty;
 

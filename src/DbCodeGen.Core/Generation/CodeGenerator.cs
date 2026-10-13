@@ -252,6 +252,9 @@ public sealed class CodeGenerator : ICodeGenerator
                 // 内容渲染，与模板编辑预览共用同一渲染管线，失败定位到模板名与行列
                 PreviewResult renderResult = RenderContent(templateText, table, packageContext, file, cancellationToken, tableScopeInput);
 
+                // 空迭代告警归并（渲染前静态分析，非阻断）
+                CollectIterationWarnings(pathWarnings, file, renderResult);
+
                 // 输出路径模板占位渲染，失败定位到具体模板文件
                 string renderedRelativePath = RenderOutputPath(table, packageContext, file);
 
@@ -285,6 +288,9 @@ public sealed class CodeGenerator : ICodeGenerator
                 // 内容渲染与表作用域同一渲染管线（共享函数文件、空行规整、结构化错误一致），仅上下文不同
                 PreviewResult renderResult = RenderScopedContent(templateText, packageContext, scopeInput, file, cancellationToken);
 
+                // 空迭代告警归并（渲染前静态分析，非阻断）
+                CollectIterationWarnings(pathWarnings, file, renderResult);
+
                 // 路径基准按 B 裁决：module 作用域相对输出根（现状管线），路径可引用 module.* / vars.*
                 string renderedRelativePath = RenderScopedOutputPath(packageContext, scopeInput, file);
 
@@ -311,6 +317,9 @@ public sealed class CodeGenerator : ICodeGenerator
             string templateText = await ReadTemplateContentAsync(request, file, cancellationToken).ConfigureAwait(false);
             PreviewResult renderResult = RenderScopedContent(templateText, packageContext, projectScopeInput!, file, cancellationToken);
 
+            // 空迭代告警归并（渲染前静态分析，非阻断）
+            CollectIterationWarnings(pathWarnings, file, renderResult);
+
             // 路径基准按 B 裁决：project 作用域相对工作区根（拼空相对输出根复用同一防穿越校验）
             string renderedRelativePath = RenderScopedOutputPath(packageContext, projectScopeInput!, file);
 
@@ -334,6 +343,29 @@ public sealed class CodeGenerator : ICodeGenerator
         int overwriteCount = entries.Count(entry => entry.Action == GenerationAction.Overwrite);
         int skipCount = entries.Count(entry => entry.Action == GenerationAction.Skip);
         return new GenerationPreview(entries, newCount, overwriteCount, skipCount, unmappedTypes, pathWarnings);
+    }
+
+    /// <summary>
+    /// 对单模板渲染结果执行空迭代告警归并：渲染前静态分析发现的 for 空集合零迭代告警按
+    /// （同模板同种类归并计数）口径并入 dry-run 告警清单，非阻断；守卫文案设计场景按文案指引忽略。
+    /// </summary>
+    /// <param name="warnings">本次生成累计的告警清单，命中时就地归并。</param>
+    /// <param name="file">勾选模板文件，提供模板名与输出路径模板定位。</param>
+    /// <param name="renderResult">渲染结果，携带渲染前空迭代分析告警。</param>
+    private static void CollectIterationWarnings(
+        List<PathWarningInfo> warnings,
+        TemplateFileSelection file,
+        PreviewResult renderResult)
+    {
+        foreach (string message in renderResult.Warnings)
+        {
+            AppendPathWarning(
+                warnings,
+                PathWarningInfo.EmptyIteration,
+                file.TemplateFileName,
+                file.OutputPathTemplate,
+                message);
+        }
     }
 
     /// <summary>
@@ -587,14 +619,20 @@ public sealed class CodeGenerator : ICodeGenerator
     /// 将工作区根、相对输出根与渲染后相对路径拼接为绝对路径，并做防目录穿越前缀校验。
     /// 输出相对路径允许 .. 段越出相对输出根（如代码根 src/main/java）落到工作区根内其它目录
     /// （如 src/main/resources），但解析后必须仍位于工作区根内，越出工作区根仍拒绝。
+    /// 本方法同时是输出路径非法字符校验的唯一产物级单点：outputPath 模板的字面量在写入 manifest 阶段
+    /// 不做非法字符检查（渲染期表达式合法化，防「|」管道等合法表达式被误拒），渲染后产物路径含
+    /// Windows 非法文件名字符时在此结构化拒绝，保证非法路径不进入写盘。
     /// </summary>
     /// <param name="workspaceRoot">工作区根。</param>
     /// <param name="relativeOutputRoot">相对输出根。</param>
     /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
     /// <returns>校验通过的目标绝对路径。</returns>
-    /// <exception cref="GenerationException">路径越出工作区根目录时抛出（目录穿越）。</exception>
+    /// <exception cref="GenerationException">路径含非法字符或越出工作区根目录时抛出。</exception>
     private static string ResolveAbsolutePath(string workspaceRoot, string relativeOutputRoot, string renderedRelativePath)
     {
+        // 渲染后产物路径非法字符检查：逐段核对 Windows 非法文件名字符（含 | * ? < > 与控制字符）
+        EnsurePathHasNoInvalidChar(renderedRelativePath);
+
         // 工作区根与相对输出根拼接为本次输出的根目录（如代码根 src/main/java）
         string outputRoot = Path.GetFullPath(Path.Combine(workspaceRoot, relativeOutputRoot.Replace('/', Path.DirectorySeparatorChar)));
 
@@ -614,6 +652,25 @@ public sealed class CodeGenerator : ICodeGenerator
         }
 
         return candidate;
+    }
+
+    /// <summary>
+    /// 渲染后产物路径非法字符检查：按正斜杠分段核对 Windows 非法文件名字符，命中即整单结构化失败。
+    /// outputPath 模板（含 {{变量}} 占位与管道表达式）在清单写入阶段放行，渲染期表达式合法化后，
+    /// 字面量非法字符经本单点拦截，非法路径不进入 dry-run 分类与写盘。
+    /// </summary>
+    /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
+    /// <exception cref="GenerationException">路径含非法字符时抛出，携带完整被拒路径。</exception>
+    private static void EnsurePathHasNoInvalidChar(string renderedRelativePath)
+    {
+        char[] invalidFileNameChars = Path.GetInvalidFileNameChars();
+        foreach (string segment in renderedRelativePath.Split('/'))
+        {
+            if (segment.IndexOfAny(invalidFileNameChars) >= 0)
+            {
+                throw new GenerationException($"输出路径含 Windows 非法字符，已拒绝（产物路径校验）：{renderedRelativePath}");
+            }
+        }
     }
 
     /// <summary>
