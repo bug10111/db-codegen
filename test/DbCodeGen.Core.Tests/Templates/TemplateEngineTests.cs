@@ -55,17 +55,17 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// 内容渲染应注册 tool 函数集，首字母大小写与驼峰转下划线输出正确。
+    /// 内容渲染应注册 tool 函数集，首字母大小写、驼峰转下划线输出正确。
     /// </summary>
     [Fact]
     public void Render_ToolFunctions_OutputsTransformedValues()
     {
-        string template = "{{ tool.firstLowerCase(table.className) }}|{{ tool.firstUpperCase(table.className) }}|{{ tool.hump2Underline(table.className) }}|{{ tool.hump3Underline(table.className) }}";
+        string template = "{{ tool.firstLowerCase(table.className) }}|{{ tool.firstUpperCase(table.className) }}|{{ tool.hump2Underline(table.className) }}|{{ tool.hump3Underline(table.className) }}|{{ tool.javaIdent(table.className) }}";
 
         PreviewResult result = _engine.Render(template, CreateTable(), null, CreatePackageContext(), CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("sysUser|SysUser|sys_user|sys-user", result.Output);
+        Assert.Equal("sysUser|SysUser|sys_user|sys-user|sysuser", result.Output);
     }
 
     /// <summary>
@@ -369,14 +369,14 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// 路径占位渲染应注册 tool 函数集，firstLowerCase 与 hump2Underline 转换输出正确。
+    /// 路径占位渲染应注册 tool 函数集，firstLowerCase、hump2Underline 与 javaIdent 转换输出正确。
     /// </summary>
     [Fact]
     public void RenderPathTemplate_ToolFunctions_OutputsTransformedValues()
     {
-        string output = _engine.RenderPathTemplate("{{tool.firstLowerCase(table.className)}}/{{tool.hump2Underline(table.className)}}.java", CreatePathContext());
+        string output = _engine.RenderPathTemplate("{{tool.firstLowerCase(table.className)}}/{{tool.hump2Underline(table.className)}}/{{tool.javaIdent(table.className)}}.java", CreatePathContext());
 
-        Assert.Equal("sysUser/sys_user.java", output);
+        Assert.Equal("sysUser/sys_user/sysuser.java", output);
     }
 
     /// <summary>

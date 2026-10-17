@@ -24,7 +24,15 @@ public sealed class PathWarningInfo
     public const string EmptyIteration = "EmptyIteration";
 
     /// <summary>
-    /// 告警种类标识：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/ EmptyIteration（模板空迭代）。
+    /// 告警种类：输出路径的 Java 包段不是合法 Java 标识符（连字符 / 非法字符 / 数字开头 / Java 关键字）。
+    /// 非阻断告警；Java 包段/模块目录/artifactId 应经 tool.javaIdent 归一化 kebab 模块名，
+    /// 数字开头或关键字需改模块名。
+    /// </summary>
+    public const string InvalidJavaPackageSegment = "InvalidJavaPackageSegment";
+
+    /// <summary>
+    /// 告警种类标识：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/
+    /// EmptyIteration（模板空迭代）/ InvalidJavaPackageSegment（非法 Java 包段）。
     /// </summary>
     public string Kind { get; set; } = string.Empty;
 

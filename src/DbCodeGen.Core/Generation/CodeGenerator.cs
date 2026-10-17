@@ -371,7 +371,9 @@ public sealed class CodeGenerator : ICodeGenerator
     /// <summary>
     /// 对单条渲染后输出路径执行坏路径预检并归并告警：检测一为输出路径模板引用包段占位（package.dir）
     /// 但本次包段解析为空（典型诱因：codeDirectory 传 "." 等无包段输入，基础包名退化为空）；
-    /// 检测二为渲染后路径含连续路径分隔符（如 src/main/java//X.cs，路径归一化后文件将丢失包层级直接落在上级目录）。
+    /// 检测二为渲染后路径含连续路径分隔符（如 src/main/java//X.cs，路径归一化后文件将丢失包层级直接落在上级目录）；
+    /// 检测三为路径 src/main/java 之后的 Java 包段不是合法标识符（连字符/非法字符/数字开头/Java 关键字，
+    /// 会导致 package 声明编译失败）。
     /// 告警不阻断生成，仅归并进 dry-run 回执供调用方可见。
     /// </summary>
     /// <param name="warnings">本次生成累计的告警清单，命中时就地归并。</param>
@@ -407,6 +409,134 @@ public sealed class CodeGenerator : ICodeGenerator
                 renderedRelativePath,
                 "输出路径含连续路径分隔符，通常由空包段或路径模板拼接错误导致，路径归一化后文件将丢失包层级直接落在上级目录；请核对模板 outputPath 与包段配置。");
         }
+
+        // Java 包段合法性检测：路径含 src/main/java 连续三元段时，其后各段（排除文件名段）必须是合法 Java 标识符，
+        // 非法段（连字符/非法字符/数字开头/Java 关键字）会导致 package 声明编译失败
+        CollectJavaPackageWarnings(warnings, file, renderedRelativePath);
+    }
+
+    /// <summary>
+    /// Java 关键字与字面量集合（50 个关键字 + true/false/null + 下划线），供包段合法性判定。
+    /// </summary>
+    private static readonly HashSet<string> JavaKeywords = new(StringComparer.Ordinal)
+    {
+        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+        "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+        "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
+        "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super",
+        "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void", "volatile", "while",
+        "true", "false", "null", "_"
+    };
+
+    /// <summary>
+    /// 对渲染后输出路径执行 Java 包段合法性预检：定位 src/main/java 连续三元段（忽略大小写、正反斜杠归一化），
+    /// 其后所有段（排除最后一个文件名段）视为 Java 包段并逐段校验；不含该三元段的非 Java 路径不校验、不误报。
+    /// 每个模板命中首个非法包段时归并一条告警（同模板同种类后续出现仅累计次数），非阻断。
+    /// </summary>
+    /// <param name="warnings">本次生成累计的告警清单，命中时就地归并。</param>
+    /// <param name="file">勾选模板文件，提供模板名定位。</param>
+    /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
+    private static void CollectJavaPackageWarnings(
+        List<PathWarningInfo> warnings,
+        TemplateFileSelection file,
+        string renderedRelativePath)
+    {
+        foreach (string segment in ExtractJavaPackageSegments(renderedRelativePath))
+        {
+            string? reason = DescribeInvalidJavaIdentifier(segment);
+            if (reason is null)
+            {
+                continue;
+            }
+
+            AppendPathWarning(
+                warnings,
+                PathWarningInfo.InvalidJavaPackageSegment,
+                file.TemplateFileName,
+                renderedRelativePath,
+                $"Java 包路径段 \"{segment}\" {reason}，不是合法 Java 标识符；请修正：kebab 模块名在 Java 包段/模块目录/artifactId 处用 tool.javaIdent 归一化（如 user-center→usercenter）；数字开头或 Java 关键字需改用合法模块名。");
+            return;
+        }
+    }
+
+    /// <summary>
+    /// 从渲染后相对路径提取 Java 包段：定位 src/main/java 连续三元段（忽略大小写、正反斜杠归一化），
+    /// 其后各段排除最后一个文件名段即为包段；路径不含该三元段时返回空集合（非 Java 路径不校验）。
+    /// </summary>
+    /// <param name="renderedRelativePath">渲染后的相对输出路径。</param>
+    /// <returns>Java 包段清单，非 Java 路径为空集合。</returns>
+    private static IReadOnlyList<string> ExtractJavaPackageSegments(string renderedRelativePath)
+    {
+        string[] segments = renderedRelativePath.Replace('\\', '/').Split('/');
+        for (int index = 0; index + 2 < segments.Length; index++)
+        {
+            bool isSourceRoot = string.Equals(segments[index], "src", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(segments[index + 1], "main", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(segments[index + 2], "java", StringComparison.OrdinalIgnoreCase);
+            if (!isSourceRoot)
+            {
+                continue;
+            }
+
+            // 三元段之后至倒数第二个段为包段；末段是文件名，不参与标识符校验
+            int packageStart = index + 3;
+            int packageEnd = segments.Length - 1;
+            if (packageEnd <= packageStart)
+            {
+                return Array.Empty<string>();
+            }
+
+            var packageSegments = new List<string>(packageEnd - packageStart);
+            for (int position = packageStart; position < packageEnd; position++)
+            {
+                packageSegments.Add(segments[position]);
+            }
+
+            return packageSegments;
+        }
+
+        return Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// 判定单个路径段是否为合法 Java 标识符：非空、首字符为字母/下划线/美元符、其余为字母数字/下划线/美元符，
+    /// 且不是 Java 关键字或字面量；非法时返回原因描述，合法返回 null。
+    /// </summary>
+    /// <param name="segment">待校验的路径段。</param>
+    /// <returns>非法原因描述；合法时为 null。</returns>
+    private static string? DescribeInvalidJavaIdentifier(string segment)
+    {
+        if (segment.Length == 0)
+        {
+            return "为空";
+        }
+
+        if (JavaKeywords.Contains(segment))
+        {
+            return "为 Java 关键字或字面量";
+        }
+
+        char first = segment[0];
+        if (char.IsDigit(first))
+        {
+            return "以数字开头";
+        }
+
+        if (!char.IsLetter(first) && first != '_' && first != '$')
+        {
+            return "以非法字符开头（仅允许字母、下划线、美元符）";
+        }
+
+        for (int index = 1; index < segment.Length; index++)
+        {
+            char current = segment[index];
+            if (!char.IsLetterOrDigit(current) && current != '_' && current != '$')
+            {
+                return current == '-' ? "含连字符" : "含非法字符（仅允许字母、数字、下划线、美元符）";
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

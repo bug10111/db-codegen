@@ -19,7 +19,7 @@ public static class ToolFunctions
     /// <param name="packageContext">package 侧渲染上下文，提供当前包类型映射表。</param>
     /// <param name="typeMappingService">全局类型映射解析服务；为空时 type 退化为按包 typeMap 的旧行为，导包函数返回空串。</param>
     /// <param name="databaseType">当前表所属数据库类型，供全局映射按库分桶匹配；为空时仅命中通用条目。</param>
-    /// <returns>含 firstLowerCase/firstUpperCase/hump2Underline/hump3Underline/type/typeImport/imports 的 tool 脚本对象。</returns>
+    /// <returns>含 firstLowerCase/firstUpperCase/hump2Underline/hump3Underline/javaIdent/type/typeImport/imports 的 tool 脚本对象。</returns>
     /// <exception cref="ArgumentNullException">packageContext 为 null 时抛出。</exception>
     public static ScriptObject Build(TemplatePackageContext packageContext, ITypeMappingService? typeMappingService = null, DataSourceType? databaseType = null)
     {
@@ -30,6 +30,7 @@ public static class ToolFunctions
         tool.SetValue("firstUpperCase", new ScriptToolFunction(args => FirstUpperCase(args.FirstOrDefault()?.ToString())), true);
         tool.SetValue("hump2Underline", new ScriptToolFunction(args => Hump2Underline(args.FirstOrDefault()?.ToString())), true);
         tool.SetValue("hump3Underline", new ScriptToolFunction(args => Hump3Underline(args.FirstOrDefault()?.ToString())), true);
+        tool.SetValue("javaIdent", new ScriptToolFunction(args => JavaIdent(args.FirstOrDefault()?.ToString())), true);
 
         // 类型映射闭包当前包类型映射表、全局映射服务与数据库类型：有服务时走"包typeMap>库专属>通用>兜底"解析链，否则按旧包行为
         tool.SetValue("type", new ScriptToolFunction(args => ResolveType(args.FirstOrDefault()?.ToString(), packageContext.TypeMap, typeMappingService, databaseType)), true);
@@ -125,6 +126,36 @@ public static class ToolFunctions
         }
 
         return Hump2Underline(value).Replace('_', '-');
+    }
+
+    /// <summary>
+    /// 将命名归一化为合法 Java 标识符形态：把驼峰命名大小写归一为全小写并删除 kebab 连字符，
+    /// 得到小写无连字符结果（如 user-center→usercenter、UserCenter→usercenter）。
+    /// 驼峰词边界分隔符在删除连字符后不产生任何字符，故实现等价于"大写降小写 + 删除连字符"；下划线保留（合法标识符字符）。
+    /// 本函数只管 kebab 归一化，不静默吞其它非法字符（空格/点等保留原样，交由路径预检告警）。
+    /// </summary>
+    /// <param name="value">模块名等命名来源，如 user-center、org-member、asset。</param>
+    /// <returns>归一化后的 Java 标识符形态字符串，如 usercenter、orgmember、asset。</returns>
+    public static string JavaIdent(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (char character in value)
+        {
+            // 连字符是 kebab 分隔符，归一化后删除；其余字符统一降小写（保留下划线与其它字符）
+            if (character == '-')
+            {
+                continue;
+            }
+
+            builder.Append(char.ToLowerInvariant(character));
+        }
+
+        return builder.ToString();
     }
 
     /// <summary>

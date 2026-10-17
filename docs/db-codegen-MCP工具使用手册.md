@@ -567,7 +567,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `unmappedTypes[].column` | string | 出现该类型的列名 |
 | `unmappedTypes[].occurrences` | integer | 出现次数 |
 | `pathWarnings` | array | 输出路径告警清单（坏路径预检，**非阻断**、不改变文件计划，但生成前必须核对）；无告警时为空列表 |
-| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空，典型诱因 `codeDirectory` 传 `.` 等无包段输入）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符，如 `src/main/java//X.cs`） |
+| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空，典型诱因 `codeDirectory` 传 `.` 等无包段输入）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符，如 `src/main/java//X.cs`）/ `EmptyIteration`（模板内 for 循环迭代源空集合/null 的零迭代信号，守卫文案设计场景可按告警文案指引忽略）/ `InvalidJavaPackageSegment`（`src/main/java` 之后的 Java 包段不是合法标识符：连字符/非法字符/数字开头/Java 关键字，模板侧应用 `tool.javaIdent` 归一化 kebab 模块名） |
 | `pathWarnings[].template` | string | 首次出现该告警的模板相对路径 |
 | `pathWarnings[].samplePath` | string | 首次出现的渲染后路径样例 |
 | `pathWarnings[].occurrences` | integer | 该告警在本次生成范围内的总出现次数（同模板同种类跨表归并） |

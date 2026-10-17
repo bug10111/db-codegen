@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace DbCodeGen.Core.Tests.Generation;
 
 /// <summary>
-/// 输出路径坏路径预检单元测试：dry-run 回执结构化告警（包段为空 / 连续分隔符）的触发、
+/// 输出路径坏路径预检单元测试：dry-run 回执结构化告警（包段为空 / 连续分隔符 / 非法 Java 包段）的触发、
 /// 归并计数、非阻断性与生成日志可见性。
 /// </summary>
 public sealed class PathWarningTests : IDisposable
@@ -87,7 +87,11 @@ public sealed class PathWarningTests : IDisposable
         Assert.Equal(2, emptyDir.Occurrences);
         PathWarningInfo separators = Assert.Single(preview.PathWarnings, warning => warning.Kind == PathWarningInfo.ConsecutiveSeparators);
         Assert.Equal(2, separators.Occurrences);
-        Assert.Equal(2, preview.PathWarnings.Count);
+
+        // package.dir 为空时路径形成 src/main/java//X.java 空包段，同属非法 Java 包段（段非空判定）
+        PathWarningInfo invalidSegment = Assert.Single(preview.PathWarnings, warning => warning.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+        Assert.Equal(2, invalidSegment.Occurrences);
+        Assert.Equal(3, preview.PathWarnings.Count);
     }
 
     /// <summary>
@@ -113,6 +117,147 @@ public sealed class PathWarningTests : IDisposable
         Assert.Equal(PathWarningInfo.ConsecutiveSeparators, separators.Kind);
         Assert.Equal("out//sysUser.java", separators.SamplePath);
         Assert.DoesNotContain(preview.PathWarnings, warning => warning.Kind == PathWarningInfo.EmptyPackageDir);
+    }
+
+    /// <summary>
+    /// 路径 src/main/java 之后的 Java 包段含连字符时，应产出 InvalidJavaPackageSegment 告警，
+    /// 消息含非法段原文、连字符原因与 tool.javaIdent 修复指引，且不阻断文件计划。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_JavaPackageSegmentWithHyphen_EmitsInvalidSegmentWarning()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("entity.java.scriban", "src/main/java/{{package.dir}}/user-center/{{table.variableName}}.java", "public class {{table.className}} {}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "src/main/java/{{package.dir}}/user-center/{{table.variableName}}.java", true) };
+        var generator = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        // 非阻断：非法包段仅告警，文件计划照常产出
+        Assert.Equal(1, preview.NewCount);
+        PathWarningInfo warning = Assert.Single(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+        Assert.Equal("entity.java.scriban", warning.TemplateName);
+        Assert.Equal(1, warning.Occurrences);
+        Assert.Contains("user-center", warning.Message);
+        Assert.Contains("连字符", warning.Message);
+        Assert.Contains("tool.javaIdent", warning.Message);
+    }
+
+    /// <summary>
+    /// Java 包段以数字开头时应产出 InvalidJavaPackageSegment 告警并给出数字开头原因。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_JavaPackageSegmentStartingWithDigit_EmitsInvalidSegmentWarning()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("entity.java.scriban", "src/main/java/{{package.dir}}/2fa/{{table.variableName}}.java", "public class {{table.className}} {}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "src/main/java/{{package.dir}}/2fa/{{table.variableName}}.java", true) };
+        var generator = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        PathWarningInfo warning = Assert.Single(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+        Assert.Contains("2fa", warning.Message);
+        Assert.Contains("数字开头", warning.Message);
+    }
+
+    /// <summary>
+    /// Java 包段为 Java 关键字时应产出 InvalidJavaPackageSegment 告警并给出关键字原因。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_JavaPackageSegmentKeyword_EmitsInvalidSegmentWarning()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("entity.java.scriban", "src/main/java/{{package.dir}}/class/{{table.variableName}}.java", "public class {{table.className}} {}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "src/main/java/{{package.dir}}/class/{{table.variableName}}.java", true) };
+        var generator = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        PathWarningInfo warning = Assert.Single(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+        Assert.Contains("class", warning.Message);
+        Assert.Contains("Java 关键字", warning.Message);
+    }
+
+    /// <summary>
+    /// Java 包段全部合法时不应产出 InvalidJavaPackageSegment 告警。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ValidJavaPackageSegments_NoInvalidSegmentWarning()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("entity.java.scriban", "src/main/java/{{package.dir}}/usercenter/{{table.variableName}}.java", "public class {{table.className}} {}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "src/main/java/{{package.dir}}/usercenter/{{table.variableName}}.java", true) };
+        var generator = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        Assert.DoesNotContain(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+    }
+
+    /// <summary>
+    /// 非 Java 路径（不含 src/main/java 连续三元段）不参与 Java 包段校验，不误报。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_NonJavaPath_NoInvalidSegmentWarning()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("config.yaml.scriban", "deploy/conf.d/user-center/{{table.variableName}}.yaml", "name: {{table.className}}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("config.yaml.scriban", "deploy/conf.d/user-center/{{table.variableName}}.yaml", true) };
+        var generator = CreateGenerator();
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable() }, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        Assert.DoesNotContain(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+    }
+
+    /// <summary>
+    /// 同一模板的非法 Java 包段跨表多次出现时应归并为一条并累计次数（与既有告警归并口径一致）。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_InvalidSegmentAcrossTables_AggregatesOccurrences()
+    {
+        (TemplatePackageInfo package, string tempRoot) = await CreatePackageAsync(
+            basePackage: "com.example",
+            new[] { ("entity.java.scriban", "src/main/java/{{package.dir}}/user-center/{{table.variableName}}.java", "public class {{table.className}} {}\n") });
+        (string workspaceRoot, _) = CreateWorkspace(tempRoot);
+        var files = new[] { new TemplateFileSelection("entity.java.scriban", "src/main/java/{{package.dir}}/user-center/{{table.variableName}}.java", true) };
+        var generator = CreateGenerator();
+        var tables = new[] { CreateTable(), CreateSecondTable() };
+
+        GenerationPreview preview = await generator.BuildPreviewAsync(
+            new GenerationRequest(package, tables, files, workspaceRoot, "gen"),
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(2, preview.Entries.Count);
+        PathWarningInfo warning = Assert.Single(preview.PathWarnings, item => item.Kind == PathWarningInfo.InvalidJavaPackageSegment);
+        Assert.Equal(2, warning.Occurrences);
     }
 
     /// <summary>
@@ -157,13 +302,14 @@ public sealed class PathWarningTests : IDisposable
 
         Assert.Equal(1, result.Generated);
 
-        // 两条告警（空包段 + 连续分隔符）均应以警告级日志可见，且定位到模板
+        // 三条告警（空包段 + 连续分隔符 + 空段非法 Java 包段）均应以警告级日志可见，且定位到模板
         List<GenerationLogEntry> warningLogs = result.Logs
             .Where(log => log.Level == GenerationLogLevel.Warning && log.Message.Contains("输出路径告警"))
             .ToList();
-        Assert.Equal(2, warningLogs.Count);
+        Assert.Equal(3, warningLogs.Count);
         Assert.Contains(warningLogs, log => log.Message.Contains("EmptyPackageDir"));
         Assert.Contains(warningLogs, log => log.Message.Contains("ConsecutiveSeparators"));
+        Assert.Contains(warningLogs, log => log.Message.Contains("InvalidJavaPackageSegment"));
         Assert.Contains(warningLogs, log => log.Message.Contains("entity.java.scriban"));
     }
 

@@ -188,7 +188,7 @@ public sealed class PreviewTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>文件计划条目、分类计数、未映射类型清单与输出路径告警清单。</returns>
     [McpServerTool(Name = "preview_generation", Title = "预览生成", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）、未映射类型清单与预检告警清单（pathWarnings：EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 / EmptyIteration 模板空迭代零迭代信号，非阻断但必须核对，空迭代告警若为守卫文案设计可按文案指引忽略），确认后再调 generate；tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略。files 为模板过滤清单：传则仅预览清单内模板，省略时选包内全部启用条目。")]
+    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）、未映射类型清单与预检告警清单（pathWarnings：EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 / EmptyIteration 模板空迭代零迭代信号 / InvalidJavaPackageSegment 非法 Java 包段——连字符/非法字符/数字开头/Java 关键字，非阻断但必须核对；坏路径类须先修正参数重新生成，非法 Java 包段应用 tool.javaIdent 归一化 kebab 模块名，空迭代告警若为守卫文案设计可按文案指引忽略），确认后再调 generate；tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略。files 为模板过滤清单：传则仅预览清单内模板，省略时选包内全部启用条目。")]
     public async Task<object> PreviewGenerationAsync(
         string package,
         string workspaceRoot,
@@ -330,9 +330,9 @@ internal sealed record PreviewFilePlan(string Table, string RelativePath, string
 internal sealed record UnmappedTypeItem(string DbType, string Table, string Column, int Occurrences);
 
 /// <summary>
-/// 告警条目 DTO，dry-run 预检结果（非阻断，供调用方核对；含输出路径坏路径与模板空迭代两类）。
+/// 告警条目 DTO，dry-run 预检结果（非阻断，供调用方核对；含输出路径坏路径与模板空迭代）。
 /// </summary>
-/// <param name="Kind">告警种类：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/ EmptyIteration（模板空迭代）。</param>
+/// <param name="Kind">告警种类：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/ EmptyIteration（模板空迭代）/ InvalidJavaPackageSegment（非法 Java 包段）。</param>
 /// <param name="Template">首次出现该告警的模板相对路径。</param>
 /// <param name="SamplePath">首次出现的样例路径（路径类告警为渲染后路径；空迭代告警为模板输出路径模板原文）。</param>
 /// <param name="Occurrences">该告警在本次生成范围内的总出现次数。</param>
@@ -347,7 +347,7 @@ internal sealed record PathWarningItem(string Kind, string Template, string Samp
 /// <param name="OverwriteCount">覆盖条目数。</param>
 /// <param name="SkipCount">跳过条目数。</param>
 /// <param name="UnmappedTypes">未映射类型清单，全部命中时为空列表。</param>
-/// <param name="PathWarnings">预检告警清单（EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 / EmptyIteration 模板空迭代），无告警时为空列表。</param>
+/// <param name="PathWarnings">预检告警清单（EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 / EmptyIteration 模板空迭代 / InvalidJavaPackageSegment 非法 Java 包段），无告警时为空列表。</param>
 internal sealed record PreviewGenerationResult(
     IReadOnlyList<PreviewFilePlan> Entries,
     int NewCount,
