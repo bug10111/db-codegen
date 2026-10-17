@@ -87,7 +87,7 @@ public sealed class TypeMappingQueryTools
 
             _logger.LogInformation(
                 "get_type_map 完成，全局条目 {GlobalCount} 条，包 {PackageName} 条目 {PackageCount} 条。",
-                globalEntries.Count, packageName, packageEntries?.Count ?? 0);
+                globalEntries.Count, packageName, packageEntries.Count);
             return new GetTypeMapResult(globalEntries, packageName, packageEntries, "String");
         }
         catch (Exception exception)

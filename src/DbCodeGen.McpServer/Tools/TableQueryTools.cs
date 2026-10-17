@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json.Serialization;
 using DbCodeGen.Core.DataSource;
 using DbCodeGen.Core.Model;
 using Microsoft.Extensions.Logging;
@@ -53,12 +54,13 @@ public sealed class TableQueryTools
             List<TableSummary> items = new();
             foreach (TableInfo table in tables)
             {
+                // 可空字符串成员归一为空串（结构化应答 schema 必填属性恒在场，调用方免 null 分支）
                 items.Add(new TableSummary(
                     table.RawName,
-                    table.SchemaName,
+                    table.SchemaName ?? string.Empty,
                     table.ClassName,
                     table.VariableName,
-                    table.Comment));
+                    table.Comment ?? string.Empty));
             }
 
             _logger.LogInformation("list_tables 完成，连接 {ConnectionName}，表数量 {TableCount}。", datasource, items.Count);
@@ -89,7 +91,9 @@ public sealed class TableQueryTools
             DataSourceConfig config = ResolveDataSource(datasource);
             TableInfo detail = await _tableCatalogService.GetTableDetailAsync(config, table, cancellationToken);
 
-            // 列元数据投影：保留模板渲染决策所需的全部字段
+            // 列元数据投影：保留模板渲染决策所需的全部字段；
+            // 可空字符串成员归一为空串（schema 必填属性与序列化实况一致），
+            // 数值维度成员保留 null 语义（不适用与真实 0 值必须可区分），经显式 null 序列化保证属性恒在场
             List<ColumnDetail> columns = new();
             foreach (ColumnInfo column in detail.Columns)
             {
@@ -97,7 +101,7 @@ public sealed class TableQueryTools
                     column.RawName,
                     column.PropertyName,
                     column.RawDbType,
-                    column.Comment,
+                    column.Comment ?? string.Empty,
                     column.IsPrimaryKey,
                     column.AutoIncrement,
                     column.IsNullable,
@@ -115,10 +119,10 @@ public sealed class TableQueryTools
             return new GetTableDetailResult(
                 datasource,
                 detail.RawName,
-                detail.SchemaName,
+                detail.SchemaName ?? string.Empty,
                 detail.ClassName,
                 detail.VariableName,
-                detail.Comment,
+                detail.Comment ?? string.Empty,
                 columns,
                 primaryKeyColumns);
         }
@@ -155,16 +159,16 @@ public sealed class TableQueryTools
 /// 表摘要 DTO。
 /// </summary>
 /// <param name="Name">原始表名，与数据库一致。</param>
-/// <param name="Schema">所属 schema/库名，数据库未提供时为 null。</param>
+/// <param name="Schema">所属 schema/库名，数据库未提供时为空串。</param>
 /// <param name="ClassName">按表名推导的 PascalCase 类名。</param>
 /// <param name="VariableName">按表名推导的 camelCase 变量名。</param>
-/// <param name="Comment">表注释，无注释时为 null。</param>
+/// <param name="Comment">表注释，无注释时为空串。</param>
 public sealed record TableSummary(
     string Name,
-    string? Schema,
+    string Schema,
     string ClassName,
     string VariableName,
-    string? Comment);
+    string Comment);
 
 /// <summary>
 /// list_tables 应答 DTO。
@@ -179,23 +183,27 @@ public sealed record ListTablesResult(string Datasource, IReadOnlyList<TableSumm
 /// <param name="Name">原始列名。</param>
 /// <param name="PropertyName">驼峰属性名。</param>
 /// <param name="RawDbType">原始数据库类型（不含长度修饰），与生成入参及渲染模型 rawDbType 同口径。</param>
-/// <param name="Comment">列注释，无注释时为 null。</param>
+/// <param name="Comment">列注释，无注释时为空串。</param>
 /// <param name="IsPrimaryKey">是否主键列（联合主键每列均为 true）。</param>
 /// <param name="AutoIncrement">是否自增列。</param>
 /// <param name="IsNullable">是否可空。</param>
-/// <param name="Length">列长度，无长度语义时为 null。</param>
-/// <param name="Precision">精度，无精度语义时为 null。</param>
-/// <param name="Scale">小数位，无精度语义时为 null。</param>
+/// <param name="Length">列长度，仅字符等类型有值；无长度语义时为 null（应答中序列化为显式 null，属性恒在场）。</param>
+/// <param name="Precision">精度，numeric/decimal 等类型有值；无精度语义时为 null（应答中序列化为显式 null，属性恒在场）。</param>
+/// <param name="Scale">小数位，numeric/decimal 等类型有值；无小数位语义时为 null（应答中序列化为显式 null，属性恒在场；
+/// 数值维度不适用与真实 0 值（如 numeric(x,0)）必须可区分，故保留 null 语义不以 0 归一）。</param>
 public sealed record ColumnDetail(
     string Name,
     string PropertyName,
     string RawDbType,
-    string? Comment,
+    string Comment,
     bool IsPrimaryKey,
     bool AutoIncrement,
     bool IsNullable,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     int? Length,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     int? Precision,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     int? Scale);
 
 /// <summary>
@@ -203,18 +211,18 @@ public sealed record ColumnDetail(
 /// </summary>
 /// <param name="Datasource">数据源连接名。</param>
 /// <param name="Name">原始表名。</param>
-/// <param name="Schema">所属 schema/库名。</param>
+/// <param name="Schema">所属 schema/库名，数据库未提供时为空串。</param>
 /// <param name="ClassName">类名。</param>
 /// <param name="VariableName">变量名。</param>
-/// <param name="Comment">表注释。</param>
+/// <param name="Comment">表注释，无注释时为空串。</param>
 /// <param name="Columns">完整列元数据。</param>
 /// <param name="PrimaryKeyColumns">主键列名清单。</param>
 public sealed record GetTableDetailResult(
     string Datasource,
     string Name,
-    string? Schema,
+    string Schema,
     string ClassName,
     string VariableName,
-    string? Comment,
+    string Comment,
     IReadOnlyList<ColumnDetail> Columns,
     IReadOnlyList<string> PrimaryKeyColumns);
