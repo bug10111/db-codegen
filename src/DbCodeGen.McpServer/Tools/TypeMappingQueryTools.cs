@@ -61,18 +61,20 @@ public sealed class TypeMappingQueryTools
     {
         try
         {
-            // 全局映射来自配置快照，实时反映桌面端或 MCP 侧的最新维护结果
+            // 全局映射来自配置快照，实时反映桌面端或 MCP 侧的最新维护结果；
+            // 可空成员统一归一为空串（schema 必填属性与序列化实况一致，调用方免 null 分支）
             List<TypeMappingEntryDto> globalEntries = _configService.Current.TypeMappings
                 .Select(entry => new TypeMappingEntryDto(
                     entry.DbType,
                     entry.TargetType,
-                    entry.Import,
-                    entry.Remark,
-                    entry.DatabaseType?.ToString()))
+                    entry.Import ?? string.Empty,
+                    entry.Remark ?? string.Empty,
+                    entry.DatabaseType?.ToString() ?? string.Empty))
                 .ToList();
 
-            // 包级 typeMap 仅在显式指定包名时加载，包不存在抛领域异常由调用方感知
-            List<PackageTypeMapEntryDto>? packageEntries = null;
+            // 包级 typeMap 仅在显式指定包名时加载，包不存在抛领域异常由调用方感知；
+            // 未指定包时返回空集合（应答结构恒完整）
+            List<PackageTypeMapEntryDto> packageEntries = new();
             string packageName = string.Empty;
             if (!string.IsNullOrWhiteSpace(package))
             {
@@ -164,15 +166,15 @@ public sealed class TypeMappingQueryTools
 /// </summary>
 /// <param name="DbType">数据库原始类型。</param>
 /// <param name="TargetType">目标语言类型。</param>
-/// <param name="Import">可选导包，无导包需求时为 null。</param>
-/// <param name="Remark">可选备注。</param>
-/// <param name="DatabaseType">适用数据库类型；null 表示通用条目（对所有数据库生效）。</param>
+/// <param name="Import">导包；无导包需求时为空串。</param>
+/// <param name="Remark">备注，无则为空串。</param>
+/// <param name="DatabaseType">适用数据库类型；空串表示通用条目（对所有数据库生效）。</param>
 public sealed record TypeMappingEntryDto(
     string DbType,
     string TargetType,
-    string? Import,
-    string? Remark,
-    string? DatabaseType);
+    string Import,
+    string Remark,
+    string DatabaseType);
 
 /// <summary>
 /// 包级 typeMap 条目 DTO。
@@ -186,12 +188,12 @@ public sealed record PackageTypeMapEntryDto(string DbType, string TargetType);
 /// </summary>
 /// <param name="Global">全局映射条目列表。</param>
 /// <param name="Package">包名；未指定包时为空串。</param>
-/// <param name="PackageTypeMap">包级 typeMap 条目；未指定包时为 null。</param>
+/// <param name="PackageTypeMap">包级 typeMap 条目；未指定包时为空集合。</param>
 /// <param name="DefaultType">全部未命中时的兜底目标类型。</param>
 public sealed record GetTypeMapResult(
     IReadOnlyList<TypeMappingEntryDto> Global,
     string Package,
-    IReadOnlyList<PackageTypeMapEntryDto>? PackageTypeMap,
+    IReadOnlyList<PackageTypeMapEntryDto> PackageTypeMap,
     string DefaultType);
 
 /// <summary>

@@ -54,7 +54,7 @@ public sealed class TemplateQueryTools
                     package.Name,
                     package.Description,
                     package.Engine,
-                    package.BasePackage,
+                    package.BasePackage ?? string.Empty,
                     package.IsBuiltin,
                     package.Files.Count,
                     package.ModifiedTime));
@@ -130,7 +130,7 @@ public sealed class TemplateQueryTools
             return new ListTemplatesResult(
                 packageInfo.Name,
                 packageInfo.IsBuiltin,
-                packageInfo.BasePackage,
+                packageInfo.BasePackage ?? string.Empty,
                 entries);
         }
         catch (Exception exception)
@@ -264,7 +264,7 @@ public sealed class TemplateQueryTools
 /// <param name="Name">包名。</param>
 /// <param name="Description">包说明。</param>
 /// <param name="Engine">模板引擎，当前固定 scriban。</param>
-/// <param name="BasePackage">基础包名，未配置时为 null。</param>
+/// <param name="BasePackage">基础包名，未配置时为空串。</param>
 /// <param name="IsBuiltin">是否内置包（只读，不可编辑删除）。</param>
 /// <param name="FileCount">包内模板文件数。</param>
 /// <param name="ModifiedTime">包目录最近修改时间。</param>
@@ -272,7 +272,7 @@ public sealed record TemplatePackageSummary(
     string Name,
     string Description,
     string Engine,
-    string? BasePackage,
+    string BasePackage,
     bool IsBuiltin,
     int FileCount,
     DateTime ModifiedTime);
@@ -299,12 +299,12 @@ public sealed record TemplateEntry(string Path, string Output, bool Enabled, str
 /// </summary>
 /// <param name="Package">包名。</param>
 /// <param name="IsBuiltin">是否内置包。</param>
-/// <param name="BasePackage">基础包名，未配置时为 null。</param>
+/// <param name="BasePackage">基础包名，未配置时为空串。</param>
 /// <param name="Templates">过滤后命中的模板条目列表。</param>
 public sealed record ListTemplatesResult(
     string Package,
     bool IsBuiltin,
-    string? BasePackage,
+    string BasePackage,
     IReadOnlyList<TemplateEntry> Templates);
 
 /// <summary>
