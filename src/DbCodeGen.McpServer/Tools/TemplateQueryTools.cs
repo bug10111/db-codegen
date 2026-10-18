@@ -13,6 +13,12 @@ namespace DbCodeGen.McpServer.Tools;
 [McpServerToolType]
 public sealed class TemplateQueryTools
 {
+    /// <summary>
+    /// 包根文档模板文件名：即使未在 template.json files[] 声明，read_template 也可读取、list_templates 以文档型条目呈现；
+    /// 该文件不属于生成条目（enabled=false、无输出路径），不进入模板包文件清单与生成选择。
+    /// </summary>
+    private const string RootReadmeTemplateFileName = "README.md.scriban";
+
     private readonly ITemplatePackageService _packageService;
     private readonly TemplateFileWriter _templateFileWriter;
     private readonly ILogger<TemplateQueryTools> _logger;
@@ -73,7 +79,8 @@ public sealed class TemplateQueryTools
 
     /// <summary>
     /// 列出指定模板包内的模板条目，可按分组（相对路径子目录前缀）与语言段过滤，
-    /// 返回条目相对路径、输出路径模板、启用标记与推导语言。
+    /// 返回条目相对路径、输出路径模板、启用标记与推导语言；
+    /// 包根存在且未在清单声明 README.md.scriban 时附带一条文档型条目（不进清单、不参与生成）。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="group">可选分组前缀，匹配模板相对路径的子目录前缀，如 "controller"、子目录多级用正斜杠分隔。</param>
@@ -81,7 +88,7 @@ public sealed class TemplateQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板条目列表（含过滤后总数；结构化内容，输出结构由 ListTemplatesResult 声明）。</returns>
     [McpServerTool(Name = "list_templates", Title = "列出模板文件", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言、作用域 scope：table/module/project），可按分组前缀与语言段过滤。")]
+    [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言、作用域 scope：table/module/project），可按分组前缀与语言段过滤。包根存在且未在 template.json files[] 声明 README.md.scriban 时附带文档型条目（enabled=false、output 空串、scope=project；不在清单中、不计入 fileCount、不参与生成）。")]
     public async Task<ListTemplatesResult> ListTemplatesAsync(
         string package,
         string? group = null,
@@ -124,8 +131,24 @@ public sealed class TemplateQueryTools
                     TemplateScopeParser.ToContractText(file.Scope)));
             }
 
+            // 包根 README 文档型条目：仅当包根存在该文件且未被清单声明时合成，供脚手架包传参契约可被发现；
+            // 受分组/语言过滤约束（根级文档仅在无分组过滤时命中、语言段为 Plain），不进清单、不计入文件数、不参与生成
+            if (groupPrefix is null && HasUndeclaredRootReadme(packageInfo))
+            {
+                HighlightLanguage readmeLanguage = HighlightLanguageResolver.FromTemplateFileName(RootReadmeTemplateFileName);
+                if (languageFilter is null || readmeLanguage == languageFilter)
+                {
+                    entries.Add(new TemplateEntry(
+                        RootReadmeTemplateFileName,
+                        string.Empty,
+                        false,
+                        readmeLanguage.ToString(),
+                        TemplateScopeParser.ToContractText(TemplateScope.Project)));
+                }
+            }
+
             _logger.LogInformation(
-                "list_templates 完成，包 {PackageName}，命中 {MatchedCount}/{TotalCount} 条。",
+                "list_templates 完成，包 {PackageName}，返回 {EntryCount} 条（清单声明文件 {TotalCount} 个）。",
                 package, entries.Count, packageInfo.Files.Count);
             return new ListTemplatesResult(
                 packageInfo.Name,
@@ -142,40 +165,50 @@ public sealed class TemplateQueryTools
     }
 
     /// <summary>
-    /// 读取指定模板的正文全文，仅允许读取包清单声明的模板文件，路径经防目录穿越校验。
+    /// 读取指定模板的正文全文：仅允许读取包清单声明的模板文件，路径经防目录穿越校验；
+    /// 包根 README.md.scriban 为窄例外（可未声明），按文档型条目返回、不参与生成。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致，可含分组目录）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板正文全文、条目元数据与内容摘要。</returns>
     [McpServerTool(Name = "read_template", Title = "读取模板", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("读取指定模板文件的正文全文（Scriban 源文本）与正文内容摘要 contentHash（SHA256 前 16 位 hex 小写，供 save_template_edit 条件写作期望值）；path 取 list_templates 返回的相对路径。")]
+    [Description("读取指定模板文件的正文全文（Scriban 源文本）与正文内容摘要 contentHash（SHA256 前 16 位 hex 小写，供 save_template_edit 条件写作期望值）；path 取 list_templates 返回的相对路径。包根 README.md.scriban 即使未在 template.json files[] 声明也可读取（文档型条目：enabled=false、output 为空串、不参与生成）；其它未声明路径一律拒绝。")]
     public async Task<object> ReadTemplateAsync(string package, string path, CancellationToken cancellationToken)
     {
         try
         {
             TemplatePackageInfo packageInfo = await _packageService.LoadPackageAsync(package, cancellationToken);
 
-            // 仅允许读取包清单声明的模板文件：以清单条目为白名单，杜绝任意文件读取
+            // 以包清单条目为读取白名单，杜绝任意文件读取；包根 README 文档为唯一窄例外（下方单独判定）
             TemplateFileInfo? entry = FindFileEntry(packageInfo, path);
-            if (entry is null)
+            bool isRootReadme = entry is null && IsRootReadmePath(path);
+            if (entry is null && !isRootReadme)
             {
                 throw new TemplatePackageException($"模板文件不存在：包 {package} 中未声明模板路径 {path}。");
             }
 
+            // 根级 README 窄例外：调用方路径必须是规范化后的根级 README 文件名，且包根实际存在该文件；
+            // 读取仍走 TemplateFileWriter.ReadAsync 的防穿越校验 + UTF-8 去 BOM 解码通道
+            string relativePath = entry?.RelativeTemplatePath ?? RootReadmeTemplateFileName;
+            if (isRootReadme && !RootReadmeExists(packageInfo))
+            {
+                throw new TemplatePackageException($"模板文件不存在：包 {package} 的包根不存在文档文件 {RootReadmeTemplateFileName}。");
+            }
+
             // 复用桌面端同款读取通道：防目录穿越 + UTF-8 去 BOM 解码
-            string content = await _templateFileWriter.ReadAsync(packageInfo, entry.RelativeTemplatePath, cancellationToken);
+            string content = await _templateFileWriter.ReadAsync(packageInfo, relativePath, cancellationToken);
             HighlightLanguage language = HighlightLanguageResolver.FromTemplateFileName(
-                Path.GetFileName(entry.RelativeTemplatePath));
+                Path.GetFileName(relativePath));
 
             _logger.LogInformation(
                 "read_template 完成，包 {PackageName}，路径 {TemplatePath}，字符数 {CharCount}。",
-                package, entry.RelativeTemplatePath, content.Length);
+                package, relativePath, content.Length);
             return new ReadTemplateResult(
                 packageInfo.Name,
-                entry.RelativeTemplatePath,
-                entry.OutputPath,
-                entry.IsEnabled,
+                relativePath,
+                entry?.OutputPath ?? string.Empty,
+                entry?.IsEnabled ?? false,
                 language.ToString(),
                 content,
                 TemplateContentHash.Compute(content));
@@ -255,6 +288,52 @@ public sealed class TemplateQueryTools
         string normalized = path.Trim().Replace('\\', '/');
         return package.Files.FirstOrDefault(
             file => string.Equals(file.RelativeTemplatePath, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 判断调用方路径是否为包根 README 文档：去空白、反斜杠转正斜杠后必须恰为 README.md.scriban（忽略大小写）；
+    /// 子目录形态、父级跳转形态与绝对路径均不命中，保持单一窄例外。
+    /// </summary>
+    /// <param name="path">调用方传入的模板相对路径。</param>
+    /// <returns>是否为包根 README 文档路径。</returns>
+    private static bool IsRootReadmePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        string normalized = path.Trim().Replace('\\', '/');
+        return string.Equals(normalized, RootReadmeTemplateFileName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 判断包根是否存在 README 文档文件；文件名取自固定常量（不含分隔符与 .. 段），
+    /// 此处仅作存在性确认，正文读取仍统一经 TemplateFileWriter.ReadAsync 的防穿越通道。
+    /// </summary>
+    /// <param name="package">包运行时信息。</param>
+    /// <returns>包根 README 文档存在时为 true。</returns>
+    private static bool RootReadmeExists(TemplatePackageInfo package)
+    {
+        string fullPath = Path.Combine(package.RootPath, RootReadmeTemplateFileName);
+        return File.Exists(fullPath);
+    }
+
+    /// <summary>
+    /// 判断包根 README 是否为未在清单声明的文档文件：包根存在该文件且清单 files 未声明同名条目时返回 true。
+    /// </summary>
+    /// <param name="package">包运行时信息。</param>
+    /// <returns>存在未声明的包根 README 文档时为 true。</returns>
+    private static bool HasUndeclaredRootReadme(TemplatePackageInfo package)
+    {
+        bool declared = package.Files.Any(
+            file => string.Equals(file.RelativeTemplatePath, RootReadmeTemplateFileName, StringComparison.OrdinalIgnoreCase));
+        if (declared)
+        {
+            return false;
+        }
+
+        return RootReadmeExists(package);
     }
 }
 

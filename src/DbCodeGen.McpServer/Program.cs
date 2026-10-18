@@ -64,7 +64,7 @@ builder.Services.AddMcpServer(options =>
         + "关键语义：generate 与 preview_generation 的 tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；模板 scope 三作用域（table 按表集逐表 / module 按 modules 清单逐个 / project 整次一次，同次可混跑）；"
         + "files 为模板过滤清单，传则仅生成清单内模板，省略时选包内全部启用条目；"
         + "duplicateStrategy 仅 overwrite/skip 两值——对含手写代码的输出目录必须用 skip 防覆盖手写文件。"
-        + "脚手架包生成协议（包内 README.md.scriban 为该包传参契约的唯一权威，经 read_template 可读；以下为工具面通用契约）："
+        + "脚手架包生成协议（包内 README.md.scriban 为该包传参契约的唯一权威，经 read_template 可读——包根 README.md.scriban 即使未在 template.json files[] 声明也可读取；该文件为文档型条目：enabled=false、无输出路径、不参与生成，list_templates 在包根存在该文件且未在清单声明时附带同口径文档型条目；以下为工具面通用契约）："
         + "①业务模块清单经 modules 参数传递且为唯一事实源（如 [{\"name\":\"asset\",\"desc\":\"资料\"}]，元素 name 必填、desc 等其余字段原样注入 module.* 与全部聚合段）；project 作用域模板以根变量 modules 消费，module 作用域仅注入 module.* 单模块上下文、不注入 modules 根变量（多模块聚合段属 project 作用域模板）；显式传 variables 同名键时以 modules 参数为准（该 vars 键已退役，仅作普通透传）。"
         + "②variables 纪律：按包 README 全量传键；值支持任意 JSON 类型；布尔键必须传布尔值（勿传 \"true\" 字符串——非空字符串按真值判定）；业务模块清单一律经 modules 参数传数组（同名 vars 键已退役，仅普通透传不参与消费）；模板内 vars.* 集合循环遇字符串值将被结构化拒绝。"
         + "③路径语义：workspaceRoot 传工程父目录（生成根锚点）；codeDirectory 必须传 src/main/java/<完整包路径>（如 src/main/java/com/simple/demosso），package.dir 由此派生，禁止传 \".\"（包段丢失，Java 文件散落源根）。"

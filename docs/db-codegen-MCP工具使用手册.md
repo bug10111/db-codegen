@@ -188,6 +188,8 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `templates[].enabled` | boolean | 是否默认参与生成（`files` 省略时的选择依据） |
 | `templates[].language` | string | 按文件名语言段推导的目标语言（Java/CSharp/Xml/Sql/Json/Plain） |
 
+**包根 README 文档型条目**：当包根存在 `README.md.scriban` 且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path=README.md.scriban`、`output` 为空串、`enabled=false`、`language=Plain`、`scope=project`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤仅在 `plain` 时命中。
+
 **错误态**：`TemplatePackageError`（包不存在）；`InvalidArgument`（`type` 非法）。
 
 **调用示例**：
@@ -215,8 +217,11 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `enabled` | boolean | 是否默认参与生成 |
 | `language` | string | 目标语言 |
 | `content` | string | 模板正文全文（UTF-8 去 BOM 解码） |
+| `contentHash` | string | 正文内容摘要（SHA256 前 16 位 hex 小写），供 `save_template_edit` 条件写期望值 |
 
-**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件，杜绝任意文件读取）。
+**包根 README 窄例外**：包根 `README.md.scriban` 即使未在 `template.json files[]` 声明也可读取；返回文档型元数据（`output` 为空串、`enabled=false`、`language=Plain`），读取仍经防目录穿越校验。`sub/README.md.scriban`、`../README.md.scriban`、绝对路径/盘符形态与其它未声明文件一律拒绝。
+
+**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件，杜绝任意文件读取；包根 `README.md.scriban` 窄例外除外，文件不存在同样报此错误）。
 
 **调用示例**：
 
@@ -771,7 +776,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | errorType | 含义 | 典型触发场景 |
 | --- | --- | --- |
 | `InvalidArgument` | 入参非法 | 路径穿越/绝对路径/盘符前缀、空参数、非法枚举值（语言段/策略/数据库类型）、数据源不存在、`tables` 为空（所选模板含 table 作用域条目时）、端口越界、两模式混用 |
-| `TemplatePackageError` | 模板包域/生成域错误 | 包不存在、模板路径未在包清单声明、内置包只读拒绝、模板文件同名冲突、模板渲染失败（含行列）、生成输出路径越出工作区根 |
+| `TemplatePackageError` | 模板包域/生成域错误 | 包不存在、模板路径未在包清单声明（`read_template` 的包根 `README.md.scriban` 窄例外除外）、内置包只读拒绝、模板文件同名冲突、模板渲染失败（含行列）、生成输出路径越出工作区根 |
 | `Timeout` | 连接超时 | Core 连接 10 秒兜底超时触发（**内部超时，不等于调用方取消**）；固定文案「连接超时（10 秒兜底触发），请检查主机地址、端口与网络后重试。」 |
 | `Cancelled` | 调用方取消 | 客户端主动取消本次请求 |
 | `InternalError` | 其余内部错误 | 未归类异常，消息经 Core 层脱敏后透出 |
@@ -790,7 +795,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 - **内置模板包只读**：内置包 `java-mybatis-plus` 一律拒绝编辑类操作（`save_template_content`/`create_template_file`/`delete_template_file`/`rename_template_file`），返回 `TemplatePackageError`。要用内置包做底版，先复制到用户包。
 - **路径安全（强制）**：
-  - 模板路径（`read_template`/`render_template`/四个编辑工具的 `path`/`newPath`）：以包清单条目为白名单 + 禁止绝对路径、`..` 段与盘符前缀，必须落在包根目录内；清单未声明的路径一律拒绝。
+  - 模板路径（`read_template`/`render_template`/四个编辑工具的 `path`/`newPath`）：以包清单条目为白名单 + 禁止绝对路径、`..` 段与盘符前缀，必须落在包根目录内；清单未声明的路径一律拒绝。唯一窄例外（仅 `read_template`）：包根 `README.md.scriban` 即使未在清单声明也可读取（文档型条目：`enabled=false`、`output` 空串、不参与生成），读取仍经防目录穿越校验。
   - 生成输出路径：模板 `output` 渲染出的相对路径允许 `..` 段越出相对输出根（如从代码根 `src/main/java` 越到 `src/main/resources`），但解析后**必须仍位于工作区根内**，越出工作区根拒绝。
 - **密码安全（强制）**：密码明文仅作为入参瞬态传递（加密入库或连接组装），任何应答字段、日志、错误消息都不回显明文与密文；`list_datasources` 及连接增删改的返回摘要是白名单投影，结构性不含密码字段；明文直测不入库不留痕。
 - **参数全显式零记忆态**：服务端不读取桌面端的勾选态/排序/最近目录等 UI 记忆；`generate` 的表、模板选择、覆盖策略、输出位置全部显式传入；生成成功后不回写 config.json 的最近工作区根/代码目录（`persistLastUsedPaths` 固定关闭）。
