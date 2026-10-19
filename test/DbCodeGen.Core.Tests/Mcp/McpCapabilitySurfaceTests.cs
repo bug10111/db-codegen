@@ -181,6 +181,9 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
               "hasWebPage": false,
               "contractPath": "docs/contract.md.scriban",
               "deployModes": ["standalone", "cloud"],
+              "presets": {
+                "base": { "description": "基础启用集", "include": "enabled" }
+              },
               "files": [
                 { "template": "entity.java.scriban", "output": "src/main/java/{{package.dir}}/entity/{{table.className}}.java", "enabled": true },
                 { "template": "view.java.scriban", "output": "src/main/java/{{package.dir}}/view/{{table.className}}View.java", "enabled": true }
@@ -201,9 +204,12 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         Assert.Equal(new[] { "standalone", "cloud" }, summary.DeployModes);
         Assert.True(summary.HasContract);
         Assert.Empty(summary.Warnings);
+        TemplatePresetSummary packagePreset = Assert.Single(summary.Presets);
+        Assert.Equal(("base", 2), (packagePreset.Name, packagePreset.FileCount));
 
         ListTemplatesResult templates = await tools.ListTemplatesAsync("simple", null, null, CancellationToken.None);
         Assert.Equal(3, templates.Templates.Count);
+        Assert.Equal("base", Assert.Single(templates.Presets).Name);
         TemplateEntry contractEntry = Assert.Single(templates.Templates, entry => entry.IsContract);
         Assert.Equal("docs/contract.md.scriban", contractEntry.Path);
         Assert.False(contractEntry.Enabled);
@@ -213,6 +219,7 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         ReadTemplateResult contract = Assert.IsType<ReadTemplateResult>(readResult);
         Assert.Equal("docs/contract.md.scriban", contract.Path);
         Assert.Contains("命名策略", contract.Content);
+        Assert.Equal("base", Assert.Single(contract.Presets).Name);
     }
 
     /// <summary>

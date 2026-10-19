@@ -33,8 +33,10 @@ internal static class GenerationRequestFactory
     /// <param name="cancellationToken">取消标记。</param>
     /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；非法值结构化拒绝。</param>
     /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false 表示命中平台表规则时排除）；不影响排除表规则。</param>
+    /// <param name="preset">命名预设（manifest.presets 的 preset 名）：传值时由服务端解析模板清单并注入预设默认变量；
+    /// 与 files 互斥（同时传结构化拒绝）；省略时保持既有 files/全部启用条目行为。</param>
     /// <returns>可直接提交 Core 生成服务的请求。</returns>
-    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径、所选模板含 table 作用域条目但未提供表、variables/modules 元素结构非法或 webDirectory 非法时抛出。</exception>
+    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径、所选模板含 table 作用域条目但未提供表、variables/modules 元素结构非法、webDirectory 非法、preset 未知或与 files 同时提供时抛出。</exception>
     public static async Task<GenerationRequest> CreateAsync(
         ITemplatePackageService packageService,
         string package,
@@ -49,7 +51,8 @@ internal static class GenerationRequestFactory
         IReadOnlyList<Dictionary<string, object?>>? modules,
         CancellationToken cancellationToken,
         string? webDirectory = null,
-        bool includePlatformTables = false)
+        bool includePlatformTables = false,
+        string? preset = null)
     {
         ArgumentNullException.ThrowIfNull(packageService);
         if (string.IsNullOrWhiteSpace(package))
@@ -75,7 +78,31 @@ internal static class GenerationRequestFactory
         IReadOnlyList<ModuleContext>? parsedModules = ParseModules(modules);
 
         TemplatePackageInfo packageInfo = await packageService.LoadPackageAsync(package.Trim(), cancellationToken);
-        IReadOnlyList<TemplateFileSelection> selections = BuildSelections(packageInfo, files);
+
+        // preset 与 files 互斥：preset 由服务端解析模板清单，files 为调用方精确清单，混用会产生两套口径
+        bool hasPreset = !string.IsNullOrWhiteSpace(preset);
+        bool hasFiles = files is not null;
+        if (hasPreset && hasFiles)
+        {
+            throw new ArgumentException(
+                "preset 与 files 互斥：传 preset 时由服务端按预设解析模板清单，不可同时传 files；如需精确控制模板集合请只用 files。");
+        }
+
+        IReadOnlyList<TemplateFileSelection> selections;
+        IReadOnlyDictionary<string, object?>? effectiveVariables = parsedVariables;
+        if (hasPreset)
+        {
+            // preset 解析模板集合（enabled/all/files 三种口径），并注入预设默认变量；调用方显式变量同名键优先
+            IReadOnlyList<TemplateFileInfo> presetFiles = TemplatePresetResolver.ResolveFiles(packageInfo, preset!);
+            selections = BuildSelectionsFromFiles(presetFiles);
+            IReadOnlyDictionary<string, JsonElement> presetVariables =
+                TemplatePresetResolver.ResolveVariables(packageInfo, preset!);
+            effectiveVariables = MergeVariables(presetVariables, parsedVariables);
+        }
+        else
+        {
+            selections = BuildSelections(packageInfo, files);
+        }
 
         // tables 非空要求按生效模板集合分型：仅当所选模板（files 过滤后）含 table 作用域条目时要求至少一张表，
         // 纯 module/project 作用域集合（模板不消费表）允许省略 tables
@@ -111,7 +138,7 @@ internal static class GenerationRequestFactory
             codeDirectory.Trim(),
             strategy,
             persistLastUsedPaths,
-            parsedVariables,
+            effectiveVariables,
             parsedModules,
             webDirectory,
             includePlatformTables);
@@ -245,6 +272,39 @@ internal static class GenerationRequestFactory
     }
 
     /// <summary>
+    /// 合并预设默认变量与调用方变量：预设值先落，调用方显式同名键逐键覆盖（优先级 = 请求 variables &gt; 预设 variables）。
+    /// </summary>
+    /// <param name="presetVariables">预设默认变量，非空。</param>
+    /// <param name="requestVariables">调用方显式变量，可空。</param>
+    /// <returns>合并后的变量字典；预设无变量时原样返回调用方变量。</returns>
+    internal static IReadOnlyDictionary<string, object?>? MergeVariables(
+        IReadOnlyDictionary<string, JsonElement> presetVariables,
+        IReadOnlyDictionary<string, object?>? requestVariables)
+    {
+        if (presetVariables.Count == 0)
+        {
+            return requestVariables;
+        }
+
+        var merged = new Dictionary<string, object?>(
+            presetVariables.Count + (requestVariables?.Count ?? 0), StringComparer.Ordinal);
+        foreach (KeyValuePair<string, JsonElement> pair in presetVariables)
+        {
+            merged[pair.Key] = pair.Value;
+        }
+
+        if (requestVariables is not null)
+        {
+            foreach (KeyValuePair<string, object?> pair in requestVariables)
+            {
+                merged[pair.Key] = pair.Value;
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
     /// 按文件清单构建模板文件选择集合：清单为空时默认选择包内全部启用条目（与桌面端清单默认态一致）；
     /// 非空时逐条按清单白名单匹配，包内不存在的路径直接拒绝并列出提示。
     /// </summary>
@@ -258,20 +318,21 @@ internal static class GenerationRequestFactory
     {
         if (files is null || files.Count == 0)
         {
-            List<TemplateFileInfo> enabledFiles = packageInfo.Files.Where(file => file.IsEnabled).ToList();
-            List<TemplateFileSelection> defaultSelections = new(enabledFiles.Count);
-            foreach (TemplateFileInfo file in enabledFiles)
+            List<TemplateFileInfo> enabledFiles = new();
+            foreach (TemplateFileInfo file in packageInfo.Files)
             {
-                defaultSelections.Add(new TemplateFileSelection(
-                    file.RelativeTemplatePath, file.OutputPath, isSelected: true, file.Scope, file.OutputRoot, file.Role));
+                if (file.IsEnabled)
+                {
+                    enabledFiles.Add(file);
+                }
             }
 
-            if (defaultSelections.Count == 0)
+            if (enabledFiles.Count == 0)
             {
                 throw new ArgumentException($"模板包 {packageInfo.Name} 内没有启用状态的模板文件，请显式传入 files 清单或先启用模板。");
             }
 
-            return defaultSelections;
+            return BuildSelectionsFromFiles(enabledFiles);
         }
 
         List<TemplateFileSelection> selections = new(files.Count);
@@ -294,6 +355,23 @@ internal static class GenerationRequestFactory
 
             selections.Add(new TemplateFileSelection(
                 entry.RelativeTemplatePath, entry.OutputPath, isSelected: true, entry.Scope, entry.OutputRoot, entry.Role));
+        }
+
+        return selections;
+    }
+
+    /// <summary>
+    /// 将包内模板运行时条目映射为生成选择集合（preset 解析结果与默认启用条目共用同一映射口径）。
+    /// </summary>
+    /// <param name="files">已解析的模板文件条目集合，非空。</param>
+    /// <returns>参与生成的模板文件选择集合。</returns>
+    private static IReadOnlyList<TemplateFileSelection> BuildSelectionsFromFiles(IReadOnlyList<TemplateFileInfo> files)
+    {
+        List<TemplateFileSelection> selections = new(files.Count);
+        foreach (TemplateFileInfo file in files)
+        {
+            selections.Add(new TemplateFileSelection(
+                file.RelativeTemplatePath, file.OutputPath, isSelected: true, file.Scope, file.OutputRoot, file.Role));
         }
 
         return selections;

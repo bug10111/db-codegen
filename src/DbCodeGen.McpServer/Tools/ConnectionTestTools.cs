@@ -49,15 +49,27 @@ public sealed class ConnectionTestTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>连接测试结果（成功与否、可读信息、服务端版本、耗时毫秒）。</returns>
     [McpServerTool(Name = "test_connection", Title = "测试连接", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("测试数据库连接可用性（10 秒超时）。两模式二选一：传 datasource 按已保存连接测试；或传 type/host/port/database/userId（password 可选）完整明文直测——不入库、不保存任何信息。")]
+    [Description("用途：测试数据库连接可用性（10 秒超时兜底，失败信息经 Core 层脱敏）。\n"
+        + "何时用：保存连接前直测参数（不入库不留痕）；怀疑已保存连接参数过期时按名复测。\n"
+        + "参数（两模式二选一）：datasource(string,可选,默认 null)=已保存连接名，传入即按名模式；"
+        + "或直测模式 type(string)/host(string)/port(integer,1-65535)/database(string)/userId(string) 必填、password(string,可选,默认 null)=明文密码仅瞬态参与本次连接、不入库不回显。\n"
+        + "返回：mode（saved=按名/direct=直测）、datasource（按名连接名；直测省略）、success（是否成功）、message（可读信息，已脱敏）、"
+        + "serverVersion（成功时可能有值）、elapsedMilliseconds（耗时毫秒）。\n"
+        + "常见错误：InvalidArgument（两模式混用；直测缺参；端口越界；数据源不存在）；Timeout（连接 10 秒兜底超时）；InternalError。")]
     public async Task<object> TestConnectionAsync(
+        [Description("已保存的数据源连接名（可选，默认 null）：传入即按名测试模式（使用其 DPAPI 密文凭据）；与明文直测参数互斥。")]
         string? datasource = null,
         [Description("直测模式数据库类型：mysql / postgresql；传 datasource 按已保存连接测试时忽略本参数。")]
         string? type = null,
+        [Description("直测模式主机名或 IP（直测必填）。")]
         string? host = null,
+        [Description("直测模式端口（直测必填，1-65535）。")]
         int? port = null,
+        [Description("直测模式数据库名（直测必填）。")]
         string? database = null,
+        [Description("直测模式用户名（直测必填）。")]
         string? userId = null,
+        [Description("直测模式密码明文（可选，默认 null）：仅瞬态用于本次连接，不入库不回显；缺省按空密码尝试。")]
         string? password = null,
         CancellationToken cancellationToken = default)
     {

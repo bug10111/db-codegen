@@ -40,13 +40,25 @@ public sealed class TemplatePackageManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>创建成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "create_template_package", Title = "新建模板包", Destructive = false)]
-    [Description("新建用户模板包（写 template.json 清单，固定 scriban 引擎，可设包说明 description、基础包名 basePackage 与包级类型映射 typeMap（数据库原始类型→目标语言类型，生成时优先于全局映射表命中），basePackage 传空串表示清空）。可选传 firstTemplatePath+firstOutputPath 顺带创建首个空模板文件（两者须同时提供），正文随后用 save_template_content 写入；不传则创建空包。与内置包/既有用户包同名拒绝。")]
+    [Description("用途：新建用户模板包（写 template.json 清单，固定 scriban 引擎）。\n"
+        + "何时用：从零创建用户模板包；不传首模板则创建空包，随后用 create_template_file 增模板。\n"
+        + "参数：package(string,必填)=新包名（字母/数字/中划线/下划线，须符合目录名规则）；description(string,可选,默认 null)=包说明；"
+        + "basePackage(string,可选,默认 null)=基础包名，空串表示清空；typeMap(object<string,string>,可选,默认 null)=包级类型映射（数据库原始类型→目标语言类型），生成时优先于全局映射表；"
+        + "firstTemplatePath(string,可选,默认 null)=首模板相对路径（可含分组目录），与 firstOutputPath 须同时提供；firstOutputPath(string,可选,默认 null)=首模板输出路径模板，支持 {{变量}} 占位。\n"
+        + "返回：package（包名）、action=created、newName（null）、description、basePackage、fileCount。\n"
+        + "常见错误：TemplatePackageError（与内置包或既有用户包同名；内置只读）；InvalidArgument（包名不合法；首模板两参数未成对；路径校验失败）；InternalError。")]
     public async Task<object> CreateTemplatePackageAsync(
+        [Description("新模板包包名（必填）：字母/数字/中划线/下划线，至少一个字母或数字。")]
         string package,
+        [Description("包说明（可选，默认 null）。")]
         string? description = null,
+        [Description("基础包名（可选，默认 null）：如 com.example；传空串表示清空。")]
         string? basePackage = null,
+        [Description("包级类型映射（可选，默认 null）：数据库原始类型→目标语言类型（如 {\"bigint\":\"long\"}），生成时优先于全局映射表；空白键值项跳过，键统一小写化。")]
         Dictionary<string, string>? typeMap = null,
+        [Description("首模板文件相对包根路径（可选，默认 null）：可含分组目录；与 firstOutputPath 须同时提供。")]
         string? firstTemplatePath = null,
+        [Description("首模板文件输出相对路径模板（可选，默认 null）：支持 {{变量}} 占位；与 firstTemplatePath 须同时提供。")]
         string? firstOutputPath = null,
         CancellationToken cancellationToken = default)
     {
@@ -80,9 +92,15 @@ public sealed class TemplatePackageManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>删除成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "delete_template_package", Title = "删除模板包", Destructive = true)]
-    [Description("删除用户模板包（物理删除整个包目录，不可恢复）。防误删保护：confirm 必须显式传 true 才执行；内置包只读拒绝删除。")]
+    [Description("用途：删除用户模板包（物理删除整个包目录，不可恢复）。\n"
+        + "何时用：确认包不再需要时；调用前先 list_templates/read_template 核对包内容。\n"
+        + "参数：package(string,必填)=待删除用户模板包包名；confirm(boolean,必填)=防误删确认开关，必须显式传 true 才执行。\n"
+        + "返回：package（包名）、action=deleted、newName/description/basePackage/fileCount 均省略（无包信息）。\n"
+        + "常见错误：InvalidArgument（confirm 未传 true；包名为空）；TemplatePackageError（内置包只读；包不存在）；InternalError。")]
     public async Task<object> DeleteTemplatePackageAsync(
+        [Description("待删除用户模板包包名（必填）。")]
         string package,
+        [Description("删除确认开关（必填）：必须显式传 true 才执行，防误删保护。")]
         bool confirm,
         CancellationToken cancellationToken = default)
     {
@@ -116,9 +134,16 @@ public sealed class TemplatePackageManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>重命名成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "rename_template_package", Title = "重命名模板包", Destructive = false)]
-    [Description("重命名用户模板包（物理改目录名并同步重写清单包名）。勾选记忆不迁移：包展示顺序记忆与模板勾选记忆不随改名迁移，与 rename_template_file 文件级先例一致；桌面端旧名记忆条目需自行重建。内置包只读拒绝；新名与既有包同名拒绝。")]
+    [Description("用途：重命名用户模板包（物理改目录名并同步重写清单包名）。\n"
+        + "何时用：调整包名；内置包需先 copy_template_package 复制为可写用户包。\n"
+        + "参数：package(string,必填)=当前用户模板包包名；newName(string,必填)=新包名（须符合目录名规则）。\n"
+        + "返回：package（旧包名）、action=renamed、newName（新包名）、description、basePackage、fileCount。\n"
+        + "常见错误：TemplatePackageError（内置包只读；新名与既有包同名；包不存在）；InvalidArgument（newName 为空或非法）；InternalError。"
+        + "注意：包展示顺序记忆与模板勾选记忆不随改名迁移，桌面端旧名记忆条目需自行重建。")]
     public async Task<object> RenameTemplatePackageAsync(
+        [Description("当前用户模板包包名（必填）。")]
         string package,
+        [Description("新模板包包名（必填）：字母/数字/中划线/下划线，须符合目录名规则。")]
         string newName,
         CancellationToken cancellationToken = default)
     {
@@ -159,11 +184,20 @@ public sealed class TemplatePackageManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>更新成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "update_template_package_metadata", Title = "更新模板包元数据", Destructive = false, Idempotent = true)]
-    [Description("更新用户模板包元数据（包说明 description、基础包名 basePackage 与包级类型映射 typeMap）：只传需要修改的字段，未传字段保持不变；basePackage 传空串表示清空；typeMap 传空对象 {} 表示清空映射表，非空对象整体覆盖（键为数据库原始类型、值为目标语言类型，生成时优先于全局映射表命中）。内置包只读拒绝。")]
+    [Description("用途：更新用户模板包元数据（包说明、基础包名与包级类型映射），只改清单字段不动模板文件。\n"
+        + "何时用：修正包说明/基础包名/类型映射；只传需要修改的字段，未传字段保持不变。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；description(string,可选,默认 null=不改动，空串=清空)；"
+        + "basePackage(string,可选,默认 null=不改动，空串=清空)；typeMap(object<string,string>,可选,默认 null=不改动，空对象 {}=清空，非空对象整体覆盖)。\n"
+        + "返回：package、action=metadata-updated、description、basePackage、fileCount。\n"
+        + "常见错误：TemplatePackageError（内置包只读；包不存在）；InvalidArgument（三个字段均未传）；InternalError。")]
     public async Task<object> UpdateTemplatePackageMetadataAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("新包说明（可选，默认 null=不改动；传空串清空）。")]
         string? description = null,
+        [Description("新基础包名（可选，默认 null=不改动；传空串清空）。")]
         string? basePackage = null,
+        [Description("新包级类型映射（可选，默认 null=不改动；传空对象 {} 清空映射表，非空对象整体覆盖；键为数据库原始类型、值为目标语言类型）。")]
         Dictionary<string, string>? typeMap = null,
         CancellationToken cancellationToken = default)
     {
@@ -200,10 +234,18 @@ public sealed class TemplatePackageManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>复制成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "copy_template_package", Title = "复制模板包", Destructive = true)]
-    [Description("复制模板包为新用户包：内置包可一键复制为可写用户包后自定义修改。新包名与内置包同名拒绝；与用户包同名需 overwrite=true 覆盖确认。")]
+    [Description("用途：复制模板包为新用户包（内置包可一键复制为可写用户包后自定义修改）。\n"
+        + "何时用：定制内置包；基于既有用户包派生新包。\n"
+        + "参数：sourcePackage(string,必填)=源包名（内置包或用户包均可）；newName(string,必填)=新用户包名（须符合目录名规则）；"
+        + "overwrite(boolean,可选,默认 false)=是否允许覆盖同名用户包。\n"
+        + "返回：package（源包名）、action=copied、newName（新包名）、description、basePackage、fileCount。\n"
+        + "常见错误：TemplatePackageError（新包名与内置包同名；与用户包同名且 overwrite=false；源包不存在）；InvalidArgument（包名非法）；InternalError。")]
     public async Task<object> CopyTemplatePackageAsync(
+        [Description("源模板包包名（必填）：内置包或用户包均可。")]
         string sourcePackage,
+        [Description("新用户包包名（必填）：字母/数字/中划线/下划线，须符合目录名规则。")]
         string newName,
+        [Description("是否允许覆盖同名用户包（可选，默认 false）。")]
         bool overwrite = false,
         CancellationToken cancellationToken = default)
     {

@@ -111,4 +111,10 @@ public sealed class TemplatePackageInfo
     /// 命名策略声明（可为空，请求 variables 同名键优先）。
     /// </summary>
     public NamingPolicyOptions? Naming { get; set; }
+
+    /// <summary>
+    /// 命名预设集合（preset 名 → 归一化定义，大小写不敏感键）：供 preview_generation/generate 的
+    /// preset 参数解析模板集合与默认变量；未声明时为空字典，调用行为与未引入预设前一致。
+    /// </summary>
+    public Dictionary<string, TemplatePresetDefinition> Presets { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

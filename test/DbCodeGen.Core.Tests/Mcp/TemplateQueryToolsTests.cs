@@ -1,9 +1,9 @@
 using DbCodeGen.Core.Config;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
-using DbCodeGen.McpServer;
 using DbCodeGen.McpServer.Tools;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
 
 namespace DbCodeGen.Core.Tests.Mcp;
 
@@ -78,17 +78,16 @@ public sealed class TemplateQueryToolsTests : IDisposable
 
         foreach (string rejectedPath in rejectedPaths)
         {
-            object result = await tools.ReadTemplateAsync("simple", rejectedPath, CancellationToken.None);
-            ToolErrorResult error = Assert.IsType<ToolErrorResult>(result);
-            Assert.True(error.IsError);
-            Assert.Equal("TemplatePackageError", error.ErrorType);
+            McpException error = await Assert.ThrowsAsync<McpException>(
+                () => tools.ReadTemplateAsync("simple", rejectedPath, CancellationToken.None));
+            Assert.StartsWith("[TemplatePackageError]", error.Message);
             Assert.Contains("模板文件不存在", error.Message);
         }
 
         TemplateQueryTools emptyReadmeTools = await CreateToolsAsync(withRootReadme: false);
-        object missingResult = await emptyReadmeTools.ReadTemplateAsync("simple", "README.md.scriban", CancellationToken.None);
-        ToolErrorResult missingError = Assert.IsType<ToolErrorResult>(missingResult);
-        Assert.Equal("TemplatePackageError", missingError.ErrorType);
+        McpException missingError = await Assert.ThrowsAsync<McpException>(
+            () => emptyReadmeTools.ReadTemplateAsync("simple", "README.md.scriban", CancellationToken.None));
+        Assert.StartsWith("[TemplatePackageError]", missingError.Message);
         Assert.Contains("模板文件不存在", missingError.Message);
     }
 

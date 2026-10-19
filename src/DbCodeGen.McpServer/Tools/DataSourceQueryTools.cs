@@ -37,7 +37,11 @@ public sealed class DataSourceQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>数据源连接摘要列表。</returns>
     [McpServerTool(Name = "list_datasources", Title = "列出数据源", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出全部已保存的数据源连接（名称、类型、主机、端口、库、用户、时间戳）；密码与密文永不回显。")]
+    [Description("用途：列出全部已保存的数据源连接摘要，为连库类工具提供 datasource 名称。\n"
+        + "何时用：list_tables/get_table_detail/check_type_mapping/按名 test_connection/add_datasource/update_datasource/delete_datasource 之前。\n"
+        + "参数：无。\n"
+        + "返回：datasources[]——name（唯一连接名）、type（MySql/PostgreSql）、host、port、database、userId、createdAt、updatedAt。密码明文与 DPAPI 密文结构性不回显。\n"
+        + "常见错误：InternalError（配置读取异常，罕见）。")]
     public Task<ListDataSourcesResult> ListDataSourcesAsync(CancellationToken cancellationToken)
     {
         try

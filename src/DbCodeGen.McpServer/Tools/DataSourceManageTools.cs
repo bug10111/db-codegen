@@ -43,15 +43,26 @@ public sealed class DataSourceManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带连接摘要；失败携带结构化错误（InvalidArgument / NameConflict / SaveFailed）。</returns>
     [McpServerTool(Name = "add_datasource", Title = "新增数据源", Destructive = false)]
-    [Description("新增数据源连接并保存（名称需唯一）。密码经 DPAPI 加密入库且不回显；先用 test_connection 直测参数可用，再以此工具保存。")]
+    [Description("用途：新增数据源连接并保存（密码经 DPAPI 加密入库，任何应答与日志不回显）。\n"
+        + "何时用：先用 test_connection 明文直测参数可用，再调用本工具落库保存。\n"
+        + "参数：name(string,必填)=连接名称，唯一（忽略大小写）；type(string,必填)=mysql/postgresql（亦接受 postgres）；host(string,必填)；"
+        + "port(integer,必填)=1-65535；database(string,必填)；userId(string,必填)；password(string,可选,默认 null)=密码明文，仅瞬态加密入库，缺省表示空密码。\n"
+        + "返回：operation=add、datasource（连接摘要：name/type/host/port/database/userId/createdAt/updatedAt，不含密码）。\n"
+        + "常见错误：InvalidArgument（字段校验失败：空名、非法类型、端口越界等）；NameConflict（连接名已存在）；SaveFailed（落盘失败）。")]
     public Task<object> AddDataSourceAsync(
+        [Description("连接名称（必填）：在连接列表内唯一（忽略大小写）。")]
         string name,
         [Description("数据库类型：mysql / postgresql。")]
         string type,
+        [Description("主机名或 IP 地址（必填）。")]
         string host,
+        [Description("端口号（必填）：取值 1-65535。")]
         int port,
+        [Description("数据库名（必填）。")]
         string database,
+        [Description("用户名（必填）。")]
         string userId,
+        [Description("密码明文（可选，默认 null）：仅瞬态用于 DPAPI 加密入库，不回显；缺省表示空密码。")]
         string? password = null,
         CancellationToken cancellationToken = default)
     {
@@ -91,16 +102,27 @@ public sealed class DataSourceManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带更新后的连接摘要；失败携带结构化错误（InvalidArgument / NameConflict / OriginalMissing / SaveFailed）。</returns>
     [McpServerTool(Name = "update_datasource", Title = "更新数据源", Destructive = false, Idempotent = true)]
-    [Description("按 originalName 定位并更新已保存连接：只传需要修改的字段，未传字段保持原值；password 留空表示保持已保存密码。")]
+    [Description("用途：按 originalName 定位并更新已保存连接；只传需要修改的字段，未传字段保持原值。\n"
+        + "何时用：连接参数变更、改名、重置密码；password 留空表示保持已保存密码（原密文不动）。\n"
+        + "参数：originalName(string,必填)=被更新连接原始名称（区分大小写精确匹配）；name/type/host/port/database/userId/password 均可选（默认 null=保持原值）。\n"
+        + "返回：operation=update、datasource（更新后连接摘要，不含密码）。\n"
+        + "常见错误：InvalidArgument（字段校验失败）；NameConflict（新名称与其他连接冲突）；OriginalMissing（originalName 不存在，消息附可用连接名清单）；SaveFailed。")]
     public Task<object> UpdateDataSourceAsync(
+        [Description("被更新连接的原始名称（必填，区分大小写精确匹配）。")]
         string originalName,
+        [Description("新连接名称（可选，默认 null=保持原名）。")]
         string? name = null,
         [Description("数据库类型（mysql / postgresql）；缺省保持原值。")]
         string? type = null,
+        [Description("主机名或 IP（可选，默认 null=保持原值）。")]
         string? host = null,
+        [Description("端口（可选，默认 null=保持原值；1-65535）。")]
         int? port = null,
+        [Description("数据库名（可选，默认 null=保持原值）。")]
         string? database = null,
+        [Description("用户名（可选，默认 null=保持原值）。")]
         string? userId = null,
+        [Description("新密码明文（可选，默认 null 或空白=保持已保存密码，原密文不动）。")]
         string? password = null,
         CancellationToken cancellationToken = default)
     {
@@ -149,8 +171,15 @@ public sealed class DataSourceManageTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>成功携带被删除连接的摘要；失败携带结构化错误（NotFound / SaveFailed）。</returns>
     [McpServerTool(Name = "delete_datasource", Title = "删除数据源", Destructive = true)]
-    [Description("按名称删除已保存的数据源连接（区分大小写精确匹配，不存在时返回 NotFound）。")]
-    public Task<object> DeleteDataSourceAsync(string name, CancellationToken cancellationToken = default)
+    [Description("用途：按名称删除已保存的数据源连接并落盘（不可恢复）。\n"
+        + "何时用：连接不再需要时；删除前可用 list_datasources 核对名称。\n"
+        + "参数：name(string,必填)=待删除连接名称（区分大小写精确匹配）。\n"
+        + "返回：operation=delete、datasource（被删除连接的摘要，不含密码）。\n"
+        + "常见错误：NotFound（连接不存在）；SaveFailed（落盘失败）。")]
+    public Task<object> DeleteDataSourceAsync(
+        [Description("待删除连接的名称（必填，区分大小写精确匹配）。")]
+        string name,
+        CancellationToken cancellationToken = default)
     {
         try
         {

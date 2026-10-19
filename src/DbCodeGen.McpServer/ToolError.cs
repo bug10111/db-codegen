@@ -1,3 +1,4 @@
+using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Templates.Packages;
 using ModelContextProtocol;
 
@@ -62,6 +63,8 @@ public static McpException AsMcpException(Exception exception, CancellationToken
     ArgumentException => new McpException($"[InvalidArgument] {exception.Message}"),
     // 模板包域错误：包不存在、清单校验失败、路径越界等
     TemplatePackageException => new McpException($"[TemplatePackageError] {exception.Message}"),
+    // 批量生成域错误：渲染失败（含模板名行列）与输出路径越界归模板包域，保持既有错误分类语义
+    GenerationException => new McpException($"[TemplatePackageError] {exception.Message}"),
     // 调用方未取消却收到取消异常：来源为内部链路超时兜底，归类超时并给出可诊断文案
     OperationCanceledException when requestToken is null || !requestToken.Value.IsCancellationRequested =>
         new McpException("[Timeout] 操作超时，请重试或缩小请求范围。"),

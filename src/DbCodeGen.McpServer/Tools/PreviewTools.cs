@@ -62,15 +62,29 @@ public sealed class PreviewTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>渲染结果全文（PreviewResult 全量字段）。</returns>
     [McpServerTool(Name = "render_template", Title = "渲染模板", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("以合成表上下文渲染单个模板（无需数据库连接）：返回渲染后全文；模板语法错误时返回 errorMessage 与 errorLine/errorColumn 行列定位。table 可省略（手写域/无表场景）：不传 table 时传 modules 按 module 作用域渲染片段、未传 modules 按 project 上下文（vars + 空 tables 汇总）渲染——generate/preview_generation 仅在所选模板含 table 作用域条目时要求 tables 非空（纯 module/project 作用域集合可省略），本工具 table 始终可省略。支持可选 variables（注入 vars.*）与 modules（module 作用域片段渲染，返回文本不落盘）。")]
+    [Description("用途：以合成表上下文渲染单个模板（无需数据库连接），返回渲染后全文或结构化语法错误（含行列定位）；传入 modules 可做 module/project 作用域片段渲染。\n"
+        + "何时用：模板维护后的回归验证；生成前确认单模板输出；手写域/无表场景验证片段模板。\n"
+        + "参数：package(string,必填)=模板包包名；path(string,必填)=模板相对包根路径（取 list_templates 的 path）；"
+        + "table(object,可选,默认 null)=合成表上下文（name 必填、columns[] 可选；传入时按表上下文渲染，与 modules 互斥）；"
+        + "column(object,可选,默认 null)=当前列上下文（列级模板用；依赖 table）；basePackageOverride(string,可选,默认 null)=基础包名覆盖值；"
+        + "variables(object,可选,默认 null)=注入 vars.*；modules(array<object>,可选,默认 null)=模块清单（单次仅一个元素，name 必填），未传 table 时按 module 作用域片段渲染；两者都省略时按 project 上下文（vars + 空 tables）渲染。\n"
+        + "返回：success（是否成功）、output（渲染全文，仅成功时）、errorMessage（含模板名与行列）、errorLine/errorColumn（错误行列，从 1 开始，未知时省略）、"
+        + "renderDurationMs（耗时毫秒）、iterationWarnings[]（空迭代零迭代信号，无告警时省略）。渲染返回文本不落盘。\n"
+        + "常见错误：TemplatePackageError（包不存在；path 未在清单声明）；InvalidArgument（package/path 为空；合成表/列名为空；variables 键与保留命名空间冲突；modules 缺 name/重复/多元素；table 与 modules 同传；省略 table 时传 column）；InternalError。")]
     public async Task<object> RenderTemplateAsync(
+        [Description("模板包包名（必填）。")]
         string package,
+        [Description("模板文件相对包根路径（必填）：与 list_templates 返回的 path 一致。")]
         string path,
+        [Description("合成表上下文（可选，默认 null）：原始表名必填，列集合可选；省略时按作用域片段渲染（与 modules 互斥）。")]
         SyntheticTableInput? table = null,
+        [Description("当前列上下文（可选，默认 null）：供模板内 column 变量消费（列级模板用）；仅在传入 table 时可用。")]
         SyntheticColumnInput? column = null,
+        [Description("本次渲染的基础包名覆盖值（可选，默认 null）；为空时使用模板包 manifest 基础包名。")]
         string? basePackageOverride = null,
         [Description("调用方变量对象，逐键注入渲染上下文 vars.*；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。")]
         IReadOnlyDictionary<string, JsonElement>? variables = null,
+        [Description("模块清单（可选，默认 null；如 [{\"name\":\"account\"}]）：片段渲染单次仅支持一个模块上下文，取首元素（name 必填，其余字段原样注入 module.*）；与 table 互斥。")]
         IReadOnlyList<Dictionary<string, object?>>? modules = null,
         CancellationToken cancellationToken = default)
     {
@@ -188,6 +202,7 @@ public sealed class PreviewTools
     /// <param name="tables">合成表集合；所选模板含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构即可，无需连接数据库。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。</param>
+    /// <param name="preset">命名预设（manifest.presets）：与 files 互斥；服务端解析为模板清单并注入预设默认变量。</param>
     /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite / skip（缺省 skip，含手写代码目录默认不覆盖）；影响 overwrite/skip 分类。</param>
     /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；值支持任意 JSON 类型（字符串/数组/布尔/对象），集合消费键必须传真实数组；键与保留命名空间冲突时结构化拒绝。命名契约键（tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule）在此透传，优先级高于 manifest.naming。</param>
     /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
@@ -195,22 +210,44 @@ public sealed class PreviewTools
     /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false：命中模板包 platformTables 规则的表排除并列出；true 时参与生成但回执仍标注命中）。排除表规则不受本开关影响。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>文件计划条目、分类计数、未映射类型清单、预检告警清单、命名报告、覆盖告警与平台表排除清单。</returns>
-    [McpServerTool(Name = "preview_generation", Title = "预览生成", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("批量生成 dry-run 预览（零写盘）：返回文件计划（table/module/project 三作用域混跑，new/overwrite/skip 分类与目标路径）、未映射类型清单、预检告警清单（pathWarnings：EmptyPackageDir 包段为空 / ConsecutiveSeparators 连续分隔符 / EmptyIteration 模板空迭代零迭代信号 / InvalidJavaPackageSegment 非法 Java 包段 / DuplicatePackageSegment 连续重复包段 / NonLowercasePackageSegment 非小写包段 / TableNameRoundTripMismatch 物理表名反推 / PermissionKeyMismatch 权限键派生不一致 / WorkspaceRootMayBeAggregate 工作区根疑似聚合根）、namingReport（逐表 rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey）、coverageWarnings（NoBackendView/NoWebPage/OnlyBackendGenerated）与 platformTableExcluded（被平台表/排除表规则命中的表）。平台表禁止生成 CRUD：命中 platformTables 规则的表默认排除，确需生成须显式传 includePlatformTables=true（回执仍标注命中）；排除表规则一律生效。duplicateStrategy 缺省 skip（对含手写代码的输出目录默认不覆盖），显式传 overwrite 才覆盖。view 层 = 后端 Java View（只做数据处理，不含前端页面）；web 前端直连授权中心；业务后端零平台端点。tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略。files 为模板过滤清单：传则仅预览清单内模板，省略时选包内全部启用条目。")]
+    [McpServerTool(Name = "preview_generation", Title = "预览生成", ReadOnly = true, Idempotent = true, Destructive = false,
+        UseStructuredContent = true, OutputSchemaType = typeof(PreviewGenerationResult))]
+    [Description("用途：批量生成 dry-run 预览（零写盘），返回文件计划与结构化诊断，是 generate 前的唯一把关点。\n"
+        + "何时用：generate 之前必须调用；调整 preset/files/variables/modules 后重跑核对，确认 entries 与各项告警后再写盘。\n"
+        + "参数：package(string,必填)=模板包包名；workspaceRoot(string,必填)=输出根前缀绝对路径，最终路径必须落在其内；"
+        + "codeDirectory(string,必填)=项目内完整相对路径含包名（如 src/main/java/com/example/demo），派生相对输出根与基础包名；"
+        + "tables(array<object>,条件必填)=所选模板含 table 作用域条目时至少一张（元素 name 必填、columns[] 可选，可原样透传 get_table_detail 的列），纯 module/project 模板集合可省略；"
+        + "basePackageOverride(string,可选,默认 null)=基础包名覆盖值；files(array<string>,可选,默认 null)=模板过滤清单，省略时取包内全部启用条目；"
+        + "preset(string,可选,默认 null)=命名预设（见 list_template_packages/list_templates 的 presets），与 files 互斥，预设默认变量与调用方 variables 逐键合并（调用方优先）；"
+        + "duplicateStrategy(string,可选,默认 skip)=overwrite/skip；variables(object,可选,默认 null)=注入 vars.*，命名契约键透传；"
+        + "modules(array<object>,可选,默认 null)=module 作用域模板逐个渲染，元素 name 必填；webDirectory(string,可选,默认 web)=root=web 基准，相对且不含 ..；"
+        + "includePlatformTables(boolean,可选,默认 false)=true 时平台表参与生成但回执仍标注命中。\n"
+        + "返回：entries[]（table 来源上下文/relativePath 渲染后相对路径/absolutePath 目标绝对路径/action=new|overwrite|skip）、newCount/overwriteCount/skipCount；"
+        + "unmappedTypes[]（dbType/table/column/occurrences）；pathWarnings[]（kind/template/samplePath/occurrences/message，坏路径与命名类告警必须先修正再生成）；"
+        + "namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey，逐表核对命名契约）；"
+        + "coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）；platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）。\n"
+        + "常见错误（经协议 isError=true 返回，消息带 [错误分类] 前缀）：InvalidArgument（preset 未知或与 files 同传、tables 缺失、files 含包外路径、duplicateStrategy/webDirectory 非法、variables/modules 结构非法）；"
+        + "TemplatePackageError（包不存在、模板渲染失败含行列、输出路径越界）；InternalError。")]
     public async Task<object> PreviewGenerationAsync(
+        [Description("模板包包名（必填）：先用 list_template_packages 选包。")]
         string package,
+        [Description("工作区根目录绝对路径（必填）：输出文件的根前缀，最终路径必须落在其内。")]
         string workspaceRoot,
         [Description("代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）：按源根标记（java/kotlin/groovy/scala/src）拆分为相对输出根与基础包名，纯包名形态输出根固定 src/main/java；包间输出路径配方差异以包清单 files[].output 形态为准（经 list_templates 查看）。")]
         string codeDirectory,
-        [Description("合成表集合；所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
+        [Description("合成表集合；所选模板（files/preset 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
         IReadOnlyList<SyntheticTableInput>? tables = null,
+        [Description("基础包名覆盖值（可选，默认 null）：为空时使用代码目录派生值。")]
         string? basePackageOverride = null,
-        [Description("模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。")]
+        [Description("模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目；与 preset 互斥。")]
         IReadOnlyList<string>? files = null,
+        [Description("命名预设（可选，默认 null）：由模板包 manifest.presets 声明（如 simple-java-sso 的 remote/embedded），服务端解析为模板清单并注入预设默认变量；与 files 互斥（同时传 → InvalidArgument）；不传 preset/files 时保持原行为（全部启用条目）。可用预设见 list_template_packages/list_templates 的 presets 字段。")]
+        string? preset = null,
         [Description("同名目标文件处理策略：skip（缺省，同名一律跳过，含手写代码目录默认不覆盖）/ overwrite（显式覆盖内容不同的同名文件）。")]
         DuplicateFileStrategy duplicateStrategy = DuplicateFileStrategy.Skip,
-        [Description("调用方变量对象，逐键注入渲染上下文 vars.*（如 {\"appName\":\"demo\"}）；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。命名契约键 tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule 在此透传，优先级高于 manifest.naming。")]
+        [Description("调用方变量对象，逐键注入渲染上下文 vars.*（如 {\"appName\":\"demo\"}）；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。命名契约键 tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule 在此透传，优先级高于 manifest.naming；与 preset 默认变量同名键由本参数覆盖。")]
         IReadOnlyDictionary<string, JsonElement>? variables = null,
+        [Description("模块清单（可选，如 [{\"name\":\"account\"}]）：包内 scope=module 模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；所选模板含 module 作用域条目但省略本参数时结构化报错。")]
         IReadOnlyList<Dictionary<string, object?>>? modules = null,
         [Description("web 目录（相对 workspaceRoot，缺省 web）：root=web 的模板输出以此为基准；必须为相对路径且不含 .. 段。")]
         string? webDirectory = null,
@@ -223,7 +260,7 @@ public sealed class PreviewTools
             GenerationRequest request = await GenerationRequestFactory.CreateAsync(
                 _packageService, package, tables, files, workspaceRoot, codeDirectory,
                 basePackageOverride, duplicateStrategy.ToString().ToLowerInvariant(), persistLastUsedPaths: false,
-                variables, modules, cancellationToken, webDirectory, includePlatformTables);
+                variables, modules, cancellationToken, webDirectory, includePlatformTables, preset);
 
             // dry-run 只计算文件计划，不产生任何写盘动作
             GenerationPreview preview = await _codeGenerator.BuildPreviewAsync(request, progress: null, cancellationToken);
@@ -265,16 +302,11 @@ public sealed class PreviewTools
                 coverageWarnings,
                 platformTableExcluded);
         }
-        catch (GenerationException exception)
-        {
-            // 渲染失败与输出路径越界属生成域结构化业务错误（携带模板名行列或被拒路径），映射模板包域错误便于调用方定位模板问题
-            _logger.LogError(exception, "preview_generation 生成域失败，包名 {PackageName}。", package);
-            return new ToolErrorResult(ToolErrorResult.ErrorMarker, "TemplatePackageError", exception.Message);
-        }
         catch (Exception exception)
         {
+            // 声明 outputSchema 的工具错误必须走协议 isError 通道，避免错误负载混入结构化成功应答
             _logger.LogError(exception, "preview_generation 执行失败，包名 {PackageName}。", package);
-            return ToolError.From(exception, cancellationToken);
+            throw ToolError.AsMcpException(exception, cancellationToken);
         }
     }
 

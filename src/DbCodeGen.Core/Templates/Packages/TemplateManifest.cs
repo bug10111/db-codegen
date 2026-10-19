@@ -40,6 +40,13 @@ public sealed class TemplateManifest
     public List<TemplateFileEntry> Files { get; set; } = new();
 
     /// <summary>
+    /// 命名预设集合（preset 名 → 定义）：把常用模板组合与默认变量固化，供 preview_generation/generate
+    /// 以 preset 参数选择；与 files 参数互斥，未声明时不影响既有调用行为。
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, TemplatePresetDefinition>? Presets { get; set; }
+
+    /// <summary>
     /// 包角色：backend / scaffold / web / fullstack / utility；缺省按产物扩展名推断
     /// （有 .java 产物→backend；仅 .ts/.tsx→web；否则 utility）。
     /// </summary>

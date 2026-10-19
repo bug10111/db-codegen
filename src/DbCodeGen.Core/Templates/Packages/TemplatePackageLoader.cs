@@ -169,7 +169,8 @@ public static class TemplatePackageLoader
             PermissionModule = normalized.PermissionModule ?? string.Empty,
             PlatformTables = normalized.PlatformTables ?? new TableFilterRules(),
             ExcludeTables = normalized.ExcludeTables ?? new TableFilterRules(),
-            Naming = normalized.Naming
+            Naming = normalized.Naming,
+            Presets = normalized.Presets ?? new Dictionary<string, TemplatePresetDefinition>(StringComparer.OrdinalIgnoreCase)
         };
     }
 
@@ -419,6 +420,12 @@ public static class TemplatePackageLoader
             entry.Root = string.IsNullOrWhiteSpace(entry.Root) ? null : entry.Root.Trim();
             entry.Role = string.IsNullOrWhiteSpace(entry.Role) ? null : entry.Role.Trim();
         }
+
+        // 预设声明归一与校验：说明/选择口径/文件存在性与变量键在加载阶段一次性校验，
+        // 避免生成期才暴露 preset 配置错误；未声明时保持 null（回写清单不新增空 presets 字段）
+        Dictionary<string, TemplatePresetDefinition> normalizedPresets =
+            TemplatePresetResolver.Normalize(manifest.Presets, manifest.Files);
+        manifest.Presets = normalizedPresets.Count == 0 ? null : normalizedPresets;
 
         return manifest;
     }

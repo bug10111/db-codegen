@@ -56,8 +56,17 @@ public sealed class TypeMappingQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>全局与包级映射条目及未命中兜底类型。</returns>
     [McpServerTool(Name = "get_type_map", Title = "查看类型映射", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("查看生效的类型映射表：全局映射条目与可选包级 typeMap；未映射类型生成时回落 defaultType。")]
-    public async Task<GetTypeMapResult> GetTypeMapAsync(string? package = null, CancellationToken cancellationToken = default)
+    [Description("用途：查看生效的类型映射表（全局映射与可选包级 typeMap），了解数据库类型到目标语言类型的映射口径。\n"
+        + "何时用：生成前了解映射；排查「为什么这列映射成了 String」时配合 check_type_mapping。\n"
+        + "参数：package(string,可选,默认 null)=模板包包名；提供时一并返回该包清单声明的包级 typeMap。\n"
+        + "返回：global[]（dbType/targetType/import/remark/databaseType，databaseType 为空串表示通用条目）、package（包名，未指定为空串）、"
+        + "packageTypeMap[]（dbType/targetType，未指定包时为空集合）、defaultType（全部未命中的兜底目标类型，固定 String）。"
+        + "解析优先级：包 typeMap > 数据库专属 > 通用 > 兜底。\n"
+        + "常见错误：TemplatePackageError（指定包不存在）；InternalError。")]
+    public async Task<GetTypeMapResult> GetTypeMapAsync(
+        [Description("模板包包名（可选，默认 null）：提供时一并返回该包清单声明的 typeMap。")]
+        string? package = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -109,10 +118,18 @@ public sealed class TypeMappingQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>未映射类型清单与是否全部命中。</returns>
     [McpServerTool(Name = "check_type_mapping", Title = "预检类型映射", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("生成前预检：检查指定表集合在当前映射链（包 typeMap>全局>兜底）下的未映射数据库类型，避免生成出回落 String 的列。")]
+    [Description("用途：生成前预检未映射的数据库类型，避免生成出回落 String 的列。\n"
+        + "何时用：generate 之前必须调用，且与生成使用同一 datasource/tables/package（包 typeMap 口径一致）。\n"
+        + "参数：datasource(string,必填)=已保存连接名；tables(array<string>,必填非空)=待生成的表名清单（与 list_tables 的 name 一致）；package(string,必填)=目标模板包包名。\n"
+        + "返回：datasource、package、tableCount（参与预检表数）、allMapped（是否全部命中映射链，true 才建议直接生成）、"
+        + "unmapped[]（dbType 未映射类型/tableName 首次出现表/columnName 首次出现列/occurrences 跨表跨列总次数）。\n"
+        + "常见错误：InvalidArgument（数据源不存在；tables 为空）；TemplatePackageError（包不存在）；Timeout；InternalError。")]
     public async Task<object> CheckTypeMappingAsync(
+        [Description("已保存的数据源连接名称（必填）。")]
         string datasource,
+        [Description("待生成的表名清单（必填非空）：与 list_tables 返回的 name 一致。")]
         string[] tables,
+        [Description("目标模板包包名（必填）：预检与生成须使用同一包，保证 typeMap 口径一致。")]
         string package,
         CancellationToken cancellationToken)
     {

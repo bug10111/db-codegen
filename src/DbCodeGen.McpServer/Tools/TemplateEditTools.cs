@@ -37,10 +37,18 @@ public sealed class TemplateEditTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>保存成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "save_template_content", Title = "保存模板内容", Destructive = false, Idempotent = true)]
-    [Description("保存用户模板包内既有模板文件的正文（整篇覆写，Scriban 源文本，行尾保真：宿主文件非空时传入内容自动对齐宿主行尾形态，空宿主文件按传入形态落盘）。内置包只读拒绝；文件须已存在，新建文件用 create_template_file；局部改几行用 save_template_edit 免整篇重传。")]
+    [Description("用途：保存用户模板包内既有模板文件的正文（整篇覆写，Scriban 源文本）。\n"
+        + "何时用：整篇重写模板内容；只改几行请用 save_template_edit 免整篇重传；新建文件先用 create_template_file。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；path(string,必填)=模板相对包根路径（须已存在于清单）；"
+        + "content(string,必填)=模板正文全文（UTF-8 无 BOM 落盘；行尾保真：宿主文件非空时自动对齐宿主行尾形态）。\n"
+        + "返回：package、action=saved、path（正斜杠相对路径）、fileCount（操作后包内模板文件数）；newPath/contentHash 等字段省略。\n"
+        + "常见错误：TemplatePackageError（内置包只读；包不存在；同名冲突）；InvalidArgument（路径穿越等校验失败；文件不存在）；InternalError。")]
     public async Task<object> SaveTemplateContentAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("模板文件相对包根路径（必填）：须已存在于包清单，取 list_templates 返回的 path。")]
         string path,
+        [Description("模板正文全文（必填）：Scriban 源文本，UTF-8 无 BOM 落盘；行尾自动对齐宿主文件形态。")]
         string content,
         CancellationToken cancellationToken = default)
     {
@@ -80,15 +88,24 @@ public sealed class TemplateEditTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>编辑成功摘要（含新 contentHash / charCount / 替换点上下文快照）或结构化错误。</returns>
     [McpServerTool(Name = "save_template_edit", Title = "局部编辑模板", Destructive = false, Idempotent = true)]
-    [Description("小块替换原语：对模板文件正文做子串级单处精确替换，改几行免整篇覆盖重传。oldText 须恰好出现一次：0 次报未找到、多次报歧义保护（附命中次数），行尾形态差异不阻断匹配；newText 空串=删除，行尾落地遵循宿主文件形态；expectedContentHash 可选条件写（不匹配拒绝并回显当前 contentHash）。返回新 contentHash 供后续条件写复用。")]
+    [Description("用途：小块替换原语——对模板文件正文做子串级单处精确替换，改几行免整篇覆盖重传。\n"
+        + "何时用：只改模板局部；配合 read_template 的 contentHash 做并发安全的条件写。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；path(string,必填)=模板相对包根路径；"
+        + "oldText(string,必填非空)=待替换原文子串，须在正文中恰好出现一次（0 次报未找到、多次歧义保护并报命中次数；CRLF/LF 差异不阻断匹配）；"
+        + "newText(string,必填,允许空串=删除)=替换后子串，行尾落地遵循宿主文件；"
+        + "expectedContentHash(string,可选,默认 null)=条件写期望摘要（取自 read_template 的 contentHash），不匹配拒绝并回显当前摘要。\n"
+        + "返回：package、action=edited、path、fileCount、contentHash（编辑后新摘要，供后续条件写复用）、charCount、contextBefore/contextAfter（替换点前后上下文快照）。\n"
+        + "常见错误：TemplatePackageError（内置包只读；包不存在）；NotFound（oldText 未找到）；InvalidArgument（oldText 多次命中、路径校验失败）；ContentConflict（摘要不匹配）；InternalError。")]
     public async Task<object> SaveTemplateEditAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("模板文件相对包根路径（必填）。")]
         string path,
-        [Description("待替换原文子串（必填非空串）：须在正文中恰好出现一次，多命中将歧义保护拒绝。")]
+        [Description("待替换原文子串（必填非空串）：须在正文中恰好出现一次，多命中将歧义保护拒绝；CRLF/LF 行尾差异不阻断匹配。")]
         string oldText,
-        [Description("替换后子串：空串表示删除该子串；行尾形态自动对齐宿主文件。")]
+        [Description("替换后子串（必填，允许空串）：空串表示删除该子串；行尾形态自动对齐宿主文件。")]
         string newText,
-        [Description("条件写期望的当前内容摘要（SHA256 前 16 位 hex 小写，取自 read_template 回执 contentHash）；缺省不校验。")]
+        [Description("条件写期望的当前内容摘要（可选，默认 null；SHA256 前 16 位 hex 小写，取自 read_template 回执 contentHash）；缺省不校验。")]
         string? expectedContentHash = null,
         CancellationToken cancellationToken = default)
     {
@@ -130,10 +147,19 @@ public sealed class TemplateEditTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>新增成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "create_template_file", Title = "新建模板文件", Destructive = false)]
-    [Description("向用户模板包新增一个空模板文件（enabled=true，正文随后用 save_template_content 写入）。path 可含分组目录；outputPath 为输出相对路径模板，支持 {{变量}} 占位与管道表达式（渲染期合法化，字面量非法字符在生成侧产物路径校验拦截）；可选 scope 声明模板作用域（table 缺省 / module / project）——module/project 模板删除重建时必须显式携带 scope 恢复作用域声明，否则按缺省 table 生成。")]
+    [Description("用途：向用户模板包新增一个空模板文件（enabled=true，正文随后用 save_template_content 写入）。\n"
+        + "何时用：给用户包增加新模板；内置包只读需先用 copy_template_package 复制为可写用户包。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；path(string,必填)=新增模板相对路径，可含分组目录（如 controller/user.java.scriban）；"
+        + "outputPath(string,必填)=输出相对路径模板，支持 {{变量}} 占位与管道表达式（渲染期合法化，字面量非法字符在生成侧产物路径校验拦截）；"
+        + "scope(string,可选,默认 null=table)=模板作用域 table/module/project，非法取值结构化拒绝；module/project 模板删除重建时必须显式携带本参数恢复声明。\n"
+        + "返回：package、action=created、path、fileCount。\n"
+        + "常见错误：TemplatePackageError（内置包只读；同名文件已存在；包不存在）；InvalidArgument（outputPath 为空；scope 非法；路径穿越/绝对路径/盘符前缀校验失败）；InternalError。")]
     public async Task<object> CreateTemplateFileAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("新增模板文件相对包根路径（必填），可含分组目录（如 controller/user.java.scriban）。")]
         string path,
+        [Description("输出相对路径模板（必填）：支持 {{变量}} 占位与管道表达式（如 src/{{table.variableName}}/User.java）。")]
         string outputPath,
         [Description("模板作用域声明：table（缺省，按表集逐表渲染）/ module（按模块清单逐个渲染）/ project（整次生成渲染一次）；缺省或空白不写清单字段（按缺省 table），非法取值结构化拒绝。")]
         string? scope = null,
@@ -173,9 +199,15 @@ public sealed class TemplateEditTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>删除成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "delete_template_file", Title = "删除模板文件", Destructive = true)]
-    [Description("从用户模板包删除一个模板文件（物理删除并同步移除清单条目，不可恢复）。内置包只读拒绝；允许删除最后一个模板（包变空包）。")]
+    [Description("用途：从用户模板包删除一个模板文件（物理删除并同步移除清单条目，不可恢复）。\n"
+        + "何时用：确认模板不再需要时；调用前先 read_template 或确认包内容。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；path(string,必填)=待删除模板相对包根路径。\n"
+        + "返回：package、action=deleted、path、fileCount（允许删除最后一个模板，删除后包变空包）。\n"
+        + "常见错误：TemplatePackageError（内置包只读；包不存在）；InvalidArgument（路径校验失败；文件不存在）；InternalError。")]
     public async Task<object> DeleteTemplateFileAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("待删除模板文件相对包根路径（必填）。")]
         string path,
         CancellationToken cancellationToken = default)
     {
@@ -210,10 +242,18 @@ public sealed class TemplateEditTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>重命名成功摘要或结构化错误。</returns>
     [McpServerTool(Name = "rename_template_file", Title = "重命名模板文件", Destructive = false)]
-    [Description("重命名/移动用户模板包内的一个模板文件（物理改名并同步更新清单条目，勾选记忆不迁移）。内置包只读拒绝；newPath 可含新分组目录。")]
+    [Description("用途：重命名/移动用户模板包内的一个模板文件（物理改名并同步更新清单条目）。\n"
+        + "何时用：调整模板分组或文件名；newPath 可含新分组目录（移动分组）。\n"
+        + "参数：package(string,必填)=目标用户模板包包名；path(string,必填)=当前模板相对路径；newPath(string,必填)=新模板相对路径，可含新分组目录。\n"
+        + "返回：package、action=renamed、path（旧路径）、newPath（新路径，均正斜杠形态）、fileCount。\n"
+        + "常见错误：TemplatePackageError（内置包只读；newPath 与既有文件同名冲突；包不存在）；InvalidArgument（newPath 为空；路径校验失败；源文件不存在）；InternalError。"
+        + "注意：勾选记忆不迁移。")]
     public async Task<object> RenameTemplateFileAsync(
+        [Description("目标用户模板包包名（必填）。")]
         string package,
+        [Description("当前模板文件相对包根路径（必填）。")]
         string path,
+        [Description("新模板文件相对包根路径（必填），可含新分组目录；须防目录穿越安全。")]
         string newPath,
         CancellationToken cancellationToken = default)
     {

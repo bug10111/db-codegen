@@ -46,14 +46,22 @@ public sealed class TemplateQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板包摘要列表（结构化内容，输出结构由 ListTemplatePackagesResult 声明）。</returns>
     [McpServerTool(Name = "list_template_packages", Title = "列出模板包", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出全部模板包（内置包与用户包），含名称、说明、内置只读标记、文件数、修改时间与能力元数据：role（backend/scaffold/web/fullstack/utility）、stack（java/net/web/mixed）、scopes（table/module/project）、hasBackendView（是否含后端 View 层）、hasWebPage（是否含前端页面）、contractPath（传参契约文档，缺省 README.md.scriban）、deployModes（如 standalone/cloud）。包根契约缺失时回执 warnings 含 MissingContract（非阻断，提示包作者补契约）。")]
+    [Description("用途：列出全部模板包（内置包与用户包）及其能力元数据与命名预设，是选包第一步。\n"
+        + "何时用：生成或模板维护前选包；需要确认包是否含后端 View/前端页面、支持哪些作用域与部署形态、有哪些 preset 时。\n"
+        + "参数：无。\n"
+        + "返回：packages[]——name（包名，=目录名）、description（说明）、engine（固定 scriban）、basePackage（基础包名，未配置为空串）、"
+        + "isBuiltin（内置只读）、fileCount（清单模板文件数）、modifiedTime（目录最近修改时间）、role（backend/scaffold/web/fullstack/utility）、"
+        + "stack（java/net/web/mixed）、scopes（table/module/project）、hasBackendView（含后端 View 层）、hasWebPage（含前端页面）、"
+        + "contractPath（传参契约文档，缺省 README.md.scriban）、deployModes（如 standalone/cloud）、hasContract（契约文档实际存在）、"
+        + "warnings（非阻断告警，如 MissingContract）、presets[]（name/description/fileCount，可直接用于 preview_generation/generate 的 preset 参数）。\n"
+        + "常见错误：InternalError（包枚举底层异常，罕见）。")]
     public async Task<ListTemplatePackagesResult> ListTemplatePackagesAsync(CancellationToken cancellationToken)
     {
         try
         {
             IReadOnlyList<TemplatePackageInfo> packages = await _packageService.ListPackagesAsync(cancellationToken);
 
-            // 投影为摘要 DTO：不透出 RootPath/ManifestPath 等本地磁盘细节，能力元数据供调用方判断包用途
+            // 投影为摘要 DTO：不透出 RootPath/ManifestPath 等本地磁盘细节，能力元数据与预设供调用方判断包用途
             List<TemplatePackageSummary> items = new();
             foreach (TemplatePackageInfo package in packages)
             {
@@ -80,7 +88,8 @@ public sealed class TemplateQueryTools
                     package.ContractPath,
                     package.DeployModes,
                     hasContract,
-                    warnings));
+                    warnings,
+                    TemplatePresetResolver.GetSummaries(package)));
             }
 
             _logger.LogInformation("list_template_packages 完成，包数量 {PackageCount}。", items.Count);
@@ -105,10 +114,21 @@ public sealed class TemplateQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板条目列表（含过滤后总数；结构化内容，输出结构由 ListTemplatesResult 声明）。</returns>
     [McpServerTool(Name = "list_templates", Title = "列出模板文件", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出指定模板包内的模板条目（相对路径、输出路径模板、启用标记、语言、作用域 scope：table/module/project），可按分组前缀与语言段过滤。包根存在且未在 template.json files[] 声明 README.md.scriban 时附带文档型条目（enabled=false、output 空串、scope=project；不在清单中、不计入 fileCount、不参与生成）。")]
+    [Description("用途：列出指定模板包内的模板条目与命名预设，确定生成时的 files 候选或维护目标。\n"
+        + "何时用：生成前核对模板路径/作用域/输出路径；模板维护前定位文件；确认包提供哪些 preset。\n"
+        + "参数：package(string,必填)=模板包包名；group(string,可选,默认 null)=分组前缀过滤（相对路径子目录前缀，目录边界对齐，大小写不敏感）；"
+        + "type(string,可选,默认 null)=语言段过滤，取值 java/csharp(cs)/xml/sql/json/plain，非法取值拒绝并列出合法值。\n"
+        + "返回：package（包名）、isBuiltin（是否内置）、basePackage（基础包名，未配置为空串）、templates[]（path 相对路径/output 输出路径模板/enabled 是否默认参与生成/"
+        + "language/scope=table|module|project/root=legacy|output|workspace|web/role 产出角色/isContract 是否契约文档条目）、"
+        + "warnings[]（MissingContract 等非阻断告警）、presets[]（name/description/fileCount）。\n"
+        + "文档型条目：包根存在 contractPath 且未在清单声明时附带一条（enabled=false、output 空串、scope=project、isContract=true），不计入 fileCount、不参与生成。\n"
+        + "常见错误：TemplatePackageError（包不存在）；InvalidArgument（type 取值非法）。")]
     public async Task<ListTemplatesResult> ListTemplatesAsync(
+        [Description("模板包包名（必填）。")]
         string package,
+        [Description("分组前缀过滤（可选，默认 null）：匹配模板相对路径的子目录前缀，目录边界对齐（controller 不会误命中 controllerx/），多级用正斜杠分隔，大小写不敏感。")]
         string? group = null,
+        [Description("语言段过滤（可选，默认 null）：取值 java / csharp（或 cs）/ xml / sql / json / plain，大小写不敏感；非法取值被拒绝并列出合法值。")]
         string? type = null,
         CancellationToken cancellationToken = default)
     {
@@ -186,7 +206,8 @@ public sealed class TemplateQueryTools
                 packageInfo.IsBuiltin,
                 packageInfo.BasePackage ?? string.Empty,
                 entries,
-                warnings);
+                warnings,
+                TemplatePresetResolver.GetSummaries(packageInfo));
         }
         catch (Exception exception)
         {
@@ -205,9 +226,22 @@ public sealed class TemplateQueryTools
     /// <param name="path">模板文件相对包根路径（与 list_templates 返回的 path 一致，可含分组目录）。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>模板正文全文、条目元数据与内容摘要。</returns>
-    [McpServerTool(Name = "read_template", Title = "读取模板", ReadOnly = true, Idempotent = true, Destructive = false)]
-    [Description("读取指定模板文件的正文全文（Scriban 源文本）与正文内容摘要 contentHash（SHA256 前 16 位 hex 小写，供 save_template_edit 条件写作期望值）；path 取 list_templates 返回的相对路径。包契约文档（manifest.contractPath，缺省 README.md.scriban）即使未在 template.json files[] 声明也可读取（文档型条目：enabled=false、output 为空串、不参与生成）；其它未声明路径一律拒绝。契约缺失时 list_template_packages 回执 MissingContract 告警（非阻断）。")]
-    public async Task<object> ReadTemplateAsync(string package, string path, CancellationToken cancellationToken)
+    [McpServerTool(Name = "read_template", Title = "读取模板", ReadOnly = true, Idempotent = true, Destructive = false,
+        UseStructuredContent = true, OutputSchemaType = typeof(ReadTemplateResult))]
+    [Description("用途：读取指定模板文件的正文全文（Scriban 源文本）与内容摘要，并透出包命名预设。\n"
+        + "何时用：改模板前取当前内容与 contentHash；评估模板风格；读取包契约文档（manifest.contractPath）确认传参键与 preset 用法。\n"
+        + "参数：package(string,必填)=模板包包名；path(string,必填)=模板相对包根路径（取 list_templates 的 path；反斜杠规范化为正斜杠，大小写不敏感）。\n"
+        + "返回：package（包名）、path（规范化相对路径）、output（输出路径模板）、enabled（是否默认参与生成）、language（目标语言）、"
+        + "content（正文全文，UTF-8 去 BOM 解码）、contentHash（SHA256 前 16 位 hex 小写，供 save_template_edit 条件写）、"
+        + "presets[]（name/description/fileCount）。\n"
+        + "契约窄例外：manifest.contractPath（缺省 README.md.scriban）即使未在清单声明也可读取（文档型条目：enabled=false、output 空串、不参与生成）；其它未声明路径一律拒绝。\n"
+        + "常见错误（经协议 isError=true 返回，消息带 [错误分类] 前缀）：TemplatePackageError（包不存在；path 未在清单声明且非契约路径；契约文件不存在）。")]
+    public async Task<object> ReadTemplateAsync(
+        [Description("模板包包名（必填）。")]
+        string package,
+        [Description("模板相对包根路径（必填）：取 list_templates 返回的 path，可含分组目录；反斜杠会规范化为正斜杠比对。")]
+        string path,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -245,12 +279,14 @@ public sealed class TemplateQueryTools
                 entry?.IsEnabled ?? false,
                 language.ToString(),
                 content,
-                TemplateContentHash.Compute(content));
+                TemplateContentHash.Compute(content),
+                TemplatePresetResolver.GetSummaries(packageInfo));
         }
         catch (Exception exception)
         {
+            // 声明 outputSchema 的工具错误必须走协议 isError 通道，避免错误负载混入结构化成功应答
             _logger.LogError(exception, "read_template 执行失败，包名 {PackageName}，路径 {TemplatePath}。", package, path);
-            return ToolError.From(exception, cancellationToken);
+            throw ToolError.AsMcpException(exception, cancellationToken);
         }
     }
 
@@ -401,6 +437,7 @@ public sealed class TemplateQueryTools
 /// <param name="DeployModes">支持的部署形态清单。</param>
 /// <param name="HasContract">契约文档是否实际存在。</param>
 /// <param name="Warnings">能力/契约告警（如 MissingContract），无告警时为空列表。</param>
+/// <param name="Presets">命名预设摘要（name/description/fileCount），包未声明 presets 时为空列表。</param>
 public sealed record TemplatePackageSummary(
     string Name,
     string Description,
@@ -417,7 +454,8 @@ public sealed record TemplatePackageSummary(
     string ContractPath,
     IReadOnlyList<string> DeployModes,
     bool HasContract,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<TemplatePresetSummary> Presets);
 
 /// <summary>
 /// list_template_packages 应答 DTO。
@@ -455,12 +493,14 @@ public sealed record TemplateEntry(
 /// <param name="BasePackage">基础包名，未配置时为空串。</param>
 /// <param name="Templates">过滤后命中的模板条目列表。</param>
 /// <param name="Warnings">契约缺失等非阻断告警，无告警时为空列表。</param>
+/// <param name="Presets">命名预设摘要（name/description/fileCount），包未声明 presets 时为空列表。</param>
 public sealed record ListTemplatesResult(
     string Package,
     bool IsBuiltin,
     string BasePackage,
     IReadOnlyList<TemplateEntry> Templates,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<TemplatePresetSummary> Presets);
 
 /// <summary>
 /// read_template 应答 DTO。
@@ -472,6 +512,7 @@ public sealed record ListTemplatesResult(
 /// <param name="Language">目标语言。</param>
 /// <param name="Content">模板正文全文。</param>
 /// <param name="ContentHash">正文内容摘要（SHA256 前 16 位 hex 小写），供 save_template_edit 条件写作期望值。</param>
+/// <param name="Presets">命名预设摘要（name/description/fileCount），包未声明 presets 时为空列表。</param>
 internal sealed record ReadTemplateResult(
     string Package,
     string Path,
@@ -479,4 +520,5 @@ internal sealed record ReadTemplateResult(
     bool Enabled,
     string Language,
     string Content,
-    string ContentHash);
+    string ContentHash,
+    IReadOnlyList<TemplatePresetSummary> Presets);

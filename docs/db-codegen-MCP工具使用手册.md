@@ -8,7 +8,8 @@
 
 DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 SDK ModelContextProtocol 2.2.0）是一个**本地 stdio MCP 服务端**：AI 客户端以子进程方式拉起它，即可用自然语言驱动全部代码生成能力——查表结构、管数据源、改模板、预览渲染、批量生成。
 
-- **服务端本身不做任何 LLM 调用**：智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面（共 19 个工具）。
+- **服务端本身不做任何 LLM 调用**：智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面（共 25 个工具）。
+- **协议可发现性**：`initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；9 个结构化输出工具（`list_template_packages` / `list_templates` / `read_template` / `preview_generation` / `generate` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `outputSchema`，失败统一走协议 `result.isError`。
 - **与桌面端共享数据**：与 WPF 桌面端共用同一份 `%AppData%\DbCodeGen\config.json` 与用户模板库（桌面端经 `config-location.json` 重定向数据目录时共用重定向后目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
 - **同机同用户**：数据源密码经 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。
 - **零记忆态副作用**：MCP 调用一切参数显式传递（表、模板选择、覆盖策略、路径），服务端不读取桌面端的勾选态/最近目录等 UI 记忆，生成后也不回写 config。
@@ -20,9 +21,9 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 
 | 分类 | 工具 | 一句话用途 | 读写性 |
 | --- | --- | --- | --- |
-| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含只读标记、文件数与能力元数据（role/stack/scopes/hasBackendView/hasWebPage/contractPath/deployModes，契约缺失回执 MissingContract 告警） | 只读 |
-| | `list_templates` | 列出指定包内模板条目，可按分组/语言过滤 | 只读 |
-| | `read_template` | 读取模板文件正文全文（Scriban 源文本） | 只读 |
+| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含只读标记、文件数、能力元数据与命名预设摘要 `presets[]`（name/description/fileCount，契约缺失回执 MissingContract 告警） | 只读 |
+| | `list_templates` | 列出指定包内模板条目与 `presets[]`，可按分组/语言过滤 | 只读 |
+| | `read_template` | 读取模板文件正文全文（Scriban 源文本）与 `presets[]` | 只读 |
 | | `list_datasources` | 列出已保存的数据源连接（密码永不回显） | 只读 |
 | | `list_tables` | 列出指定数据源下全部表（不含列） | 只读（连库） |
 | | `get_table_detail` | 读取指定表完整列元数据 | 只读（连库） |
@@ -39,8 +40,8 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 | | `update_template_package_metadata` | 更新包说明/基础包名/包级类型映射 | 写（模板） |
 | | `delete_template_package` | 删除用户模板包（confirm=true，不可恢复） | 写（模板） |
 | 预览（2） | `render_template` | 以合成表上下文渲染单个模板（无需连库） | 只读 |
-| | `preview_generation` | 批量生成 dry-run 预览（零写盘） | 只读 |
-| 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run） | **写（代码文件）** |
+| | `preview_generation` | 批量生成 dry-run 预览（零写盘），支持 `preset` 命名预设 | 只读 |
+| 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run），支持 `preset` 命名预设 | **写（代码文件）** |
 | 数据源管理（4） | `add_datasource` | 新增数据源连接（密码 DPAPI 加密入库） | 写（配置） |
 | | `update_datasource` | 按名更新连接（只传要改的字段） | 写（配置） |
 | | `delete_datasource` | 按名删除连接 | 写（配置） |
@@ -85,25 +86,57 @@ get_table_detail → check_type_mapping → list_templates → read_template
 5. `preview_generation`：dry-run 出文件计划——表 × 模板笛卡尔积、每条目标路径与 `new/overwrite/skip` 分类、未映射类型清单。**零写盘**，确认前零风险。
 6. `generate`：确认文件计划后落盘。`generate` 内部会强制重算 dry-run 再写盘，**无确认弹窗**，所以第 5 步 preview 是唯一的人工/智能体把关点。
 
-参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`workspaceRoot`/`codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表排除并在 `platformTableExcluded` 列出，排除表规则不受该开关影响）；`duplicateStrategy` 控制 `overwrite`（内容不同才覆盖）/`skip`（同名一律跳过），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
+参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files`/`preset` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略且不传 `preset` 时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`preset` 为模板包 manifest.presets 声明的命名预设（与 `files` 互斥），服务端解析模板清单并注入预设默认变量（调用方 `variables` 同名键优先）；`workspaceRoot`/`codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表排除并在 `platformTableExcluded` 列出，排除表规则不受该开关影响）；`duplicateStrategy` 控制 `overwrite`（内容不同才覆盖）/`skip`（同名一律跳过），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
+
+> 脚手架类包（如 `simple-java-sso`）建议直接用 preset：`preset="embedded"` 自动选中全部 155 条模板并注入 `platformUi=embedded`，`preset="remote"` 只选 59 条启用模板；详见 3.6 节。
 
 ### 3.4 流D：模板维护
 
 ```
-list_templates → read_template → 编辑（四选一）→ render_template 回归验证
+list_templates → read_template → 编辑（五选一）→ render_template 回归验证
 ```
 
-- 改既有模板：`read_template` 取当前正文 → `save_template_content` 整篇覆写（文件必须已存在）。
+- 改既有模板（整篇）：`read_template` 取当前正文 → `save_template_content` 整篇覆写（文件必须已存在）。
+- 改既有模板（局部）：`save_template_edit` 子串级单处精确替换（`oldText` 须唯一命中；可选 `expectedContentHash` 条件写，取 `read_template` 的 `contentHash`）。
 - 增新模板：`create_template_file`（建空文件 + 清单条目，`outputPath` 必填）→ `save_template_content` 写正文。
 - 删模板：`delete_template_file`（**物理删除，不可恢复**；允许删到包变空包）。
 - 重命名/移动分组：`rename_template_file`（`newPath` 可含新分组目录；桌面端的勾选记忆不迁移）。
 - 每次编辑后用 `render_template` 以同一合成表回归验证，再进流C。
 
-**注意**：桌面端不监听模板文件变更——MCP 侧修改模板后，桌面端需重新加载包（重开「模板包管理」窗口或重启应用）才能看到最新内容；反向同理，MCP 服务端每次工具调用即时读盘，无缓存陈旧问题。四个编辑工具对内置包一律拒绝（`TemplatePackageError`）。
+**注意**：桌面端不监听模板文件变更——MCP 侧修改模板后，桌面端需重新加载包（重开「模板包管理」窗口或重启应用）才能看到最新内容；反向同理，MCP 服务端每次工具调用即时读盘，无缓存陈旧问题。五个编辑工具对内置包一律拒绝（`TemplatePackageError`）。
 
 ### 3.5 流E：连接直测（排障）
 
 `test_connection` 明文直测不入库的模式，适用于：配置前的参数验证、怀疑已保存连接参数过期时的快速验证（不经 DPAPI 解密路径）、任何「不想留痕」的连通性探测。直测模式密码仅瞬态参与连接组装，不进入持久化、应答与日志。
+
+### 3.6 流F：命名预设（presets，脚手架常用）
+
+模板包可在 `template.json` 声明 `presets`，把「常用模板组合 + 默认变量」命名固化。调用方在 `preview_generation` / `generate` 传 `preset` 即可，无需手工列举大量 `files`。
+
+预设定义字段：
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `description` | string | 是 | 预设说明 |
+| `include` | string | 否 | `enabled`（缺省，全部启用条目）/ `all`（全部条目，含 `enabled=false`）；与 `files` 二选一 |
+| `files` | array of string | 否 | 显式模板相对路径清单（必须存在于 `manifest.files[]`，可含未启用条目）；与 `include` 二选一 |
+| `variables` | object | 否 | 预设默认变量，逐键注入 `vars.*`；调用方显式 `variables` 同名键优先 |
+
+调用规则：
+
+- `preset` 与 `files` 互斥，同时传 → `InvalidArgument`。
+- 未知 preset → `InvalidArgument`，错误消息列出可用 preset。
+- 不传 `preset`/`files` → 保持原行为（包内全部 `enabled` 条目）。
+- 可用 preset 经 `list_template_packages` / `list_templates` / `read_template` 的 `presets[]` 查看（`name` / `description` / `fileCount`）。
+
+示例（`simple-java-sso`）：
+
+| preset | 模板数 | 产物规模（2 模块场景） | 结果 |
+| --- | --- | --- | --- |
+| `remote` | 59 | 约 77 文件 | 第一形态：无平台管理页，平台能力由授权中心承载 |
+| `embedded` | 155 | 约 173 文件 | 第二形态：含七类平台管理页，自动注入 `platformUi=embedded` |
+
+兼容旧用法：`files` 仍可显式传模板清单（与 `preset` 二选一）。
 
 ## 4. 工具参考（逐工具）
 
@@ -171,6 +204,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `packages[].deployModes` | array of string | 支持的部署形态（如 `standalone` / `cloud`） |
 | `packages[].hasContract` | boolean | 契约文档是否实际存在 |
 | `packages[].warnings` | array of string | 能力/契约告警（如 `MissingContract：…`，非阻断） |
+| `packages[].presets` | array | 命名预设摘要；`presets[].name` / `presets[].description` / `presets[].fileCount`（该预设解析后的模板数） |
 
 **错误态**：`InternalError`（包枚举底层异常，罕见）。
 
@@ -207,6 +241,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `templates[].role` | string | 产出角色（manifest 声明优先，缺省按输出路径推断，如 `backendView` / `webPage`） |
 | `templates[].isContract` | boolean | 是否包契约文档条目 |
 | `warnings` | array of string | 契约缺失等非阻断告警（`MissingContract：…`） |
+| `presets` | array | 命名预设摘要（`name` / `description` / `fileCount`） |
 
 **包契约文档型条目**：当包根存在 `manifest.contractPath`（缺省 `README.md.scriban`）且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path` 为契约路径、`output` 为空串、`enabled=false`、`scope=project`、`isContract=true`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤按契约文件名的语言段判定。
 
@@ -238,6 +273,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `language` | string | 目标语言 |
 | `content` | string | 模板正文全文（UTF-8 去 BOM 解码） |
 | `contentHash` | string | 正文内容摘要（SHA256 前 16 位 hex 小写），供 `save_template_edit` 条件写期望值 |
+| `presets` | array | 命名预设摘要（`name` / `description` / `fileCount`） |
 
 **包契约文档窄例外**：`manifest.contractPath`（缺省包根 `README.md.scriban`）即使未在 `template.json files[]` 声明也可读取；返回文档型元数据（`output` 为空串、`enabled=false`），读取仍经防目录穿越校验。契约路径之外的子目录形态、父级跳转形态、绝对路径/盘符形态与其它未声明文件一律拒绝；契约缺失时回执 `MissingContract` 告警（非阻断）。
 
@@ -335,7 +371,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | --- | --- | --- |
 | `name` | string | 原始列名 |
 | `propertyName` | string | 驼峰属性名（服务端派生；作为合成列入参时不传，服务端会自行派生） |
-| `dbType` | string | 原始数据库类型（不含长度修饰）——映射为合成列的 `rawDbType` |
+| `rawDbType` | string | 原始数据库类型（不含长度修饰）——与生成入参同名，可原样透传 |
 | `comment` | string \| 省略 | 列注释 |
 | `isPrimaryKey` | boolean | 是否主键列（联合主键每列均为 true） |
 | `autoIncrement` | boolean | 是否自增列 |
@@ -527,6 +563,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `errorLine` | integer \| 省略 | 错误行号（从 1 开始），未知时省略 |
 | `errorColumn` | integer \| 省略 | 错误列号（从 1 开始），未知时省略 |
 | `renderDurationMs` | integer | 渲染耗时（毫秒） |
+| `iterationWarnings` | array of string \| 省略 | 空迭代零迭代信号告警（含守卫模式降噪指引）；无告警时省略 |
 
 **错误态**：`TemplatePackageError`（包不存在；`path` 未在清单声明）；`InvalidArgument`（`package`/`path` 为空；合成表名为空；合成列名为空；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`/重复/多元素；`table` 与 `modules` 同时提供；省略 `table` 时传 `column`）；`InternalError`。
 
@@ -569,7 +606,8 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `workspaceRoot` | string | 是 | — | 工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建） |
 | `codeDirectory` | string | 是 | — | 代码目录：项目内完整相对路径含包名（如 `src/main/java/com/example/demo`）；解析出基础包名与相对输出根，basePackage 末段即「模块」 |
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
-| `files` | array of string | 否 | null | 参与生成的模板相对路径清单；**省略时默认选择包内全部启用条目**；清单含包内不存在的路径会被拒绝 |
+| `files` | array of string | 否 | null | 参与生成的模板相对路径清单；**省略且不传 preset 时默认选择包内全部启用条目**；清单含包内不存在的路径会被拒绝；与 `preset` 互斥 |
+| `preset` | string | 否 | null | 命名预设（`manifest.presets`）：服务端解析为模板清单并注入预设默认 `variables`；与 `files` 互斥（同时传 → `InvalidArgument`）；不传 preset/files 保持原行为；可用预设见 `list_template_packages` / `list_templates` / `read_template` 的 `presets[]` |
 | `duplicateStrategy` | string | 否 | `"skip"` | 同名目标文件处理策略：`overwrite`（内容相同跳过/不同覆盖）/ `skip`（同名一律跳过）；大小写不敏感，空白或非法取值被拒绝。MCP 缺省 `skip`（桌面端 App 缺省仍为 `overwrite`） |
 | `variables` | object | 否 | null | 调用方变量对象，逐键注入模板 `vars.*`（如 `{"appName":"demo"}`）；键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝；命名契约键 `tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule` 在此透传，优先级高于 `manifest.naming` |
 | `modules` | array of object | 否 | null | 模块清单（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此逐个渲染；元素 `name` 必填且清单内不得重复，name 之外字段原样注入 `module.*`；**勾选 module 作用域模板但省略本参时结构化报错** |
@@ -618,7 +656,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 **模板作用域与路径基准**：作用域由包清单 `files[].scope` 声明（`table` 缺省 / `module` / `project`）；输出基准由 `files[].root` 声明（未声明=legacy：table/module 相对输出根、project 相对工作区根；`output`=工作区根+相对输出根；`workspace`=工作区根；`web`=工作区根+`webDirectory`，缺省 `web`）。`workspace` / `web` 根直接拒绝 `..` 段；legacy 与 `output` 根允许 `..` 在工作区根内越出相对输出根；三种根解析后的最终路径都必须落在 `workspaceRoot` 内，渲染期产出的绝对路径/盘符前缀一律拒绝。`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作。
 
-**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空——所选模板含 table 作用域条目时；`files` 含包外路径；`duplicateStrategy` 非法；`webDirectory` 非法（绝对路径/盘符/`..`）；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
+**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空——所选模板含 table 作用域条目时；`files` 含包外路径；**`preset` 未知或与 `files` 同时提供**；`duplicateStrategy` 非法；`webDirectory` 非法（绝对路径/盘符/`..`）；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
 
 **调用示例**：
 
@@ -640,7 +678,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 **用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。
 
-参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `duplicateStrategy`（缺省 `skip`）/ `variables` / `modules` / `webDirectory` / `includePlatformTables` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
+参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `preset`（与 files 互斥）/ `duplicateStrategy`（缺省 `skip`）/ `variables` / `modules` / `webDirectory` / `includePlatformTables` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
 
 **返回**：
 
@@ -795,23 +833,161 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 { "type": "postgresql", "host": "127.0.0.1", "port": 5432, "database": "demo", "userId": "postgres" }
 ```
 
+### 4.20 `save_template_edit`
+
+**用途与使用时机**：子串级单处精确替换原语（流D「改几行」），免整篇覆写重传；配合 `read_template` 的 `contentHash` 做并发安全条件写。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `package` | string | 是 | — | 目标用户模板包包名 |
+| `path` | string | 是 | — | 模板文件相对包根路径 |
+| `oldText` | string | 是 | — | 待替换原文子串，须恰好出现一次：0 次报未找到、多次歧义保护并报命中次数；CRLF/LF 差异不阻断匹配 |
+| `newText` | string | 是 | — | 替换后子串；空串=删除；行尾落地遵循宿主文件形态 |
+| `expectedContentHash` | string | 否 | null | 条件写期望摘要（取自 `read_template` 的 `contentHash`）；不匹配拒绝并回显当前摘要 |
+
+**返回**：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `package` | string | 包名 |
+| `action` | string | 固定 `edited` |
+| `path` | string | 模板相对路径 |
+| `fileCount` | integer | 操作后包内模板文件数 |
+| `contentHash` | string | 编辑后正文摘要（SHA256 前 16 位 hex 小写），供后续条件写复用 |
+| `charCount` | integer | 编辑后正文字符数 |
+| `contextBefore` / `contextAfter` | string | 替换点前后上下文快照（约 60 字符） |
+
+**错误态**：`TemplatePackageError`（内置包只读；包不存在）；`NotFound`（`oldText` 未找到）；`InvalidArgument`（`oldText` 多次命中；路径校验失败）；`ContentConflict`（摘要不匹配）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "package": "my-templates", "path": "entity.java.scriban", "oldText": "private Long id;", "newText": "private Long id = null;", "expectedContentHash": "a1b2c3d4e5f60718" }
+```
+
+### 4.21 `create_template_package`
+
+**用途与使用时机**：新建用户模板包（写 `template.json`，固定 scriban 引擎）；传首模板参数可顺带创建首个空模板文件，不传则创建空包。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `package` | string | 是 | — | 新包名（字母/数字/中划线/下划线，至少一个字母或数字） |
+| `description` | string | 否 | null | 包说明 |
+| `basePackage` | string | 否 | null | 基础包名（如 `com.example`）；空串表示清空 |
+| `typeMap` | object<string,string> | 否 | null | 包级类型映射（数据库原始类型→目标语言类型），生成时优先于全局映射表 |
+| `firstTemplatePath` | string | 否 | null | 首模板相对路径（可含分组目录）；与 `firstOutputPath` 须同时提供 |
+| `firstOutputPath` | string | 否 | null | 首模板输出路径模板，支持 `{{变量}}` 占位 |
+
+**返回**：`package`、`action=created`、`description`、`basePackage`、`fileCount`。
+
+**错误态**：`TemplatePackageError`（与内置包/既有用户包同名）；`InvalidArgument`（包名不合法；首模板两参数未成对；路径校验失败）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "package": "my-templates", "description": "我的模板包", "basePackage": "com.example", "firstTemplatePath": "entity.java.scriban", "firstOutputPath": "src/{{table.variableName}}/{{table.className}}.java" }
+```
+
+### 4.22 `copy_template_package`
+
+**用途与使用时机**：复制模板包为新用户包；内置包可一键复制为可写用户包后自定义修改。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `sourcePackage` | string | 是 | — | 源包名（内置包或用户包均可） |
+| `newName` | string | 是 | — | 新用户包名（须符合目录名规则） |
+| `overwrite` | boolean | 否 | false | 是否允许覆盖同名用户包 |
+
+**返回**：`package`（源包名）、`action=copied`、`newName`、`description`、`basePackage`、`fileCount`。
+
+**错误态**：`TemplatePackageError`（新包名与内置包同名；与用户包同名且 `overwrite=false`；源包不存在）；`InvalidArgument`（包名非法）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "sourcePackage": "simple-java-sso", "newName": "simple-java-sso-custom" }
+```
+
+### 4.23 `rename_template_package`
+
+**用途与使用时机**：重命名用户模板包（物理改目录名并同步重写清单包名）；包展示顺序记忆与模板勾选记忆不迁移。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `package` | string | 是 | — | 当前用户模板包包名 |
+| `newName` | string | 是 | — | 新包名（须符合目录名规则） |
+
+**返回**：`package`（旧包名）、`action=renamed`、`newName`、`description`、`basePackage`、`fileCount`。
+
+**错误态**：`TemplatePackageError`（内置包只读；新名与既有包同名；包不存在）；`InvalidArgument`（`newName` 为空或非法）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "package": "my-templates", "newName": "my-templates-v2" }
+```
+
+### 4.24 `update_template_package_metadata`
+
+**用途与使用时机**：更新用户模板包元数据（包说明、基础包名、包级类型映射），只改清单字段不动模板文件；只传需要修改的字段。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `package` | string | 是 | — | 目标用户模板包包名 |
+| `description` | string | 否 | null（不改动） | 新包说明；空串清空 |
+| `basePackage` | string | 否 | null（不改动） | 新基础包名；空串清空 |
+| `typeMap` | object<string,string> | 否 | null（不改动） | 新包级类型映射；空对象 `{}` 清空，非空对象整体覆盖 |
+
+**返回**：`package`、`action=metadata-updated`、`description`、`basePackage`、`fileCount`。
+
+**错误态**：`TemplatePackageError`（内置包只读；包不存在）；`InvalidArgument`（三个字段均未传）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "package": "my-templates", "typeMap": { "bigint": "Long", "varchar": "String" } }
+```
+
+### 4.25 `delete_template_package`
+
+**用途与使用时机**：删除用户模板包（物理删除整个包目录，不可恢复）；删除前先 `list_templates` / `read_template` 核对包内容。
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+| --- | --- | --- | --- | --- |
+| `package` | string | 是 | — | 待删除用户模板包包名 |
+| `confirm` | boolean | 是 | — | 防误删确认开关，必须显式传 `true` 才执行 |
+
+**返回**：`package`、`action=deleted`；`newName` / `description` / `basePackage` / `fileCount` 省略（无包信息）。
+
+**错误态**：`InvalidArgument`（`confirm` 未传 `true`；包名为空）；`TemplatePackageError`（内置包只读；包不存在）；`InternalError`。
+
+**调用示例**：
+
+```json
+{ "package": "my-templates", "confirm": true }
+```
+
 ## 5. 错误面契约
 
 ### 5.1 失败应答结构与识别口径
 
-可预期的领域错误**不抛协议异常**，而是作为正常工具结果返回一段 JSON 文本：
+可预期的领域错误有两条通道：
+
+1. **结果内错误负载**（模板编辑/包管理/渲染/生成/数据源管理等工具）：作为正常工具结果返回一段 JSON 文本：
 
 ```json
 { "isError": true, "errorType": "InvalidArgument", "message": "..." }
 ```
 
+2. **协议 isError 通道**（声明 `outputSchema` / `UseStructuredContent` 的工具：`list_template_packages`、`list_templates`、`read_template`、`preview_generation`、`generate`、`list_datasources`、`list_tables`、`get_table_detail`、`get_type_map`）：失败经 `McpException` 抛出，由 SDK 转为协议层 `result.isError=true`，消息带 `[错误分类]` 前缀；成功应答携带 `structuredContent`。
+
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `isError` | boolean | 恒为 `true`，程序化识别失败应答的标记 |
+| `isError` | boolean | 恒为 `true`，程序化识别失败应答的标记（结果内负载通道） |
 | `errorType` | string | 错误分类标识（见 5.2 全表） |
 | `message` | string | 人类可读错误信息，来自 Core 服务的脱敏异常消息或参数校验消息，不含敏感字段 |
 
-**识别口径（重要）**：实测确认，失败应答在 MCP 协议层的 `result.isError` 标志**不置位**（错误结果与成功结果都只携带 `content`）。AI 客户端必须**解析 content 文本中的 JSON**，以其中的 `isError: true` 判定失败——不要依赖协议层的 `result.isError`。
+**识别口径**：先看协议层 `result.isError`（强类型工具失败）；否则解析 content 文本中的 JSON，以 `isError: true` 判定失败（结果内负载通道）。
 
 ### 5.2 `errorType` 枚举全表
 
@@ -831,13 +1007,13 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ### 5.3 会话存活语义
 
-**单次工具调用失败不终止 stdio 会话**：错误以结构化结果返回，连接保持可用，调用方修正参数后可直接重试。实测取证：连续多次失败调用（数据源不存在、路径穿越、非法语言段）后，后续请求均正常应答。
+**单次工具调用失败不终止 stdio 会话**：无论错误走结果内 `isError` 负载还是协议层 `result.isError`（强类型/结构化输出工具），连接都保持可用，调用方修正参数后可直接重试。实测取证：连续多次失败调用（数据源不存在、路径穿越、非法语言段、preset 与 files 同传）后，后续请求均正常应答。
 
 ## 6. 约束红线
 
 - **内置包只读机制**：内置模板包已移除，当前发布不含任何内置模板包（模板包全部来自用户模板库）。若部署侧自行放入内置包（`isBuiltin=true`），其编辑类操作（`save_template_content`/`create_template_file`/`delete_template_file`/`rename_template_file`）一律拒绝并返回 `TemplatePackageError`；需要定制时先复制到用户包。
 - **路径安全（强制）**：
-  - 模板路径（`read_template`/`render_template`/四个编辑工具的 `path`/`newPath`）：以包清单条目为白名单 + 禁止绝对路径、`..` 段与盘符前缀，必须落在包根目录内；清单未声明的路径一律拒绝。唯一窄例外（仅 `read_template`）：包根 `README.md.scriban` 即使未在清单声明也可读取（文档型条目：`enabled=false`、`output` 空串、不参与生成），读取仍经防目录穿越校验。
+  - 模板路径（`read_template`/`render_template`/五个编辑工具的 `path`/`newPath`）：以包清单条目为白名单 + 禁止绝对路径、`..` 段与盘符前缀，必须落在包根目录内；清单未声明的路径一律拒绝。唯一窄例外（仅 `read_template`）：包根 `README.md.scriban` 即使未在清单声明也可读取（文档型条目：`enabled=false`、`output` 空串、不参与生成），读取仍经防目录穿越校验。
   - 生成输出路径：模板 `output` 渲染出的相对路径允许 `..` 段越出相对输出根（如从代码根 `src/main/java` 越到 `src/main/resources`），但解析后**必须仍位于工作区根内**，越出工作区根拒绝。
 - **密码安全（强制）**：密码明文仅作为入参瞬态传递（加密入库或连接组装），任何应答字段、日志、错误消息都不回显明文与密文；`list_datasources` 及连接增删改的返回摘要是白名单投影，结构性不含密码字段；明文直测不入库不留痕。
 - **参数全显式零记忆态**：服务端不读取桌面端的勾选态/排序/最近目录等 UI 记忆；`generate` 的表、模板选择、覆盖策略、输出位置全部显式传入；生成成功后不回写 config.json 的最近工作区根/代码目录（`persistLastUsedPaths` 固定关闭）。

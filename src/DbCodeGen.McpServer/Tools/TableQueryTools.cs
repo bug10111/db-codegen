@@ -42,8 +42,16 @@ public sealed class TableQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>表摘要列表。</returns>
     [McpServerTool(Name = "list_tables", Title = "列出数据表", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("列出指定数据源下的全部表（原始表名、类名、变量名、注释；不含列元数据）。datasource 为已保存连接名。")]
-    public async Task<ListTablesResult> ListTablesAsync(string datasource, CancellationToken cancellationToken)
+    [Description("用途：列出指定数据源下的全部表（不含列元数据），生成前圈定表集合。\n"
+        + "何时用：连接接入后先列出表；确定目标表后再用 get_table_detail 取完整列。\n"
+        + "参数：datasource(string,必填)=已保存连接名（list_datasources 可查）。\n"
+        + "返回：datasource（连接名）、tables[]——name（原始表名，与数据库一致）、schema（所属 schema/库名，未提供为空串）、"
+        + "className（PascalCase 类名）、variableName（camelCase 变量名）、comment（表注释，无则空串）。\n"
+        + "常见错误：InvalidArgument（数据源不存在，消息附可用连接名清单）；Timeout（连接 10 秒兜底超时）；InternalError（其余，消息经 Core 层脱敏）。")]
+    public async Task<ListTablesResult> ListTablesAsync(
+        [Description("已保存的数据源连接名称（必填）：可用 list_datasources 查询。")]
+        string datasource,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -83,8 +91,19 @@ public sealed class TableQueryTools
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>表详情（含完整列元数据与主键列名清单）。</returns>
     [McpServerTool(Name = "get_table_detail", Title = "查询表结构", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
-    [Description("读取指定表的完整列元数据（列名、数据库类型、主键、自增、可空、长度/精度/小数位、注释）。列字段 name/rawDbType 与生成工具入参 tables[].columns[] 同名，可原样透传。")]
-    public async Task<GetTableDetailResult> GetTableDetailAsync(string datasource, string table, CancellationToken cancellationToken)
+    [Description("用途：读取指定表的完整列元数据，是生成入参 tables[] 的权威来源。\n"
+        + "何时用：生成前取列元数据；配合 check_type_mapping 预检类型映射。\n"
+        + "参数：datasource(string,必填)=已保存连接名；table(string,必填)=目标表名（与 list_tables 返回的 name 一致）。\n"
+        + "返回：datasource、name（原始表名）、schema（未提供为空串）、className、variableName、comment（无注释为空串）、"
+        + "columns[]——name（原始列名）、propertyName（服务端派生驼峰）、rawDbType（不含长度修饰，与生成入参同口径）、comment（无注释为空串）、"
+        + "isPrimaryKey、autoIncrement、isNullable、length/precision/scale（无该语义时为 null，属性恒在场）、primaryKeyColumns[]（主键列名清单）。\n"
+        + "常见错误：InvalidArgument（数据源不存在；表不存在）；Timeout；InternalError。")]
+    public async Task<GetTableDetailResult> GetTableDetailAsync(
+        [Description("已保存的数据源连接名称（必填）。")]
+        string datasource,
+        [Description("目标表名（必填）：与 list_tables 返回的 name 一致。")]
+        string table,
+        CancellationToken cancellationToken)
     {
         try
         {
