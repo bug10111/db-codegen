@@ -49,7 +49,7 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 dotnet publish src/DbCodeGen.McpServer -c Release
 ```
 
-产物输出到 `src\DbCodeGen.McpServer\bin\Release\net8.0-windows\publish\`，入口为 `DbCodeGen.McpServer.exe`，内置模板包 `Templates\Builtin\` 随发布一并复制。
+产物输出到 `src\DbCodeGen.McpServer\bin\Release\net8.0-windows\publish\`，入口为 `DbCodeGen.McpServer.exe`。当前发布不含内置模板包，模板包全部来自用户模板库；内置包目录机制保留（部署侧自行放入 `Templates\Builtin\` 的包按只读处理）。
 
 整包打包用仓库根脚本 `.\package.ps1`：桌面端输出到 `out\DbCodeGen\`，MCP 服务端输出到其子目录 `out\DbCodeGen\McpServer\`。**缺省为自包含模式**（双击即用，目标机免装 .NET 8 运行时，体积较大）；传 `-FrameworkDependent` 切换为框架依赖模式（体积小，目标机需已装 .NET 8 运行时）。
 
@@ -79,7 +79,7 @@ C:\path\to\DbCodeGen.McpServer.exe
 - **同机同用户**：数据源密码与 AI Key 均以 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。换机 / 换用户复制配置无法解密，需重新录入。
 - **与桌面端共享数据**：与桌面端共用同一份 `%AppData%\DbCodeGen\config.json` 与用户模板库（若桌面端已通过 `config-location.json` 重定向数据目录，则共用重定向后的目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
 - **模板变更感知**：桌面端不监听模板文件变更（无 FileSystemWatcher）。模板内容被 MCP 修改后，桌面端需重新加载包（重新打开「模板包管理」窗口，或重启应用）才能看到最新内容。
-- **内置模板包只读**：内置包 `java-mybatis-plus` 只读，MCP 编辑类工具对内置包一律拒绝；生成用模板请复制到用户包或使用既有用户包。
+- **内置模板包已移除**：当前发布不含任何内置模板包，模板包全部来自用户模板库；内置包只读机制保留（部署侧自行放入 `Templates\Builtin` 的包仍按只读处理，MCP 编辑类工具对其一律拒绝）。
 - **日志**：MCP 服务端日志固定落 `C:\simple\DbCodeGen.McpServer\logs\`（按天滚动、保留 7 天、单文件 20MB 上限，多实例共享写）。
 
 > **工具使用手册**：完整参数表、返回字段、错误契约与推荐调用顺序（首次接入/数据源接入/生成主流水线/模板维护/连接直测五条管线）见 [docs/db-codegen-MCP工具使用手册.md](docs/db-codegen-MCP工具使用手册.md)。
@@ -94,7 +94,7 @@ C:\path\to\DbCodeGen.McpServer.exe
 ### 多项目、多模板组
 
 - **多项目**：工作区根 + 代码目录双配置，一套工具管理多个项目的代码输出，最近目录自动记忆
-- **多模板组（模板包）**：内置模板包与用户模板包并存，zip 导入 / 导出分享；模板包与包内文件均支持拖拽 / 上移下移排序，即时持久化、一键恢复默认
+- **多模板组（模板包）**：模板包全部来自用户模板库（内置模板包已移除，内置包机制保留），zip 导入 / 导出分享；模板包与包内文件均支持拖拽 / 上移下移排序，即时持久化、一键恢复默认
 - **勾选到层**：每个模板文件可独立勾选，精确控制参与批量生成的文件集合
 ![img_1.png](images/img_1.png)
 ### 模板编辑与实时预览

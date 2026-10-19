@@ -314,21 +314,19 @@ public sealed class TemplatePackageLoaderTests : IDisposable
     }
 
     /// <summary>
-    /// 内置包 java-mybatis-plus 应从输出目录加载成功，共 6 个模板文件且 controller 默认不参与生成。
+    /// 临时 fixture 内置包目录应以其自身清单加载成功，未启用条目保持 enabled=false；不依赖发布目录与真实内置包。
     /// </summary>
     [Fact]
-    public async Task BuiltinPackage_LoadsFromOutputDirectory()
+    public async Task BuiltinPackage_LoadsFromTemporaryFixtureAsync()
     {
-        string builtinRoot = BuiltinTemplatePackages.GetDefaultRootPath();
-        string builtinDir = Path.Combine(builtinRoot, "java-mybatis-plus");
-        Assert.True(Directory.Exists(builtinDir), $"内置包未复制到输出目录：{builtinDir}");
+        string builtinDir = await CreateBuiltinFixtureAsync();
 
         TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(builtinDir, isBuiltin: true, CancellationToken.None);
 
-        Assert.Equal("java-mybatis-plus", package.Name);
+        Assert.Equal("fixture-builtin", package.Name);
         Assert.Equal("scriban", package.Engine);
         Assert.True(package.IsBuiltin);
-        Assert.Equal(6, package.Files.Count);
+        Assert.Equal(2, package.Files.Count);
         TemplateFileInfo controller = package.Files.Single(file => file.RelativeTemplatePath == "controller.java.scriban");
         Assert.False(controller.IsEnabled);
         TemplateFileInfo entity = package.Files.Single(file => file.RelativeTemplatePath == "entity.java.scriban");
@@ -377,14 +375,12 @@ public sealed class TemplatePackageLoaderTests : IDisposable
     }
 
     /// <summary>
-    /// 内置包 6 个 Scriban 模板应全部可解析并渲染成功，输出包含类名。
+    /// 临时 fixture 内置包的全部 Scriban 模板应可解析并渲染成功，输出包含类名；不依赖发布目录与真实内置包。
     /// </summary>
     [Fact]
-    public async Task BuiltinPackage_AllTemplatesRenderWithSampleContext()
+    public async Task BuiltinPackage_TemporaryFixtureTemplatesRenderWithSampleContextAsync()
     {
-        string builtinRoot = BuiltinTemplatePackages.GetDefaultRootPath();
-        string builtinDir = Path.Combine(builtinRoot, "java-mybatis-plus");
-        Assert.True(Directory.Exists(builtinDir), $"内置包未复制到输出目录：{builtinDir}");
+        string builtinDir = await CreateBuiltinFixtureAsync();
 
         TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(builtinDir, isBuiltin: true, CancellationToken.None);
         ScriptObject context = BuildSampleRenderContext();
@@ -398,6 +394,51 @@ public sealed class TemplatePackageLoaderTests : IDisposable
             string output = await template.RenderAsync(context);
             Assert.Contains("SysUser", output);
         }
+    }
+
+    /// <summary>
+    /// 在测试临时目录内动态创建最小合法内置包 fixture（两个模板文件，controller 默认不启用）。
+    /// </summary>
+    /// <returns>fixture 包目录绝对路径。</returns>
+    private async Task<string> CreateBuiltinFixtureAsync()
+    {
+        string packageDir = Path.Combine(_tempRoot, "fixture-builtin");
+        Directory.CreateDirectory(packageDir);
+
+        var manifest = new TemplateManifest
+        {
+            Name = "fixture-builtin",
+            Description = "临时内置包 fixture",
+            Engine = "scriban",
+            BasePackage = "com.example",
+            TypeMap = new Dictionary<string, string> { ["bigint"] = "Long" },
+            Files = new List<TemplateFileEntry>
+            {
+                new()
+                {
+                    Template = "entity.java.scriban",
+                    Output = "{{package.dir}}/entity/{{table.className}}.java",
+                    Enabled = true
+                },
+                new()
+                {
+                    Template = "controller.java.scriban",
+                    Output = "{{package.dir}}/controller/{{table.className}}Controller.java",
+                    Enabled = false
+                }
+            }
+        };
+
+        await File.WriteAllTextAsync(
+            Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName),
+            JsonSerializer.Serialize(manifest, JsonOptions));
+        await File.WriteAllTextAsync(
+            Path.Combine(packageDir, "entity.java.scriban"),
+            "public class {{table.className}} { }");
+        await File.WriteAllTextAsync(
+            Path.Combine(packageDir, "controller.java.scriban"),
+            "public class {{table.className}}Controller { }");
+        return packageDir;
     }
 
     /// <summary>
@@ -438,7 +479,7 @@ public sealed class TemplatePackageLoaderTests : IDisposable
         table.SetValue("otherColumn", new ScriptArray { userName, createdTime }, true);
 
         var package = new ScriptObject();
-        package.SetValue("name", "java-mybatis-plus", true);
+        package.SetValue("name", "fixture-builtin", true);
         package.SetValue("basePackage", "com.example", true);
 
         var tool = new ScriptObject();

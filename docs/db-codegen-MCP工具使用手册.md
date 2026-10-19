@@ -51,7 +51,7 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 ### 3.1 流A：首次接入探活
 
 1. 客户端自动完成 `initialize` 握手与 `tools/list`（stdio 注册后由 MCP 协议层自动执行，无需手动调用工具）。服务端标识：name=`DbCodeGen`。
-2. `list_template_packages`：摸底有哪些包可用。内置包 `java-mybatis-plus` 的 `isBuiltin=true`（**只读**，编辑类工具一律拒绝）；用户包可编辑。返回的 `fileCount` 与 `basePackage` 可辅助选择。
+2. `list_template_packages`：摸底有哪些包可用。**内置模板包已移除**：当前发布不含任何内置模板包，模板包全部来自用户模板库（用户包可编辑）；若部署侧自行放入 `Templates\Builtin` 的内置包，其 `isBuiltin=true`（**只读**，编辑类工具一律拒绝）。返回的 `fileCount` 与 `basePackage` 可辅助选择。
 3. `list_templates`（可带 `type`/`group` 过滤）浏览包内条目；`read_template` 看正文确认模板风格。
 
 跳过第 2 步的后果：直接对不存在的包名调用后续工具会得到 `TemplatePackageError`（包不存在）。
@@ -215,7 +215,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 **调用示例**：
 
 ```json
-{ "package": "java-mybatis-plus", "group": "controller", "type": "java" }
+{ "package": "my-package", "group": "controller", "type": "java" }
 ```
 
 ### 4.3 `read_template`
@@ -246,7 +246,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 **调用示例**：
 
 ```json
-{ "package": "java-mybatis-plus", "path": "entity.java.scriban" }
+{ "package": "my-package", "path": "entity.java.scriban" }
 ```
 
 ### 4.4 `list_datasources`
@@ -381,7 +381,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 **调用示例**：
 
 ```json
-{ "package": "java-mybatis-plus" }
+{ "package": "my-package" }
 ```
 
 ### 4.8 `check_type_mapping`
@@ -413,7 +413,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 **调用示例**：
 
 ```json
-{ "datasource": "虚拟机", "tables": ["t_user_info"], "package": "java-mybatis-plus" }
+{ "datasource": "虚拟机", "tables": ["t_user_info"], "package": "my-package" }
 ```
 
 ### 4.9 `save_template_content`
@@ -534,7 +534,7 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 
 ```json
 {
-  "package": "java-mybatis-plus",
+  "package": "my-package",
   "path": "entity.java.scriban",
   "table": {
     "name": "t_user_info",
@@ -624,7 +624,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ```json
 {
-  "package": "java-mybatis-plus",
+  "package": "my-package",
   "tables": [
     { "name": "t_user_info", "columns": [
       { "name": "id", "rawDbType": "bigint", "isPrimaryKey": true, "autoIncrement": true, "isNullable": false },
@@ -666,7 +666,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ```json
 {
-  "package": "java-mybatis-plus",
+  "package": "my-package",
   "tables": [
     { "name": "t_user_info", "columns": [
       { "name": "id", "rawDbType": "bigint", "isPrimaryKey": true, "autoIncrement": true, "isNullable": false },
@@ -835,7 +835,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ## 6. 约束红线
 
-- **内置模板包只读**：内置包 `java-mybatis-plus` 一律拒绝编辑类操作（`save_template_content`/`create_template_file`/`delete_template_file`/`rename_template_file`），返回 `TemplatePackageError`。要用内置包做底版，先复制到用户包。
+- **内置包只读机制**：内置模板包已移除，当前发布不含任何内置模板包（模板包全部来自用户模板库）。若部署侧自行放入内置包（`isBuiltin=true`），其编辑类操作（`save_template_content`/`create_template_file`/`delete_template_file`/`rename_template_file`）一律拒绝并返回 `TemplatePackageError`；需要定制时先复制到用户包。
 - **路径安全（强制）**：
   - 模板路径（`read_template`/`render_template`/四个编辑工具的 `path`/`newPath`）：以包清单条目为白名单 + 禁止绝对路径、`..` 段与盘符前缀，必须落在包根目录内；清单未声明的路径一律拒绝。唯一窄例外（仅 `read_template`）：包根 `README.md.scriban` 即使未在清单声明也可读取（文档型条目：`enabled=false`、`output` 空串、不参与生成），读取仍经防目录穿越校验。
   - 生成输出路径：模板 `output` 渲染出的相对路径允许 `..` 段越出相对输出根（如从代码根 `src/main/java` 越到 `src/main/resources`），但解析后**必须仍位于工作区根内**，越出工作区根拒绝。

@@ -17,9 +17,10 @@
 #   ├─ DbCodeGen.Core.dll        # 领域核心程序集
 #   ├─ *.dll / *.json            # 依赖程序集与运行时配置
 #   ├─ McpServer/                # MCP 服务端（本地 stdio，供 AI 客户端注册拉起）
-#   │  ├─ DbCodeGen.McpServer.exe
-#   │  └─ Templates/Builtin/     # 内置模板包随发布复制
+#   │  └─ DbCodeGen.McpServer.exe
 #   └─ version.txt               # 构建时间、git 提交号与打包模式
+# 模板包说明：当前发布不含内置模板包，模板包全部来自用户模板库；内置包目录机制保留
+#             （部署侧自行放入 Templates/Builtin 的包按只读处理），打包不复制任何内置包。
 #
 # data 保全语义：输出目录已存在时保留其 data\ 子目录（用户数据兜底保全，仅重建
 #               程序文件）；正常形态数据目录在 %AppData%\DbCodeGen（或经
@@ -132,8 +133,7 @@ Write-Host "已写入 $versionPath"
 Write-Step '5/5 校验产物'
 $mustExist = @(
     (Join-Path $OutputDir 'DbCodeGen.App.exe'),
-    (Join-Path $OutputDir 'McpServer\DbCodeGen.McpServer.exe'),
-    (Join-Path $OutputDir 'McpServer\Templates\Builtin\java-mybatis-plus\template.json')
+    (Join-Path $OutputDir 'McpServer\DbCodeGen.McpServer.exe')
 )
 $missing = $mustExist | Where-Object { -not (Test-Path $_) }
 if ($missing) {

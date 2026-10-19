@@ -183,6 +183,24 @@ public sealed class TemplatePackageServiceTests : IDisposable
     }
 
     /// <summary>
+    /// 内置包根目录不存在或为空时列表不得报错，且不返回任何内置包（当前发布不含内置模板包）。
+    /// </summary>
+    [Fact]
+    public async Task ListPackagesAsync_MissingBuiltinRoot_ReturnsUserPackagesOnlyAsync()
+    {
+        string builtinRoot = Path.Combine(_tempRoot, "builtin-missing");
+        string userLibrary = Path.Combine(_tempRoot, "user");
+        await CreatePackageAsync(userLibrary, "user-pkg");
+        TemplatePackageService service = CreateService(builtinRoot, userLibrary, out _, out _);
+
+        IReadOnlyList<TemplatePackageInfo> packages = await service.ListPackagesAsync(CancellationToken.None);
+
+        TemplatePackageInfo package = Assert.Single(packages);
+        Assert.Equal("user-pkg", package.Name);
+        Assert.False(package.IsBuiltin);
+    }
+
+    /// <summary>
     /// 列表遇到损坏包应跳过该包，不中断整体列表。
     /// </summary>
     [Fact]

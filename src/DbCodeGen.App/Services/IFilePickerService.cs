@@ -17,7 +17,7 @@ public interface IFilePickerService
     /// <summary>
     /// 弹出保存文件对话框并返回用户指定的模板包 zip 导出路径。
     /// </summary>
-    /// <param name="defaultFileName">默认文件名，如“java-mybatis-plus.zip”。</param>
+    /// <param name="defaultFileName">默认文件名，如“my-package.zip”。</param>
     /// <param name="initialDirectory">初始定位目录；为空或不存在时由对话框决定起始位置。</param>
     /// <param name="title">对话框标题，默认“导出模板包 zip 文件”。</param>
     /// <returns>用户指定的 zip 文件绝对路径；用户取消时返回 null。</returns>

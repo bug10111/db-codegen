@@ -306,7 +306,7 @@ public sealed class TemplateEngineTests
         PreviewResult result = _engine.Render("{{ package.name }}|{{ package.basePackage }}", CreateTable(), null, CreatePackageContext(), CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("java-mybatis-plus|com.example", result.Output);
+        Assert.Equal("sample-pkg|com.example", result.Output);
     }
 
     /// <summary>
@@ -399,7 +399,7 @@ public sealed class TemplateEngineTests
     [Fact]
     public void RenderPathTemplate_BasePackageOverride_ReplacesManifest()
     {
-        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        var package = new TemplatePackageInfo { Name = "sample-pkg", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
         TemplatePackageContext context = TemplatePackageContext.From(package, "com.example.common");
 
         string dir = _engine.RenderPathTemplate("{{package.dir}}", new TemplateRenderContext(CreateTable(), context));
@@ -415,7 +415,7 @@ public sealed class TemplateEngineTests
     [Fact]
     public void RenderPathTemplate_BasePackageOverrideEmpty_FallsBackToManifest()
     {
-        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        var package = new TemplatePackageInfo { Name = "sample-pkg", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
         TemplatePackageContext context = TemplatePackageContext.From(package, "  ");
 
         string dir = _engine.RenderPathTemplate("{{package.dir}}", new TemplateRenderContext(CreateTable(), context));
@@ -429,7 +429,7 @@ public sealed class TemplateEngineTests
     [Fact]
     public void Render_BasePackageOverride_AppliesToPackageVariable()
     {
-        var package = new TemplatePackageInfo { Name = "java-mybatis-plus", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
+        var package = new TemplatePackageInfo { Name = "sample-pkg", BasePackage = "com.example", TypeMap = new Dictionary<string, string>() };
         TemplatePackageContext context = TemplatePackageContext.From(package, "cn.foo.bar");
 
         PreviewResult result = _engine.Render("package {{package.basePackage}};", CreateTable(), null, context, CancellationToken.None);
@@ -470,25 +470,38 @@ public sealed class TemplateEngineTests
     }
 
     /// <summary>
-    /// 内置包全部 Scriban 模板应经共享渲染引擎成功渲染，输出包含类名，验证引擎与真实模板兼容。
+    /// 临时 fixture 包的 Scriban 模板应经共享渲染引擎成功渲染，输出包含类名；不依赖发布目录与真实内置包。
     /// </summary>
     [Fact]
-    public async Task Render_BuiltinPackageTemplates_RenderSuccessfully()
+    public async Task Render_PackageTemplates_RenderSuccessfullyAsync()
     {
-        string builtinRoot = BuiltinTemplatePackages.GetDefaultRootPath();
-        string builtinDir = Path.Combine(builtinRoot, "java-mybatis-plus");
-        Assert.True(Directory.Exists(builtinDir), $"内置包未复制到输出目录：{builtinDir}");
-
-        TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(builtinDir, isBuiltin: true, CancellationToken.None);
-        TemplatePackageContext packageContext = TemplatePackageContext.From(package);
-
-        foreach (TemplateFileInfo file in package.Files)
+        string fixtureRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenPackageRenderTests", Guid.NewGuid().ToString("N"));
+        string packageDir = Path.Combine(fixtureRoot, "fixture-package");
+        Directory.CreateDirectory(packageDir);
+        try
         {
-            string templateText = await File.ReadAllTextAsync(file.TemplatePath);
-            PreviewResult result = _engine.Render(templateText, CreateTable(), null, packageContext, CancellationToken.None, file.RelativeTemplatePath);
+            string manifestJson = """
+                {"name":"fixture-package","engine":"scriban","basePackage":"com.example","files":[{"template":"entity.java.scriban","output":"{{package.dir}}/entity/{{table.className}}.java","enabled":true},{"template":"mapper.java.scriban","output":"{{package.dir}}/mapper/{{table.className}}Mapper.java","enabled":true}]}
+                """;
+            await File.WriteAllTextAsync(Path.Combine(packageDir, TemplatePackageLoader.ManifestFileName), manifestJson);
+            await File.WriteAllTextAsync(Path.Combine(packageDir, "entity.java.scriban"), "public class {{ table.className }} { }");
+            await File.WriteAllTextAsync(Path.Combine(packageDir, "mapper.java.scriban"), "public interface {{ table.className }}Mapper { }");
 
-            Assert.True(result.IsSuccess, $"模板 {file.RelativeTemplatePath} 渲染失败：{result.ErrorMessage}");
-            Assert.Contains("SysUser", result.Output);
+            TemplatePackageInfo package = await TemplatePackageLoader.LoadFromDirectoryAsync(packageDir, isBuiltin: false, CancellationToken.None);
+            TemplatePackageContext packageContext = TemplatePackageContext.From(package);
+
+            foreach (TemplateFileInfo file in package.Files)
+            {
+                string templateText = await File.ReadAllTextAsync(file.TemplatePath);
+                PreviewResult result = _engine.Render(templateText, CreateTable(), null, packageContext, CancellationToken.None, file.RelativeTemplatePath);
+
+                Assert.True(result.IsSuccess, $"模板 {file.RelativeTemplatePath} 渲染失败：{result.ErrorMessage}");
+                Assert.Contains("SysUser", result.Output);
+            }
+        }
+        finally
+        {
+            DeletePackageRoot(fixtureRoot);
         }
     }
 
@@ -680,7 +693,7 @@ public sealed class TemplateEngineTests
     {
         var package = new TemplatePackageInfo
         {
-            Name = "java-mybatis-plus",
+            Name = "sample-pkg",
             BasePackage = "com.example",
             TypeMap = new Dictionary<string, string>
             {

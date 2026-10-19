@@ -15,13 +15,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Remove="Templates\Packages\java-mybatis-plus\**" />
-    <Content Include="Templates\Packages\java-mybatis-plus\**"
-             Link="Templates\Builtin\java-mybatis-plus\%(RecursiveDir)%(Filename)%(Extension)"
-             CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <ItemGroup>
     <EmbeddedResource Include="Resources\TEMPLATE_SPEC.md" />
   </ItemGroup>
 
