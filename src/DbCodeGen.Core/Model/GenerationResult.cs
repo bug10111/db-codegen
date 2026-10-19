@@ -15,13 +15,21 @@ public sealed class GenerationResult
     /// <param name="failed">写盘失败文件数。</param>
     /// <param name="isCancelled">是否被用户取消，取消时部分文件可能已写盘。</param>
     /// <param name="logs">生成日志，底栏展示。</param>
+    /// <param name="namingReport">逐表命名报告，缺省为空清单。</param>
+    /// <param name="pathWarnings">预检告警清单（坏路径/命名反推/权限键/聚合根等），缺省为空清单。</param>
+    /// <param name="coverageWarnings">生成覆盖告警（缺 View 层/缺前端页面/仅后端），缺省为空清单。</param>
+    /// <param name="platformTableExcluded">平台表/排除表命中记录，缺省为空清单。</param>
     public GenerationResult(
         int generated,
         int overwritten,
         int skipped,
         int failed,
         bool isCancelled,
-        IReadOnlyList<GenerationLogEntry>? logs = null)
+        IReadOnlyList<GenerationLogEntry>? logs = null,
+        IReadOnlyList<NamingReportItem>? namingReport = null,
+        IReadOnlyList<PathWarningInfo>? pathWarnings = null,
+        IReadOnlyList<CoverageWarningInfo>? coverageWarnings = null,
+        IReadOnlyList<PlatformTableExclusion>? platformTableExcluded = null)
     {
         Generated = generated;
         Overwritten = overwritten;
@@ -29,6 +37,10 @@ public sealed class GenerationResult
         Failed = failed;
         IsCancelled = isCancelled;
         Logs = logs ?? Array.Empty<GenerationLogEntry>();
+        NamingReport = namingReport ?? Array.Empty<NamingReportItem>();
+        PathWarnings = pathWarnings ?? Array.Empty<PathWarningInfo>();
+        CoverageWarnings = coverageWarnings ?? Array.Empty<CoverageWarningInfo>();
+        PlatformTableExcluded = platformTableExcluded ?? Array.Empty<PlatformTableExclusion>();
     }
 
     /// <summary>
@@ -60,4 +72,24 @@ public sealed class GenerationResult
     /// 生成日志列表，底栏展示。
     /// </summary>
     public IReadOnlyList<GenerationLogEntry> Logs { get; }
+
+    /// <summary>
+    /// 逐表命名报告（真实表名/实体名/变量名/包路径/代码内表名/权限键），仅含实际参与生成的表；无表时为空列表。
+    /// </summary>
+    public IReadOnlyList<NamingReportItem> NamingReport { get; }
+
+    /// <summary>
+    /// 生成前预检发现的告警清单（坏路径/命名反推/权限键/聚合根等），非阻断、不改变写盘结果；无告警时为空列表。
+    /// </summary>
+    public IReadOnlyList<PathWarningInfo> PathWarnings { get; }
+
+    /// <summary>
+    /// 生成覆盖告警（NoBackendView / NoWebPage / OnlyBackendGenerated），按所选模板 role 集合判定；无告警时为空列表。
+    /// </summary>
+    public IReadOnlyList<CoverageWarningInfo> CoverageWarnings { get; }
+
+    /// <summary>
+    /// 平台表/排除表命中记录；includePlatformTables=true 时平台表记录 Excluded=false（已显式允许生成）。
+    /// </summary>
+    public IReadOnlyList<PlatformTableExclusion> PlatformTableExcluded { get; }
 }

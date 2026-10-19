@@ -506,7 +506,9 @@ public sealed partial class GenerationViewModel : ObservableObject
         var selections = new List<TemplateFileSelection>(package.Files.Count);
         foreach (TemplateFileInfo file in package.Files)
         {
-            selections.Add(new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, file.IsEnabled));
+            // 作用域、输出根与产出角色随清单透传，保证桌面端与 MCP 共用同一生成编排语义
+            selections.Add(new TemplateFileSelection(
+                file.RelativeTemplatePath, file.OutputPath, file.IsEnabled, file.Scope, file.OutputRoot, file.Role));
         }
 
         return selections;

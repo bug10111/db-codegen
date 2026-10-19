@@ -47,13 +47,15 @@ public sealed class GenerationTools
     /// <param name="tables">合成表集合；所选模板含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；需要完整列时建议先用 get_table_detail 取回后传入，离线合成场景直接内联表结构即可，无需连接数据库。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板过滤清单：传则仅生成清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。</param>
-    /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）。</param>
-    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；值支持任意 JSON 类型（字符串/数组/布尔/对象），集合消费键必须传真实数组；键与保留命名空间冲突时结构化拒绝。</param>
+    /// <param name="duplicateStrategy">同名目标文件处理策略：overwrite / skip（缺省 skip，含手写代码目录默认不覆盖）。</param>
+    /// <param name="variables">可选的调用方变量对象，逐键注入渲染上下文 vars.*（如 {"appName":"demo"}）；值支持任意 JSON 类型（字符串/数组/布尔/对象），集合消费键必须传真实数组；键与保留命名空间冲突时结构化拒绝。命名契约键（tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule）在此透传，优先级高于 manifest.naming。</param>
     /// <param name="modules">可选的模块清单（如 [{"name":"account"}]），包内 module 作用域模板按此逐个渲染；元素 name 必填，其余字段原样注入 module.*；勾选 module 作用域模板但省略时结构化报错。</param>
+    /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；必须为相对路径且不含 ..，非法即结构化参数错误。</param>
+    /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false：命中模板包 platformTables 规则的表不写盘；true 时参与生成）。排除表规则不受本开关影响。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>写盘结果统计与生成日志。</returns>
+    /// <returns>写盘结果统计、生成日志与结构化诊断（命名报告、预检告警、覆盖告警、平台表排除记录）。</returns>
     [McpServerTool(Name = "generate", Title = "批量生成", Destructive = true)]
-    [Description("执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。建议先 preview_generation 确认文件计划；tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略（无表的手写域片段渲染用 render_template）。files 为模板过滤清单：传则仅生成清单内模板，省略时选包内全部启用条目。全参数显式，不读不写配置记忆。")]
+    [Description("执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。建议先 preview_generation 确认文件计划；回执与 preview 同源返回 namingReport / pathWarnings / coverageWarnings / platformTableExcluded 结构化诊断。平台表禁止生成 CRUD：命中模板包 platformTables 规则的表默认不写盘（确需生成须显式传 includePlatformTables=true），排除表规则一律生效；web 前端直连授权中心，业务后端零平台端点；view 层 = 后端 Java View（只做数据处理，不含前端页面）。duplicateStrategy 缺省 skip（含手写代码目录默认不覆盖），显式传 overwrite 才覆盖。tables 按所选模板分型——所选模板（files 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略（无表的手写域片段渲染用 render_template）。files 为模板过滤清单：传则仅生成清单内模板，省略时选包内全部启用条目。全参数显式，不读不写配置记忆。")]
     public async Task<object> GenerateAsync(
         string package,
         string workspaceRoot,
@@ -64,11 +66,15 @@ public sealed class GenerationTools
         string? basePackageOverride = null,
         [Description("模板过滤清单：传则仅生成清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。")]
         IReadOnlyList<string>? files = null,
-        [Description("同名目标文件处理策略：overwrite（覆盖内容不同的同名文件）/ skip（同名一律跳过）；对含手写代码的输出目录用 skip 防覆盖手写文件。")]
-        DuplicateFileStrategy duplicateStrategy = DuplicateFileStrategy.Overwrite,
-        [Description("调用方变量对象，逐键注入渲染上下文 vars.*（如 {\"appName\":\"demo\"}）；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。")]
+        [Description("同名目标文件处理策略：skip（缺省，同名一律跳过，含手写代码目录默认不覆盖）/ overwrite（显式覆盖内容不同的同名文件）。")]
+        DuplicateFileStrategy duplicateStrategy = DuplicateFileStrategy.Skip,
+        [Description("调用方变量对象，逐键注入渲染上下文 vars.*（如 {\"appName\":\"demo\"}）；值支持任意 JSON 类型（字符串/数值/布尔/数组/对象），集合消费键必须传真实数组（传字符串将被结构化拒绝），布尔键传布尔值；键与保留命名空间冲突时结构化拒绝。命名契约键 tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule 在此透传，优先级高于 manifest.naming。")]
         IReadOnlyDictionary<string, JsonElement>? variables = null,
         IReadOnlyList<Dictionary<string, object?>>? modules = null,
+        [Description("web 目录（相对 workspaceRoot，缺省 web）：root=web 的模板输出以此为基准；必须为相对路径且不含 .. 段。")]
+        string? webDirectory = null,
+        [Description("是否显式允许生成平台表（缺省 false）：false 时命中模板包 platformTables 规则的表不写盘；true 时参与生成。排除表规则不受本开关影响。")]
+        bool includePlatformTables = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -76,7 +82,7 @@ public sealed class GenerationTools
             GenerationRequest request = await GenerationRequestFactory.CreateAsync(
                 _packageService, package, tables, files, workspaceRoot, codeDirectory,
                 basePackageOverride, duplicateStrategy.ToString().ToLowerInvariant(), persistLastUsedPaths: false,
-                variables, modules, cancellationToken);
+                variables, modules, cancellationToken, webDirectory, includePlatformTables);
 
             // 零记忆态副作用：请求关闭生成后路径记忆回写，config.json 的最近工作区根/代码目录保持不变
             GenerationResult result = await _codeGenerator.GenerateAsync(request, progress: null, cancellationToken);
@@ -87,6 +93,13 @@ public sealed class GenerationTools
                 logs.Add(new GenerationLogItem(logEntry.Timestamp, logEntry.Level.ToString().ToLowerInvariant(), logEntry.Message));
             }
 
+            // 结构化诊断与 preview_generation 同源透出：写盘回执同样携带命名报告、预检告警、覆盖告警与平台表排除记录
+            List<NamingReportEntry> namingReport = GenerationDiagnosticMapper.ToNamingReportEntries(result.NamingReport);
+            List<PathWarningItem> pathWarnings = GenerationDiagnosticMapper.ToPathWarningItems(result.PathWarnings);
+            List<CoverageWarningItem> coverageWarnings = GenerationDiagnosticMapper.ToCoverageWarningItems(result.CoverageWarnings);
+            List<PlatformTableExcludedItem> platformTableExcluded =
+                GenerationDiagnosticMapper.ToPlatformTableExcludedItems(result.PlatformTableExcluded);
+
             _logger.LogInformation(
                 "generate 完成，包 {PackageName}，新增 {Generated} / 覆盖 {Overwritten} / 跳过 {Skipped} / 失败 {Failed}，取消 {IsCancelled}。",
                 package, result.Generated, result.Overwritten, result.Skipped, result.Failed, result.IsCancelled);
@@ -96,7 +109,11 @@ public sealed class GenerationTools
                 result.Skipped,
                 result.Failed,
                 result.IsCancelled,
-                logs);
+                logs,
+                namingReport,
+                pathWarnings,
+                coverageWarnings,
+                platformTableExcluded);
         }
         catch (GenerationException exception)
         {
@@ -129,10 +146,18 @@ internal sealed record GenerationLogItem(DateTime Timestamp, string Level, strin
 /// <param name="Failed">写盘失败文件数。</param>
 /// <param name="IsCancelled">是否被取消，取消时部分文件可能已写盘。</param>
 /// <param name="Logs">生成日志列表。</param>
+/// <param name="NamingReport">逐表命名报告（真实表名/实体名/变量名/包路径/代码内表名/权限键）。</param>
+/// <param name="PathWarnings">预检告警清单（坏路径/命名反推/权限键/聚合根等）。</param>
+/// <param name="CoverageWarnings">生成覆盖告警（NoBackendView/NoWebPage/OnlyBackendGenerated）。</param>
+/// <param name="PlatformTableExcluded">平台表/排除表命中记录（Excluded=false 表示经 includePlatformTables 显式放行）。</param>
 internal sealed record GenerateResult(
     int Generated,
     int Overwritten,
     int Skipped,
     int Failed,
     bool IsCancelled,
-    IReadOnlyList<GenerationLogItem> Logs);
+    IReadOnlyList<GenerationLogItem> Logs,
+    IReadOnlyList<NamingReportEntry> NamingReport,
+    IReadOnlyList<PathWarningItem> PathWarnings,
+    IReadOnlyList<CoverageWarningItem> CoverageWarnings,
+    IReadOnlyList<PlatformTableExcludedItem> PlatformTableExcluded);

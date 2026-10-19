@@ -2,7 +2,7 @@
 
 一个 MCP 优先的数据库代码生成工具（.NET 8）：**AI 客户端（Claude Desktop / ZCode / Cursor 等任何支持 MCP 的智能体）把它作为工具接入后，用自然语言驱动完整的代码生成流水线**——查表结构、管数据源、改模板、预览渲染、批量生成到工作区；报错自带行列定位，智能体可以按错误信息自我修正后重试。
 
-桌面端（WPF）是同一套引擎的可视化管理台：模板包管理、实时预览调试、AI 写模板 / 改模板 / 迁移模板。「表元数据 × 模板 × 输出路径」串成一条自动化流水线：**多选表 → 模板包渲染 → dry-run 预览 → 安全写盘**，全部能力同时以 24 个 MCP 工具完整暴露。
+桌面端（WPF）是同一套引擎的可视化管理台：模板包管理、实时预览调试、AI 写模板 / 改模板 / 迁移模板。「表元数据 × 模板 × 输出路径」串成一条自动化流水线：**多选表 → 模板包渲染 → dry-run 预览 → 安全写盘**，全部能力同时以 25 个 MCP 工具完整暴露。
 
 ## AI 智能体接入（MCP Server）
 
@@ -10,13 +10,13 @@
 
 MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面，并与桌面端共享同一份配置与模板库。
 
-### 工具清单（24 个，tools/list 实测）
+### 工具清单（25 个，tools/list 实测）
 
 | 分类 | 工具 | 说明 |
 | --- | --- | --- |
-| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含说明、只读标记、文件数 |
-| | `list_templates` | 列出指定包内模板条目（路径、输出路径模板、启用标记），可按分组 / 语言过滤 |
-| | `read_template` | 读取模板文件正文全文（Scriban 源文本） |
+| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含说明、只读标记、文件数与能力元数据（role/stack/scopes/hasBackendView/hasWebPage/contractPath/deployModes，契约缺失回执 MissingContract 告警） |
+| | `list_templates` | 列出指定包内模板条目（路径、输出路径模板、启用标记、scope/root/role/isContract），可按分组 / 语言过滤 |
+| | `read_template` | 读取模板文件正文全文（Scriban 源文本）与 contentHash；契约路径可未声明直读 |
 | | `list_datasources` | 列出已保存的数据源连接（密码永不回显） |
 | | `list_tables` | 列出指定数据源下全部表（表名、类名、注释；不含列） |
 | | `get_table_detail` | 读取指定表的完整列元数据（类型、主键、自增、可空、注释等） |
@@ -32,16 +32,16 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 | | `update_template_package_metadata` | 更新包说明与基础包名（只传要改的字段，未传字段保持不变） |
 | | `copy_template_package` | 复制模板包为新用户包（内置包可一键复制为可写用户包后修改） |
 | 渲染预览（2） | `render_template` | 以合成表上下文渲染单个模板，语法错误精确到行列；支持可选 `variables` / `modules` 片段渲染（返回文本不落盘） |
-| | `preview_generation` | 批量生成 dry-run 预览（零写盘）：table / module / project 三作用域混跑的文件计划与未映射类型清单 |
-| 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run；建议先 `preview_generation` 确认） |
+| | `preview_generation` | 批量生成 dry-run 预览（零写盘）：table / module / project 三作用域混跑的文件计划、未映射类型清单与结构化诊断（`namingReport` / `pathWarnings` / `coverageWarnings` / `platformTableExcluded`） |
+| 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run；建议先 `preview_generation` 确认；回执与 preview 同源返回命名报告、预检告警、覆盖告警与平台表排除记录） |
 | 数据源管理（4） | `add_datasource` | 新增数据源连接（密码 DPAPI 加密入库） |
 | | `update_datasource` | 按名更新连接（只传要改的字段） |
 | | `delete_datasource` | 按名删除连接 |
 | | `test_connection` | 测试连通性（10 秒超时）：传 `datasource` 按已保存连接测试，或传完整明文参数直测（不入库不留痕） |
 
-`generate` 全参数显式、不读写配置记忆：`package`（包名）与 `tables`（内联表结构，列元数据自带，建议先用 `get_table_detail` 取回）必填；`files` 省略时默认选择包内全部启用条目；`workspaceRoot` / `codeDirectory` 指定输出位置；`duplicateStrategy` 控制同名文件覆盖（`overwrite`）或跳过（`skip`）。
+`generate` 全参数显式、不读写配置记忆：`package`（包名）必填；`tables` 按所选模板分型——所选模板（`files` 过滤后）含 table 作用域条目时必填非空（内联表结构，列元数据自带，建议先用 `get_table_detail` 取回），纯 module/project 作用域集合可省略；`files` 省略时默认选择包内全部启用条目；`workspaceRoot` / `codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表不写盘，排除表规则一律生效）；`duplicateStrategy` 控制同名文件覆盖（`overwrite`）或跳过（`skip`），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
 
-`preview_generation` / `generate` 可选参数 `variables` 与 `modules`（两工具含义一致）：`variables` 为对象，逐键注入模板 `vars.*` 命名空间（如 `{"appName":"demo"}`，键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝）；`modules` 为数组（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此清单逐个渲染，元素 `name` 必填、其余字段原样注入 `module.*`，勾选 module 作用域模板但省略 `modules` 时结构化报错。模板作用域由包清单 `files[].scope` 声明：`table`（缺省，按表集逐表渲染，相对输出根）/ `module`（按 modules 清单逐个，相对输出根）/ `project`（整次渲染一次，相对 `workspaceRoot`），三种作用域同次调用可混跑；`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件。
+`preview_generation` / `generate` 可选参数 `variables` 与 `modules`（两工具含义一致）：`variables` 为对象，逐键注入模板 `vars.*` 命名空间（如 `{"appName":"demo"}`，键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝；命名契约键 `tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule` 同样经此透传，优先级高于 `manifest.naming`）；`modules` 为数组（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此清单逐个渲染，元素 `name` 必填、其余字段原样注入 `module.*`，勾选 module 作用域模板但省略 `modules` 时结构化报错。模板作用域由包清单 `files[].scope` 声明：`table`（缺省，按表集逐表渲染）/ `module`（按 modules 清单逐个）/ `project`（整次渲染一次），三种作用域同次调用可混跑；输出基准由 `files[].root` 声明：未声明=legacy（table/module 相对输出根、project 相对工作区根）、`output`（工作区根+相对输出根）、`workspace`（工作区根）、`web`（工作区根+`webDirectory`）；`workspace` / `web` 禁止 `..`，三种根最终路径都必须落在 `workspaceRoot` 内；`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件。
 
 ### 构建发布
 
@@ -105,7 +105,7 @@ C:\path\to\DbCodeGen.McpServer.exe
 ### 批量代码生成
 
 - 多选表 × 模板包 → 渲染 → dry-run 预览（新增 / 覆盖 / 跳过分类）→ 确认后安全写盘
-- 支持输出到 `src/main/resources` 等代码根外目录（`../` 越级），生成日志全程记录
+- 支持输出到 `src/main/resources` 等代码根外目录（`output`/legacy 根允许 `../` 工作区根内越级；显式 `workspace`/`web` 根禁止 `..`），生成日志全程记录
 ![img_3.png](images/img_3.png)
 ![img_4.png](images/img_4.png)
 ### AI 写模板（全自动）

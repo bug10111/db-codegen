@@ -31,8 +31,10 @@ internal static class GenerationRequestFactory
     /// <param name="variables">调用方注入变量对象，逐键注入渲染上下文 vars.* 命名空间；值支持任意 JSON 类型，可为省略。</param>
     /// <param name="modules">模块清单（如 [{"name":"account"}]），module 作用域模板按此逐个渲染；可省略。</param>
     /// <param name="cancellationToken">取消标记。</param>
+    /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；非法值结构化拒绝。</param>
+    /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false 表示命中平台表规则时排除）；不影响排除表规则。</param>
     /// <returns>可直接提交 Core 生成服务的请求。</returns>
-    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径、所选模板含 table 作用域条目但未提供表或 variables/modules 元素结构非法时抛出。</exception>
+    /// <exception cref="ArgumentException">任一必填入参为空、策略文本非法、文件清单含包内不存在的路径、所选模板含 table 作用域条目但未提供表、variables/modules 元素结构非法或 webDirectory 非法时抛出。</exception>
     public static async Task<GenerationRequest> CreateAsync(
         ITemplatePackageService packageService,
         string package,
@@ -45,7 +47,9 @@ internal static class GenerationRequestFactory
         bool persistLastUsedPaths,
         IReadOnlyDictionary<string, JsonElement>? variables,
         IReadOnlyList<Dictionary<string, object?>>? modules,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? webDirectory = null,
+        bool includePlatformTables = false)
     {
         ArgumentNullException.ThrowIfNull(packageService);
         if (string.IsNullOrWhiteSpace(package))
@@ -108,7 +112,9 @@ internal static class GenerationRequestFactory
             strategy,
             persistLastUsedPaths,
             parsedVariables,
-            parsedModules);
+            parsedModules,
+            webDirectory,
+            includePlatformTables);
     }
 
     /// <summary>
@@ -256,7 +262,8 @@ internal static class GenerationRequestFactory
             List<TemplateFileSelection> defaultSelections = new(enabledFiles.Count);
             foreach (TemplateFileInfo file in enabledFiles)
             {
-                defaultSelections.Add(new TemplateFileSelection(file.RelativeTemplatePath, file.OutputPath, isSelected: true, file.Scope));
+                defaultSelections.Add(new TemplateFileSelection(
+                    file.RelativeTemplatePath, file.OutputPath, isSelected: true, file.Scope, file.OutputRoot, file.Role));
             }
 
             if (defaultSelections.Count == 0)
@@ -285,7 +292,8 @@ internal static class GenerationRequestFactory
                     $"模板文件不存在：包 {packageInfo.Name} 中未声明模板路径 {normalized}；请用 list_templates 查看包内全部路径。");
             }
 
-            selections.Add(new TemplateFileSelection(entry.RelativeTemplatePath, entry.OutputPath, isSelected: true, entry.Scope));
+            selections.Add(new TemplateFileSelection(
+                entry.RelativeTemplatePath, entry.OutputPath, isSelected: true, entry.Scope, entry.OutputRoot, entry.Role));
         }
 
         return selections;

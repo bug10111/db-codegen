@@ -24,7 +24,10 @@ public sealed class GenerationRequest
     /// <param name="persistLastUsedPaths">生成成功后是否回写最近生成路径记忆（工作区根与代码目录写回配置并落盘），默认 true 保持桌面端既有行为；MCP 等无记忆态调用方显式置 false 实现零配置副作用。</param>
     /// <param name="variables">本次生成的调用方变量集合，逐键注入渲染上下文 vars.* 命名空间；可为空，键与保留命名空间冲突在作用域输入构造时结构化拒绝。</param>
     /// <param name="modules">本次生成的模块清单，module 作用域模板按此清单逐个渲染；可为空，勾选 module 作用域模板但未提供时结构化报错。</param>
+    /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；非法值结构化拒绝。</param>
+    /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false 表示命中平台表规则时排除）；不影响排除表规则。</param>
     /// <exception cref="ArgumentNullException">package、tables 或 selectedFiles 为 null 时抛出。</exception>
+    /// <exception cref="ArgumentException">webDirectory 非法时抛出。</exception>
     public GenerationRequest(
         TemplatePackageInfo package,
         IReadOnlyList<TableInfo> tables,
@@ -37,7 +40,9 @@ public sealed class GenerationRequest
         DuplicateFileStrategy duplicateFileStrategy = DuplicateFileStrategy.Overwrite,
         bool persistLastUsedPaths = true,
         IReadOnlyDictionary<string, object?>? variables = null,
-        IReadOnlyList<ModuleContext>? modules = null)
+        IReadOnlyList<ModuleContext>? modules = null,
+        string? webDirectory = null,
+        bool includePlatformTables = false)
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentNullException.ThrowIfNull(tables);
@@ -54,6 +59,8 @@ public sealed class GenerationRequest
         PersistLastUsedPaths = persistLastUsedPaths;
         Variables = variables;
         Modules = modules;
+        WebDirectory = WebDirectoryResolver.Normalize(webDirectory);
+        IncludePlatformTables = includePlatformTables;
     }
 
     /// <summary>
@@ -118,4 +125,15 @@ public sealed class GenerationRequest
     /// 勾选 module 作用域模板但未提供清单时，生成编排结构化报错。
     /// </summary>
     public IReadOnlyList<ModuleContext>? Modules { get; }
+
+    /// <summary>
+    /// web 目录（相对 workspaceRoot，正斜杠规范化），root=web 的模板输出以此为基准；缺省 web。
+    /// </summary>
+    public string WebDirectory { get; }
+
+    /// <summary>
+    /// 是否显式允许生成平台表：false 时命中平台表规则的表中止生成并在 dry-run 回执中列出；
+    /// true 时平台表参与生成（回执仍标注命中）。排除表规则不受本开关影响。
+    /// </summary>
+    public bool IncludePlatformTables { get; }
 }

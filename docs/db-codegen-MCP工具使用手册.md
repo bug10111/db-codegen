@@ -16,11 +16,11 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 
 ## 2. 工具总览
 
-19 个工具按四层能力分类。除「模板编辑」「代码生成」「数据源管理」外全部只读。
+25 个工具按六层能力分类。除「模板编辑」「模板包管理」「代码生成」「数据源管理」外全部只读。
 
 | 分类 | 工具 | 一句话用途 | 读写性 |
 | --- | --- | --- | --- |
-| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含只读标记与文件数 | 只读 |
+| 只读枚举（8） | `list_template_packages` | 列出全部模板包（内置 + 用户），含只读标记、文件数与能力元数据（role/stack/scopes/hasBackendView/hasWebPage/contractPath/deployModes，契约缺失回执 MissingContract 告警） | 只读 |
 | | `list_templates` | 列出指定包内模板条目，可按分组/语言过滤 | 只读 |
 | | `read_template` | 读取模板文件正文全文（Scriban 源文本） | 只读 |
 | | `list_datasources` | 列出已保存的数据源连接（密码永不回显） | 只读 |
@@ -28,10 +28,16 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 | | `get_table_detail` | 读取指定表完整列元数据 | 只读（连库） |
 | | `get_type_map` | 查看生效的类型映射表（全局 > 包 typeMap > 兜底） | 只读 |
 | | `check_type_mapping` | 生成前预检未映射的数据库类型 | 只读（连库） |
-| 模板编辑（4） | `save_template_content` | 覆写保存用户包内既有模板正文 | 写（模板） |
+| 模板编辑（5） | `save_template_content` | 覆写保存用户包内既有模板正文 | 写（模板） |
+| | `save_template_edit` | 子串级单处精确替换（oldText 唯一命中 + 可选 contentHash 条件写） | 写（模板） |
 | | `create_template_file` | 向用户包新增空模板文件（可含分组目录） | 写（模板） |
 | | `delete_template_file` | 删除用户包内模板文件（物理删除，不可恢复） | 写（模板） |
 | | `rename_template_file` | 重命名/移动用户包内模板文件 | 写（模板） |
+| 模板包管理（5） | `create_template_package` | 新建用户模板包（可设说明/基础包名） | 写（模板） |
+| | `copy_template_package` | 复制模板包为新用户包（内置包可复制后修改） | 写（模板） |
+| | `rename_template_package` | 重命名用户模板包（勾选记忆不迁移） | 写（模板） |
+| | `update_template_package_metadata` | 更新包说明/基础包名/包级类型映射 | 写（模板） |
+| | `delete_template_package` | 删除用户模板包（confirm=true，不可恢复） | 写（模板） |
 | 预览（2） | `render_template` | 以合成表上下文渲染单个模板（无需连库） | 只读 |
 | | `preview_generation` | 批量生成 dry-run 预览（零写盘） | 只读 |
 | 代码生成（1） | `generate` | 执行批量生成并写盘（内部先重算 dry-run） | **写（代码文件）** |
@@ -79,7 +85,7 @@ get_table_detail → check_type_mapping → list_templates → read_template
 5. `preview_generation`：dry-run 出文件计划——表 × 模板笛卡尔积、每条目标路径与 `new/overwrite/skip` 分类、未映射类型清单。**零写盘**，确认前零风险。
 6. `generate`：确认文件计划后落盘。`generate` 内部会强制重算 dry-run 再写盘，**无确认弹窗**，所以第 5 步 preview 是唯一的人工/智能体把关点。
 
-参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`workspaceRoot`/`codeDirectory` 指定输出位置；`duplicateStrategy` 控制 `overwrite`（覆盖）/`skip`（同名一律跳过），缺省 `overwrite`。
+参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`workspaceRoot`/`codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表排除并在 `platformTableExcluded` 列出，排除表规则不受该开关影响）；`duplicateStrategy` 控制 `overwrite`（内容不同才覆盖）/`skip`（同名一律跳过），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
 
 ### 3.4 流D：模板维护
 
@@ -156,6 +162,15 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `packages[].isBuiltin` | boolean | 是否内置包（只读，不可编辑删除） |
 | `packages[].fileCount` | integer | 包内模板文件数 |
 | `packages[].modifiedTime` | string | 包目录最近修改时间（ISO 8601 本地时区） |
+| `packages[].role` | string | 包角色：`backend` / `scaffold` / `web` / `fullstack` / `utility`（manifest 声明优先，缺省按产物推断） |
+| `packages[].stack` | string | 技术栈：`java` / `net` / `web` / `mixed` |
+| `packages[].scopes` | array of string | 文件作用域集合（`table` / `module` / `project`，顺序固定） |
+| `packages[].hasBackendView` | boolean | 是否具备后端 View 层产出 |
+| `packages[].hasWebPage` | boolean | 是否具备前端业务页面产出 |
+| `packages[].contractPath` | string | 契约文档相对包根路径（缺省 `README.md.scriban`） |
+| `packages[].deployModes` | array of string | 支持的部署形态（如 `standalone` / `cloud`） |
+| `packages[].hasContract` | boolean | 契约文档是否实际存在 |
+| `packages[].warnings` | array of string | 能力/契约告警（如 `MissingContract：…`，非阻断） |
 
 **错误态**：`InternalError`（包枚举底层异常，罕见）。
 
@@ -187,8 +202,13 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `templates[].output` | string | 输出相对路径模板，支持 `{{变量}}` 占位 |
 | `templates[].enabled` | boolean | 是否默认参与生成（`files` 省略时的选择依据） |
 | `templates[].language` | string | 按文件名语言段推导的目标语言（Java/CSharp/Xml/Sql/Json/Plain） |
+| `templates[].scope` | string | 模板作用域：`table`（缺省）/ `module` / `project` |
+| `templates[].root` | string | 输出根语义：`legacy`（未声明，按作用域沿用既有语义）/ `output` / `workspace` / `web` |
+| `templates[].role` | string | 产出角色（manifest 声明优先，缺省按输出路径推断，如 `backendView` / `webPage`） |
+| `templates[].isContract` | boolean | 是否包契约文档条目 |
+| `warnings` | array of string | 契约缺失等非阻断告警（`MissingContract：…`） |
 
-**包根 README 文档型条目**：当包根存在 `README.md.scriban` 且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path=README.md.scriban`、`output` 为空串、`enabled=false`、`language=Plain`、`scope=project`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤仅在 `plain` 时命中。
+**包契约文档型条目**：当包根存在 `manifest.contractPath`（缺省 `README.md.scriban`）且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path` 为契约路径、`output` 为空串、`enabled=false`、`scope=project`、`isContract=true`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤按契约文件名的语言段判定。
 
 **错误态**：`TemplatePackageError`（包不存在）；`InvalidArgument`（`type` 非法）。
 
@@ -219,9 +239,9 @@ list_templates → read_template → 编辑（四选一）→ render_template �
 | `content` | string | 模板正文全文（UTF-8 去 BOM 解码） |
 | `contentHash` | string | 正文内容摘要（SHA256 前 16 位 hex 小写），供 `save_template_edit` 条件写期望值 |
 
-**包根 README 窄例外**：包根 `README.md.scriban` 即使未在 `template.json files[]` 声明也可读取；返回文档型元数据（`output` 为空串、`enabled=false`、`language=Plain`），读取仍经防目录穿越校验。`sub/README.md.scriban`、`../README.md.scriban`、绝对路径/盘符形态与其它未声明文件一律拒绝。
+**包契约文档窄例外**：`manifest.contractPath`（缺省包根 `README.md.scriban`）即使未在 `template.json files[]` 声明也可读取；返回文档型元数据（`output` 为空串、`enabled=false`），读取仍经防目录穿越校验。契约路径之外的子目录形态、父级跳转形态、绝对路径/盘符形态与其它未声明文件一律拒绝；契约缺失时回执 `MissingContract` 告警（非阻断）。
 
-**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件，杜绝任意文件读取；包根 `README.md.scriban` 窄例外除外，文件不存在同样报此错误）。
+**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件或 `manifest.contractPath` 窄例外，杜绝任意文件读取；契约文件不存在同样报此错误）。
 
 **调用示例**：
 
@@ -540,7 +560,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ### 4.14 `preview_generation`
 
-**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回文件计划与未映射类型清单，是 `generate` 前的唯一把关点，必须在生成前调用。文件计划按模板作用域三路展开：`table`（缺省）按表 × 模板笛卡尔积；`module` 按调用方 `modules` 清单逐个；`project` 整次渲染一次——三种作用域同次调用可混跑。
+**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回文件计划、未映射类型清单与结构化诊断（`namingReport` / `pathWarnings` / `coverageWarnings` / `platformTableExcluded`），是 `generate` 前的唯一把关点，必须在生成前调用。文件计划按模板作用域三路展开：`table`（缺省）按表 × 模板笛卡尔积；`module` 按调用方 `modules` 清单逐个；`project` 整次渲染一次——三种作用域同次调用可混跑。
 
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
@@ -550,9 +570,11 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `codeDirectory` | string | 是 | — | 代码目录：项目内完整相对路径含包名（如 `src/main/java/com/example/demo`）；解析出基础包名与相对输出根，basePackage 末段即「模块」 |
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
 | `files` | array of string | 否 | null | 参与生成的模板相对路径清单；**省略时默认选择包内全部启用条目**；清单含包内不存在的路径会被拒绝 |
-| `duplicateStrategy` | string | 否 | `"overwrite"` | 同名目标文件处理策略：`overwrite`（内容相同跳过/不同覆盖）/ `skip`（存在即跳过）；大小写不敏感，空白或非法取值被拒绝 |
-| `variables` | object | 否 | null | 调用方变量对象，逐键注入模板 `vars.*`（如 `{"appName":"demo"}`）；键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝 |
+| `duplicateStrategy` | string | 否 | `"skip"` | 同名目标文件处理策略：`overwrite`（内容相同跳过/不同覆盖）/ `skip`（同名一律跳过）；大小写不敏感，空白或非法取值被拒绝。MCP 缺省 `skip`（桌面端 App 缺省仍为 `overwrite`） |
+| `variables` | object | 否 | null | 调用方变量对象，逐键注入模板 `vars.*`（如 `{"appName":"demo"}`）；键与保留命名空间 `table/column/package/tool/vars/module/tables` 冲突时结构化拒绝；命名契约键 `tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule` 在此透传，优先级高于 `manifest.naming` |
 | `modules` | array of object | 否 | null | 模块清单（如 `[{"name":"account"}]`），包内 `scope: "module"` 模板按此逐个渲染；元素 `name` 必填且清单内不得重复，name 之外字段原样注入 `module.*`；**勾选 module 作用域模板但省略本参时结构化报错** |
+| `webDirectory` | string | 否 | `"web"` | root=web 模板的前端锚点（相对 `workspaceRoot`）；必须为相对路径、无盘符前缀、不含 `..`，非法即 `InvalidArgument` |
+| `includePlatformTables` | boolean | 否 | `false` | true 时平台表参与生成（回执仍列入 `platformTableExcluded` 且 `excluded=false`）；不影响 `excludeTables`（排除表一律不生成） |
 
 **返回**：
 
@@ -572,17 +594,31 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `unmappedTypes[].column` | string | 出现该类型的列名 |
 | `unmappedTypes[].occurrences` | integer | 出现次数 |
 | `pathWarnings` | array | 输出路径告警清单（坏路径预检，**非阻断**、不改变文件计划，但生成前必须核对）；无告警时为空列表 |
-| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空，典型诱因 `codeDirectory` 传 `.` 等无包段输入）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符，如 `src/main/java//X.cs`）/ `EmptyIteration`（模板内 for 循环迭代源空集合/null 的零迭代信号，守卫文案设计场景可按告警文案指引忽略）/ `InvalidJavaPackageSegment`（`src/main/java` 之后的 Java 包段不是合法标识符：连字符/非法字符/数字开头/Java 关键字，模板侧应用 `tool.javaIdent` 归一化 kebab 模块名） |
+| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符）/ `EmptyIteration`（模板内 for 循环零迭代信号）/ `InvalidJavaPackageSegment`（Java 包段非法标识符）/ `DuplicatePackageSegment`（src/main/java 之后连续重复包段）/ `NonLowercasePackageSegment`（包段含大写字母）/ `TableNameRoundTripMismatch`（模板用 hump2/3Underline(table.className) 反推物理表名）/ `PermissionKeyMismatch`（显式权限模块与 modules[0].name kebab 形态不一致）/ `WorkspaceRootMayBeAggregate`（workspaceRoot 自身疑似 Maven 聚合根且 codeDirectory 未落入模块目录） |
 | `pathWarnings[].template` | string | 首次出现该告警的模板相对路径 |
 | `pathWarnings[].samplePath` | string | 首次出现的渲染后路径样例 |
 | `pathWarnings[].occurrences` | integer | 该告警在本次生成范围内的总出现次数（同模板同种类跨表归并） |
 | `pathWarnings[].message` | string | 人类可读告警说明（中文，含修复指引） |
+| `namingReport` | array | 逐表命名报告，仅含实际参与生成的表（被平台表/排除表规则排除的表不出现） |
+| `namingReport[].rawName` | string | 数据库真实物理表名（永不变形） |
+| `namingReport[].entityName` | string | 派生实体名（PascalCase，可含 entitySuffix） |
+| `namingReport[].variableName` | string | 派生变量名（camelCase） |
+| `namingReport[].packagePath` | string | 该表业务代码点号形态包路径（包段已小写归一与连续去重） |
+| `namingReport[].tableNameInCode` | string | 代码内物理表名（恒等于 rawName） |
+| `namingReport[].permissionKey` | string | 权限键模块段（`{permissionKey}:{op}` 的前缀） |
+| `coverageWarnings` | array | 生成覆盖告警：`NoBackendView`（含后端但缺后端 View 层）/ `NoWebPage`（包具备前端页面能力但未选页面模板）/ `OnlyBackendGenerated`（仅选后端模板）；无告警时为空列表 |
+| `coverageWarnings[].kind` | string | 告警种类 |
+| `coverageWarnings[].message` | string | 人类可读告警说明（含处置指引） |
+| `platformTableExcluded` | array | 平台表/排除表命中记录；`excluded=false` 表示平台表经 `includePlatformTables=true` 显式放行 |
+| `platformTableExcluded[].tableName` | string | 数据库真实物理表名 |
+| `platformTableExcluded[].rule` | string | 命中规则描述（`platform:prefix:sys_` / `exclude:exact:xxx`） |
+| `platformTableExcluded[].excluded` | boolean | 是否被排除 |
 
 `action` 分类语义：`new` = 目标不存在（将新增写盘）；`overwrite` = 目标存在且内容不同（将覆盖，非 UTF-8 遗留文件按覆盖处理）；`skip` = 目标存在但不写盘——`skip` 策略下同名一律跳过；`overwrite` 策略下内容相同（行尾归一化后比较）也跳过。
 
-**模板作用域与路径基准**：作用域由包清单 `files[].scope` 声明（`table` 缺省 / `module` / `project`）。`table` 与 `module` 作用域的 `output` 相对输出根（工作区根 + codeDirectory 派生的相对输出根）；`project` 作用域的 `output` 相对 `workspaceRoot`。`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作。防目录穿越对三种作用域一致：解析后必须落在工作区根内。
+**模板作用域与路径基准**：作用域由包清单 `files[].scope` 声明（`table` 缺省 / `module` / `project`）；输出基准由 `files[].root` 声明（未声明=legacy：table/module 相对输出根、project 相对工作区根；`output`=工作区根+相对输出根；`workspace`=工作区根；`web`=工作区根+`webDirectory`，缺省 `web`）。`workspace` / `web` 根直接拒绝 `..` 段；legacy 与 `output` 根允许 `..` 在工作区根内越出相对输出根；三种根解析后的最终路径都必须落在 `workspaceRoot` 内，渲染期产出的绝对路径/盘符前缀一律拒绝。`project` / `module` 模板可用 `{{tables}}` 迭代本次全部表（元素字段与 `table.*` 同构）生成胶水文件（如 AppDbContext 的 DbSet 登记、DI 装配点），杜绝"往既有文件插入"动作。
 
-**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空——所选模板含 table 作用域条目时；`files` 含包外路径；`duplicateStrategy` 非法；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
+**错误态**：`TemplatePackageError`（包不存在；模板渲染失败；输出路径越界等生成域错误，消息含模板名行列或被拒路径；勾选 module 作用域模板但未传 `modules`；模块名重复）；`InvalidArgument`（必填参缺失；`tables` 为空——所选模板含 table 作用域条目时；`files` 含包外路径；`duplicateStrategy` 非法；`webDirectory` 非法（绝对路径/盘符/`..`）；`variables` 键与保留命名空间冲突；`modules` 元素缺 `name`）；`InternalError`。
 
 **调用示例**：
 
@@ -604,7 +640,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 **用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。
 
-参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `duplicateStrategy` / `variables` / `modules` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
+参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `duplicateStrategy`（缺省 `skip`）/ `variables` / `modules` / `webDirectory` / `includePlatformTables` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
 
 **返回**：
 
@@ -619,6 +655,10 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `logs[].timestamp` | string | 日志时间（ISO 8601 本地时区） |
 | `logs[].level` | string | 日志级别：`info` / `warning` / `error` |
 | `logs[].message` | string | 目标文件相对路径与结果描述，不含敏感信息 |
+| `namingReport` | array | 逐表命名报告，字段同 `preview_generation`（`rawName` / `entityName` / `variableName` / `packagePath` / `tableNameInCode` / `permissionKey`） |
+| `pathWarnings` | array | 预检告警清单，字段与种类同 `preview_generation`（非阻断，写盘回执仍透出） |
+| `coverageWarnings` | array | 生成覆盖告警（`NoBackendView` / `NoWebPage` / `OnlyBackendGenerated`） |
+| `platformTableExcluded` | array | 平台表/排除表命中记录（字段同 `preview_generation`；`excluded=true` 表示未写盘，`excluded=false` 表示经 `includePlatformTables=true` 显式放行） |
 
 **错误态**：同 `preview_generation`（`TemplatePackageError` / `InvalidArgument` / `InternalError`）。
 
@@ -636,9 +676,11 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
   "workspaceRoot": "C:\\work\\demo-project",
   "codeDirectory": "src/main/java/com/example/demo",
   "files": ["entity.java.scriban", "mapper.java.scriban"],
-  "duplicateStrategy": "overwrite",
+  "duplicateStrategy": "skip",
   "variables": { "appName": "demo" },
-  "modules": [ { "name": "account" } ]
+  "modules": [ { "name": "account" } ],
+  "webDirectory": "web",
+  "includePlatformTables": false
 }
 ```
 

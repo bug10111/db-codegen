@@ -21,6 +21,27 @@ public static class TemplatePackageLoader
     public const string SupportedEngine = "scriban";
 
     /// <summary>
+    /// 契约文档缺省相对包根路径：manifest 未声明 contractPath 时按该路径发现传参契约。
+    /// </summary>
+    public const string DefaultContractPath = "README.md.scriban";
+
+    /// <summary>
+    /// 合法包角色集合（backend / scaffold / web / fullstack / utility）。
+    /// </summary>
+    private static readonly HashSet<string> KnownPackageRoles = new(StringComparer.Ordinal)
+    {
+        "backend", "scaffold", "web", "fullstack", "utility"
+    };
+
+    /// <summary>
+    /// 合法技术栈集合（java / net / web / mixed）。
+    /// </summary>
+    private static readonly HashSet<string> KnownStacks = new(StringComparer.Ordinal)
+    {
+        "java", "net", "web", "mixed"
+    };
+
+    /// <summary>
     /// 包名校验规则：字母/数字/中划线/下划线组成，且至少含一个字母或数字。
     /// </summary>
     private static readonly Regex PackageNamePattern = new(
@@ -100,16 +121,32 @@ public static class TemplatePackageLoader
             // 作用域解析与校验：非法取值在包加载阶段结构化拒绝，缺省按 table（既有包行为不变）
             TemplateScope scope = TemplateScopeParser.Parse(entry.Scope, templateRelative);
 
+            // 输出根解析与校验：未声明时保持 null（按作用域沿用既有语义），workspace/web 语义在生成侧拒绝 .. 段
+            TemplateOutputRoot? outputRoot = TemplateOutputRootParser.Parse(entry.Root, templateRelative);
+
+            // root=workspace/web 为固定基准目录：输出路径静态含 .. 段时在加载阶段即拒绝（渲染后再由生成侧兜底校验）
+            if ((outputRoot is TemplateOutputRoot.Workspace or TemplateOutputRoot.Web) && ContainsParentTraversal(entry.Output))
+            {
+                throw new TemplatePackageException(
+                    $"模板文件 {templateRelative} 的 root={TemplateOutputRootParser.ToContractText(outputRoot.Value)} 禁止输出路径含 .. 段：{entry.Output}");
+            }
+
+            // 产出角色：声明值优先，缺省按输出路径与模板文件名推断，供能力元数据与覆盖告警消费
+            string role = TemplateFileRoleResolver.Resolve(entry.Role, templateRelative, entry.Output);
+
             files.Add(new TemplateFileInfo
             {
                 RelativeTemplatePath = templateRelative,
                 TemplatePath = templateFullPath,
                 OutputPath = entry.Output,
                 Scope = scope,
+                OutputRoot = outputRoot,
+                Role = role,
                 IsEnabled = entry.Enabled
             });
         }
 
+        TemplateCapabilities capabilities = InferCapabilities(normalized, files);
         return new TemplatePackageInfo
         {
             Name = normalized.Name,
@@ -121,7 +158,18 @@ public static class TemplatePackageLoader
             IsBuiltin = isBuiltin,
             ModifiedTime = Directory.GetLastWriteTime(rootFullPath),
             TypeMap = normalized.TypeMap,
-            Files = files
+            Files = files,
+            Role = capabilities.Role,
+            Stack = capabilities.Stack,
+            Scopes = capabilities.Scopes,
+            HasBackendView = capabilities.HasBackendView,
+            HasWebPage = capabilities.HasWebPage,
+            ContractPath = normalized.ContractPath ?? DefaultContractPath,
+            DeployModes = normalized.DeployModes ?? new List<string>(),
+            PermissionModule = normalized.PermissionModule ?? string.Empty,
+            PlatformTables = normalized.PlatformTables ?? new TableFilterRules(),
+            ExcludeTables = normalized.ExcludeTables ?? new TableFilterRules(),
+            Naming = normalized.Naming
         };
     }
 
@@ -335,6 +383,16 @@ public static class TemplatePackageLoader
         manifest.TypeMap ??= new Dictionary<string, string>();
         manifest.Files ??= new List<TemplateFileEntry>();
 
+        // 能力元数据归一：角色/技术栈/部署形态统一小写，枚举取值非法时结构化拒绝（防声明笔误静默失效）
+        manifest.Role = NormalizeOptionalKnownValue(manifest.Role, KnownPackageRoles, "role");
+        manifest.Stack = NormalizeOptionalKnownValue(manifest.Stack, KnownStacks, "stack");
+        manifest.PermissionModule = string.IsNullOrWhiteSpace(manifest.PermissionModule) ? null : manifest.PermissionModule.Trim();
+        manifest.DeployModes = NormalizeStringList(manifest.DeployModes);
+        manifest.ContractPath = NormalizeContractPath(manifest.ContractPath);
+        manifest.PlatformTables = NormalizeFilterRules(manifest.PlatformTables, "platformTables");
+        manifest.ExcludeTables = NormalizeFilterRules(manifest.ExcludeTables, "excludeTables");
+        manifest.Naming = NormalizeNamingOptions(manifest.Naming);
+
         // 清理类型映射中的空键空值，键统一小写化，便于渲染侧大小写不敏感命中
         var cleanedTypeMap = new Dictionary<string, string>();
         foreach (KeyValuePair<string, string> pair in manifest.TypeMap)
@@ -358,9 +416,180 @@ public static class TemplatePackageLoader
             entry.Template = (entry.Template ?? string.Empty).Trim();
             entry.Output = (entry.Output ?? string.Empty).Trim();
             entry.Scope = string.IsNullOrWhiteSpace(entry.Scope) ? null : entry.Scope.Trim();
+            entry.Root = string.IsNullOrWhiteSpace(entry.Root) ? null : entry.Root.Trim();
+            entry.Role = string.IsNullOrWhiteSpace(entry.Role) ? null : entry.Role.Trim();
         }
 
         return manifest;
+    }
+
+    /// <summary>
+    /// 判断输出路径模板是否静态含 .. 段（正反斜杠均识别）；模板表达式渲染出的 .. 由生成侧兜底校验。
+    /// </summary>
+    /// <param name="outputPathTemplate">输出路径模板。</param>
+    /// <returns>静态含 .. 段时为 true。</returns>
+    private static bool ContainsParentTraversal(string outputPathTemplate)
+    {
+        foreach (string segment in (outputPathTemplate ?? string.Empty).Replace('\\', '/').Split('/'))
+        {
+            if (segment == "..")
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 归一可选枚举文本：空白返回 null（缺省推断），非空白统一小写并校验属于合法集合，非法即结构化拒绝。
+    /// </summary>
+    /// <param name="value">原始文本，可空。</param>
+    /// <param name="knownValues">合法取值集合。</param>
+    /// <param name="fieldName">字段名，供错误消息定位。</param>
+    /// <returns>归一后的取值；空白时为 null。</returns>
+    /// <exception cref="TemplatePackageException">取值非法时抛出。</exception>
+    private static string? NormalizeOptionalKnownValue(string? value, HashSet<string> knownValues, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        string normalized = value.Trim().ToLowerInvariant();
+        if (!knownValues.Contains(normalized))
+        {
+            throw new TemplatePackageException(
+                $"模板包清单字段 {fieldName} 取值非法：{value}；合法取值为 {string.Join(" / ", knownValues)}。");
+        }
+
+        return normalized;
+    }
+
+    /// <summary>
+    /// 归一去空白字符串清单：去空白、剔除空项、保持声明顺序；无有效项时返回 null。
+    /// </summary>
+    /// <param name="values">原始清单，可空。</param>
+    /// <returns>归一后的清单；无有效项时为 null。</returns>
+    private static List<string>? NormalizeStringList(List<string>? values)
+    {
+        if (values is null || values.Count == 0)
+        {
+            return null;
+        }
+
+        var normalized = new List<string>(values.Count);
+        foreach (string value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                normalized.Add(value.Trim());
+            }
+        }
+
+        return normalized.Count == 0 ? null : normalized;
+    }
+
+    /// <summary>
+    /// 归一契约文档路径：空白取缺省 README.md.scriban；非空白按安全相对路径校验（禁止绝对路径、盘符与 .. 段）。
+    /// </summary>
+    /// <param name="contractPath">原始契约路径，可空。</param>
+    /// <returns>归一后的相对路径；空白时为 null（由调用方取缺省常量）。</returns>
+    /// <exception cref="TemplatePackageException">契约路径不安全时抛出。</exception>
+    private static string? NormalizeContractPath(string? contractPath)
+    {
+        if (string.IsNullOrWhiteSpace(contractPath))
+        {
+            return null;
+        }
+
+        string normalized = NormalizeRelativePath(contractPath);
+        if (normalized.Length == 0 || !IsSafeRelativeSkeleton(normalized))
+        {
+            throw new TemplatePackageException($"模板包清单 contractPath 不合法（禁止绝对路径、盘符前缀与 .. 段）：{contractPath}");
+        }
+
+        return normalized;
+    }
+
+    /// <summary>
+    /// 归一表过滤规则：清空白项、正则预编译校验（非法正则结构化拒绝），空规则返回 null。
+    /// </summary>
+    /// <param name="rules">原始规则集合，可空。</param>
+    /// <param name="fieldName">字段名，供错误消息定位。</param>
+    /// <returns>归一后的规则集合；无有效规则时为 null。</returns>
+    /// <exception cref="TemplatePackageException">正则模式非法时抛出。</exception>
+    private static TableFilterRules? NormalizeFilterRules(TableFilterRules? rules, string fieldName)
+    {
+        if (rules is null)
+        {
+            return null;
+        }
+
+        TableFilterRules normalized = new()
+        {
+            Exact = NormalizeStringList(rules.Exact) ?? new List<string>(),
+            Prefixes = NormalizeStringList(rules.Prefixes) ?? new List<string>(),
+            Regex = NormalizeStringList(rules.Regex) ?? new List<string>()
+        };
+
+        // 正则声明在加载阶段预编译校验，避免生成期才暴露灾难性模式或语法错误
+        foreach (string pattern in normalized.Regex)
+        {
+            try
+            {
+                _ = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
+            }
+            catch (ArgumentException exception)
+            {
+                throw new TemplatePackageException($"模板包清单 {fieldName}.regex 模式非法：{pattern}；{exception.Message}", exception);
+            }
+        }
+
+        return normalized.IsEmpty ? null : normalized;
+    }
+
+    /// <summary>
+    /// 归一命名策略声明：字符串去空白、前缀清单清理、packageSegmentCase 校验（lower / preserve），空声明返回 null。
+    /// </summary>
+    /// <param name="options">原始命名策略，可空。</param>
+    /// <returns>归一后的命名策略；无有效字段时为 null。</returns>
+    /// <exception cref="TemplatePackageException">packageSegmentCase 取值非法时抛出。</exception>
+    private static NamingPolicyOptions? NormalizeNamingOptions(NamingPolicyOptions? options)
+    {
+        if (options is null)
+        {
+            return null;
+        }
+
+        string? packageSegmentCase = null;
+        if (!string.IsNullOrWhiteSpace(options.PackageSegmentCase))
+        {
+            packageSegmentCase = options.PackageSegmentCase.Trim().ToLowerInvariant();
+            if (packageSegmentCase is not (ResolvedNamingPolicy.PackageSegmentCaseLower or ResolvedNamingPolicy.PackageSegmentCasePreserve))
+            {
+                throw new TemplatePackageException(
+                    $"模板包清单 naming.packageSegmentCase 取值非法：{options.PackageSegmentCase}；合法取值为 lower / preserve。");
+            }
+        }
+
+        var normalized = new NamingPolicyOptions
+        {
+            StripTablePrefix = options.StripTablePrefix,
+            TablePrefixes = NormalizeStringList(options.TablePrefixes),
+            Singularize = options.Singularize,
+            EntitySuffix = string.IsNullOrWhiteSpace(options.EntitySuffix) ? null : options.EntitySuffix.Trim(),
+            PackageSegmentCase = packageSegmentCase,
+            LayerPrefix = string.IsNullOrWhiteSpace(options.LayerPrefix) ? null : options.LayerPrefix.Trim()
+        };
+
+        bool hasAnyValue = normalized.StripTablePrefix is not null
+            || normalized.TablePrefixes is not null
+            || normalized.Singularize is not null
+            || normalized.EntitySuffix is not null
+            || normalized.PackageSegmentCase is not null
+            || normalized.LayerPrefix is not null;
+        return hasAnyValue ? normalized : null;
     }
 
     /// <summary>
@@ -379,4 +608,120 @@ public static class TemplatePackageLoader
             throw new TemplatePackageException($"不支持的模板引擎：{manifest.Engine}，当前仅支持 {SupportedEngine}。");
         }
     }
+
+    /// <summary>
+    /// 派生包能力元数据：manifest 声明值优先，缺省按文件产物扩展名与产出角色推断，
+    /// 保证既有包（无新字段）也能被工具面判定用途与生成覆盖面。
+    /// </summary>
+    /// <param name="manifest">归一后的清单。</param>
+    /// <param name="files">校验通过的模板文件清单。</param>
+    /// <returns>包能力元数据。</returns>
+    private static TemplateCapabilities InferCapabilities(TemplateManifest manifest, IReadOnlyList<TemplateFileInfo> files)
+    {
+        bool hasJava = files.Any(file => ProducesExtension(file, "java"));
+        bool hasTs = files.Any(file => ProducesExtension(file, "ts") || ProducesExtension(file, "tsx"));
+        bool hasCs = files.Any(file => ProducesExtension(file, "cs"));
+
+        string role = manifest.Role ?? (hasJava ? "backend" : hasTs ? "web" : "utility");
+        string stack = manifest.Stack ?? InferStack(hasJava, hasTs, hasCs);
+
+        // 作用域去重派生：顺序固定 table / module / project，供能力元数据与前端工具面直读
+        var scopes = new List<string>();
+        foreach (TemplateScope scope in new[] { TemplateScope.Table, TemplateScope.Module, TemplateScope.Project })
+        {
+            if (files.Any(file => file.Scope == scope))
+            {
+                scopes.Add(TemplateScopeParser.ToContractText(scope));
+            }
+        }
+
+        bool hasBackendView = manifest.HasBackendView ?? files.Any(file =>
+            file.Role == TemplateFileRoleResolver.BackendView
+            || NormalizePathForCapability(file.OutputPath).Contains("/view/", StringComparison.Ordinal)
+            || NormalizePathForCapability(file.OutputPath).EndsWith("view.java", StringComparison.Ordinal));
+
+        bool hasWebPage = manifest.HasWebPage ?? files.Any(file =>
+            file.Role is TemplateFileRoleResolver.WebPage
+                or TemplateFileRoleResolver.WebApi
+                or TemplateFileRoleResolver.WebDto
+                or TemplateFileRoleResolver.WebRoute
+                or TemplateFileRoleResolver.WebMenu
+            || IsWebOutputPath(NormalizePathForCapability(file.OutputPath)));
+
+        return new TemplateCapabilities(role, stack, scopes, hasBackendView, hasWebPage);
+    }
+
+    /// <summary>
+    /// 按产物扩展名种类推断技术栈：单一语言栈返回 java/web/net，多栈或无识别产物返回 mixed。
+    /// </summary>
+    /// <param name="hasJava">是否存在 Java 产物。</param>
+    /// <param name="hasTs">是否存在 TypeScript/TSX 产物。</param>
+    /// <param name="hasCs">是否存在 C# 产物。</param>
+    /// <returns>技术栈文本。</returns>
+    private static string InferStack(bool hasJava, bool hasTs, bool hasCs)
+    {
+        int kindCount = (hasJava ? 1 : 0) + (hasTs ? 1 : 0) + (hasCs ? 1 : 0);
+        if (kindCount != 1)
+        {
+            return "mixed";
+        }
+
+        return hasJava ? "java" : hasTs ? "web" : "net";
+    }
+
+    /// <summary>
+    /// 判断模板条目是否产出指定扩展名：以输出路径（优先）或模板文件名的最后一个扩展段为准。
+    /// </summary>
+    /// <param name="file">模板文件运行时信息。</param>
+    /// <param name="extension">扩展名（不含点，大小写不敏感）。</param>
+    /// <returns>产出该扩展名时为 true。</returns>
+    private static bool ProducesExtension(TemplateFileInfo file, string extension)
+    {
+        string source = string.IsNullOrWhiteSpace(file.OutputPath) ? file.RelativeTemplatePath : file.OutputPath;
+        int separatorIndex = Math.Max(source.LastIndexOf('/'), source.LastIndexOf('\\'));
+        int dotIndex = source.LastIndexOf('.');
+        if (dotIndex <= separatorIndex || dotIndex == source.Length - 1)
+        {
+            return false;
+        }
+
+        return string.Equals(source[(dotIndex + 1)..], extension, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 判断归一化输出路径是否位于 web 前端目录（web/ 开头或含 /web/ 片段）或页面目录（/pages/）。
+    /// </summary>
+    /// <param name="normalizedPath">小写归一后的输出路径。</param>
+    /// <returns>属于前端产出路径时为 true。</returns>
+    private static bool IsWebOutputPath(string normalizedPath)
+    {
+        return normalizedPath.StartsWith("web/", StringComparison.Ordinal)
+            || normalizedPath.Contains("/web/", StringComparison.Ordinal)
+            || normalizedPath.Contains("/pages/", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 将路径归一为小写正斜杠形态，供能力推断的片段匹配使用。
+    /// </summary>
+    /// <param name="path">原始路径，可空。</param>
+    /// <returns>归一后的路径；空值返回空串。</returns>
+    private static string NormalizePathForCapability(string? path)
+    {
+        return (path ?? string.Empty).Replace('\\', '/').ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// 包能力元数据中间载体。
+    /// </summary>
+    /// <param name="Role">包角色。</param>
+    /// <param name="Stack">技术栈。</param>
+    /// <param name="Scopes">作用域清单。</param>
+    /// <param name="HasBackendView">是否具备后端 View 层。</param>
+    /// <param name="HasWebPage">是否具备前端页面。</param>
+    private sealed record TemplateCapabilities(
+        string Role,
+        string Stack,
+        List<string> Scopes,
+        bool HasBackendView,
+        bool HasWebPage);
 }

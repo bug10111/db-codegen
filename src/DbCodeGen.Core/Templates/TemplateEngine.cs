@@ -569,6 +569,9 @@ public sealed class TemplateEngine
             tableObject.SetValue("schemaName", table.SchemaName, true);
         }
 
+        // 实体名按命名策略派生；未派生时回退类名，保证既有上下文行为不变
+        string entityName = string.IsNullOrEmpty(table.EntityName) ? table.ClassName : table.EntityName;
+        tableObject.SetValue("entityName", entityName, true);
         tableObject.SetValue("className", table.ClassName, true);
         tableObject.SetValue("variableName", table.VariableName, true);
         if (table.Comment is not null)
@@ -638,7 +641,9 @@ public sealed class TemplateEngine
     }
 
     /// <summary>
-    /// 将 package 侧上下文转换为脚本对象，注入 name / dir / basePackage。
+    /// 将 package 侧上下文转换为脚本对象，注入 name / dir / basePackage / segments / permissionModule / naming。
+    /// segments 为归一后的包段清单（全小写、kebab 归一、连续重复段去重），permissionModule 为请求级派生值，
+    /// naming 为生效命名策略（stripTablePrefix/tablePrefixes/singularize/entitySuffix/packageSegmentCase/layerPrefix）。
     /// </summary>
     private static ScriptObject BuildPackageObject(TemplatePackageContext packageContext)
     {
@@ -649,6 +654,31 @@ public sealed class TemplateEngine
         {
             packageObject.SetValue("basePackage", packageContext.BasePackage, true);
         }
+
+        var segmentsArray = new ScriptArray();
+        foreach (string segment in packageContext.Segments)
+        {
+            segmentsArray.Add(segment);
+        }
+
+        packageObject.SetValue("segments", segmentsArray, true);
+        packageObject.SetValue("permissionModule", packageContext.PermissionModule, true);
+
+        // 生效命名策略整体透出，供模板按 package.naming.* 组装路径段（如 layerPrefix）与实体后缀
+        var namingObject = new ScriptObject();
+        namingObject.SetValue("stripTablePrefix", packageContext.Naming.StripTablePrefix, true);
+        var prefixesArray = new ScriptArray();
+        foreach (string prefix in packageContext.Naming.TablePrefixes)
+        {
+            prefixesArray.Add(prefix);
+        }
+
+        namingObject.SetValue("tablePrefixes", prefixesArray, true);
+        namingObject.SetValue("singularize", packageContext.Naming.Singularize, true);
+        namingObject.SetValue("entitySuffix", packageContext.Naming.EntitySuffix, true);
+        namingObject.SetValue("packageSegmentCase", packageContext.Naming.PackageSegmentCase, true);
+        namingObject.SetValue("layerPrefix", packageContext.Naming.LayerPrefix, true);
+        packageObject.SetValue("naming", namingObject, true);
 
         return packageObject;
     }
@@ -662,22 +692,17 @@ public sealed class TemplateEngine
         var root = new ScriptObject();
 
         var tableObject = new ScriptObject();
+        string entityName = string.IsNullOrEmpty(context.Table.EntityName) ? context.Table.ClassName : context.Table.EntityName;
+        tableObject.SetValue("entityName", entityName, true);
         tableObject.SetValue("variableName", context.Table.VariableName, true);
         tableObject.SetValue("className", context.Table.ClassName, true);
         tableObject.SetValue("rawName", context.Table.RawName, true);
         root.SetValue("table", tableObject, true);
 
-        var packageObject = new ScriptObject();
-        packageObject.SetValue("dir", context.Package.Dir, true);
-        packageObject.SetValue("name", context.Package.Name, true);
-        if (context.Package.BasePackage is not null)
-        {
-            packageObject.SetValue("basePackage", context.Package.BasePackage, true);
-        }
+        // 路径占位与内容渲染共用同一 package 对象（含 dir / segments / permissionModule / naming）
+        root.SetValue("package", BuildPackageObject(context.Package), true);
 
-        root.SetValue("package", packageObject, true);
-
-        // 路径占位复用 tool 函数集，供 firstLowerCase/hump2Underline 等命名转换；映射服务为空时按包 typeMap 旧行为
+        // 路径占位复用 tool 函数集，供 firstLowerCase/hump2Underline/packagePath/permissionKey 等命名转换
         root.SetValue("tool", ToolFunctions.Build(context.Package, _typeMappingService, context.Table.DatabaseType), true);
         return root;
     }

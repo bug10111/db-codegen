@@ -1,5 +1,6 @@
 using System.Text;
 using DbCodeGen.Core.Model;
+using DbCodeGen.Core.Templates.Packages;
 using Scriban;
 using Scriban.Runtime;
 using Scriban.Syntax;
@@ -19,7 +20,8 @@ public static class ToolFunctions
     /// <param name="packageContext">package 侧渲染上下文，提供当前包类型映射表。</param>
     /// <param name="typeMappingService">全局类型映射解析服务；为空时 type 退化为按包 typeMap 的旧行为，导包函数返回空串。</param>
     /// <param name="databaseType">当前表所属数据库类型，供全局映射按库分桶匹配；为空时仅命中通用条目。</param>
-    /// <returns>含 firstLowerCase/firstUpperCase/hump2Underline/hump3Underline/javaIdent/type/typeImport/imports 的 tool 脚本对象。</returns>
+    /// <returns>含 firstLowerCase/firstUpperCase/hump2Underline/hump3Underline/javaIdent/type/typeImport/imports/
+    /// packageSegments/packagePath/permissionKey 的 tool 脚本对象（permissionKey 支持单参 op 与双参 moduleName+op 两形态）。</returns>
     /// <exception cref="ArgumentNullException">packageContext 为 null 时抛出。</exception>
     public static ScriptObject Build(TemplatePackageContext packageContext, ITypeMappingService? typeMappingService = null, DataSourceType? databaseType = null)
     {
@@ -40,7 +42,45 @@ public static class ToolFunctions
 
         // 列集合导包块：对传入的列集合/表去重后生成 import 语句块，供实体模板自动导包，无导包时返回空串
         tool.SetValue("imports", new ScriptToolFunction(args => BuildImportsBlock(args, packageContext.TypeMap, typeMappingService, databaseType)), true);
+
+        // 包路径组装：把基础包段与追加层段归一（小写、kebab 归一、连续重复段去重）后组装，
+        // 供输出路径模板用 {{tool.packagePath("common","entity",table.variableName)}} 生成合法包目录，杜绝无条件下硬拼 common
+        tool.SetValue("packageSegments", new ScriptToolFunction(args => BuildPackageSegments(args, packageContext)), true);
+        tool.SetValue("packagePath", new ScriptToolFunction(args => PackagePathBuilder.ToDirectoryPath(BuildPackageSegments(args, packageContext))), true);
+
+        // 权限键：tool.permissionKey(op) = {package.permissionModule}:{op}（单参恒按 op 处理，不做模块名猜测）；
+        // tool.permissionKey(moduleName, op) = {Hump3Underline(moduleName)}:{op}（脚手架权限点清单逐模块使用，
+        // 与 Controller 的单参形态同源；调用方传了 modules 时 package.permissionModule 已自动等于该模块 kebab 形态）
+        tool.SetValue("permissionKey", new ScriptToolFunction(args =>
+        {
+            if (args.Length >= 2)
+            {
+                return PermissionModuleResolver.BuildKey(
+                    Hump3Underline(args[0]?.ToString()),
+                    args[1]?.ToString());
+            }
+
+            return PermissionModuleResolver.BuildKey(packageContext.PermissionModule, args.FirstOrDefault()?.ToString());
+        }), true);
         return tool;
+    }
+
+    /// <summary>
+    /// 组装包段清单：在基础包段之后追加调用方传入的层段（支持点号/斜杠分隔的多级），
+    /// 逐段按 packageSegmentCase 口径归一并做连续重复段去重。
+    /// </summary>
+    /// <param name="args">tool.packageSegments / tool.packagePath 的调用参数数组，元素可为空。</param>
+    /// <param name="packageContext">package 侧渲染上下文，提供基础包段与包段口径。</param>
+    /// <returns>归一后的完整包段清单。</returns>
+    private static IReadOnlyList<string> BuildPackageSegments(object?[] args, TemplatePackageContext packageContext)
+    {
+        var extras = new string?[args.Length];
+        for (int index = 0; index < args.Length; index++)
+        {
+            extras[index] = args[index]?.ToString();
+        }
+
+        return PackagePathBuilder.Compose(packageContext.Segments, packageContext.Naming.PackageSegmentCase, extras);
     }
 
     /// <summary>

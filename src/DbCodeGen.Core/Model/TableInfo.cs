@@ -20,6 +20,12 @@ public class TableInfo
     public string? SchemaName { get; set; }
 
     /// <summary>
+    /// 实体名，PascalCase 派生结果（可含命名策略的 entitySuffix），由生成管线按命名策略写入；
+    /// 为空时渲染上下文回退 ClassName。物理表名必须使用 RawName，不得由实体名反推。
+    /// </summary>
+    public string EntityName { get; set; } = string.Empty;
+
+    /// <summary>
     /// 类名，PascalCase，读取时按表名实时转换，生成用。
     /// </summary>
     public string ClassName { get; set; } = string.Empty;

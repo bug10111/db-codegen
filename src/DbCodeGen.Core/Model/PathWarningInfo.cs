@@ -31,8 +31,41 @@ public sealed class PathWarningInfo
     public const string InvalidJavaPackageSegment = "InvalidJavaPackageSegment";
 
     /// <summary>
+    /// 告警种类：src/main/java 之后出现连续重复包段（如 com.simple.xiaoguan.common/common），
+    /// 通常由模板无条件下硬拼层段（common）与基础包结尾重复导致。
+    /// </summary>
+    public const string DuplicatePackageSegment = "DuplicatePackageSegment";
+
+    /// <summary>
+    /// 告警种类：src/main/java 之后的包段含大写字母（如 commonFile），Java 包名约定全小写；
+    /// 应改用 packageSegmentCase=lower 或 tool.packagePath 组装。
+    /// </summary>
+    public const string NonLowercasePackageSegment = "NonLowercasePackageSegment";
+
+    /// <summary>
+    /// 告警种类：模板正文静态使用 hump2Underline/hump3Underline(table.className) 反推物理表名；
+    /// 物理表名必须使用 table.rawName（表前缀剥离与单复数归一后反推会失真）。
+    /// </summary>
+    public const string TableNameRoundTripMismatch = "TableNameRoundTripMismatch";
+
+    /// <summary>
+    /// 告警种类：显式权限模块（请求 vars.permissionModule / manifest.permissionModule）与 Hump3Underline(modules[0].name) 不一致；
+    /// 由 modules 自动派生的情形与权限点清单同源，不告警。带告警禁止交付（运行期会 403）。
+    /// </summary>
+    public const string PermissionKeyMismatch = "PermissionKeyMismatch";
+
+    /// <summary>
+    /// 告警种类：workspaceRoot 自身含带 &lt;modules&gt; 的 pom.xml（疑似 Maven 聚合根），且 codeDirectory 未落入其下模块目录；
+    /// 应传工程父目录而非聚合根本身作为 workspaceRoot。
+    /// </summary>
+    public const string WorkspaceRootMayBeAggregate = "WorkspaceRootMayBeAggregate";
+
+    /// <summary>
     /// 告警种类标识：EmptyPackageDir（包段为空）/ ConsecutiveSeparators（连续分隔符）/
-    /// EmptyIteration（模板空迭代）/ InvalidJavaPackageSegment（非法 Java 包段）。
+    /// EmptyIteration（模板空迭代）/ InvalidJavaPackageSegment（非法 Java 包段）/
+    /// DuplicatePackageSegment（连续重复包段）/ NonLowercasePackageSegment（非小写包段）/
+    /// TableNameRoundTripMismatch（物理表名反推）/ PermissionKeyMismatch（权限键派生不一致）/
+    /// WorkspaceRootMayBeAggregate（工作区根疑似聚合根）。
     /// </summary>
     public string Kind { get; set; } = string.Empty;
 
