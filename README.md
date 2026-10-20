@@ -58,7 +58,7 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 - `variables`：预设默认变量；调用方显式 `variables` 同名键优先（逐键覆盖）。
 - `preview_generation` / `generate` 传 `preset` 即由服务端解析模板清单并注入默认变量；`preset` 与 `files` 互斥（同时传 → `InvalidArgument`）；不传 `preset`/`files` 保持原行为（全部启用条目）。
 - 未知 preset → `InvalidArgument` 并列出可用 preset；可用预设经 `list_template_packages` / `list_templates` / `read_template` 的 `presets[]` 查看。
-- 示例：`simple-java-sso` 提供 `remote`（59 条模板，约 77 文件，无平台管理页）与 `embedded`（155 条模板，约 173 文件，含七类平台管理页，自动注入 `platformUi=embedded`）。
+- 示例：`simple-java-sso` 提供 `remote`（59 条模板，约 77 文件，无平台管理页）与 `embedded`（153 条模板，约 171 文件，含六类独立平台管理页（字典数据经字典类型行内入口），自动注入 `platformUi=embedded` 与 `loginMode=midplatform`）。
 
 `generate` 全参数显式、不读写配置记忆：`package`（包名）必填；`tables` 按所选模板分型——所选模板（`files` 或 `preset` 过滤后）含 table 作用域条目时必填非空（内联表结构，列元数据自带，建议先用 `get_table_detail` 取回），纯 module/project 作用域集合可省略；`files` 省略且不传 `preset` 时默认选择包内全部启用条目；`preset` 与 `files` 互斥；`workspaceRoot` / `codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表不写盘，排除表规则一律生效）；`duplicateStrategy` 控制同名文件覆盖（`overwrite`）或跳过（`skip`），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
 

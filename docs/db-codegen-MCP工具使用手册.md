@@ -88,7 +88,7 @@ get_table_detail → check_type_mapping → list_templates → read_template
 
 参数约定（preview/generate 共用同一入参口径）：`package` 必填；`tables` 按所选模板分型——所选模板（`files`/`preset` 过滤后）含 table 作用域条目时必填非空（内联合成表，至少一张，需要完整列时用第 1 步取回的元数据），纯 module/project 作用域集合可省略；`files` 省略且不传 `preset` 时默认选择包内**全部启用条目**（`enabled=false` 的条目不参与）；`preset` 为模板包 manifest.presets 声明的命名预设（与 `files` 互斥），服务端解析模板清单并注入预设默认变量（调用方 `variables` 同名键优先）；`workspaceRoot`/`codeDirectory` 指定输出位置；`webDirectory` 指定 root=web 模板的前端锚点（缺省 `web`，必须相对且不含 `..`）；`includePlatformTables=true` 显式允许生成平台表（缺省 false 时命中模板包 `platformTables` 规则的表排除并在 `platformTableExcluded` 列出，排除表规则不受该开关影响）；`duplicateStrategy` 控制 `overwrite`（内容不同才覆盖）/`skip`（同名一律跳过），**MCP 缺省 `skip`**（桌面端 App 缺省仍为 `overwrite`）。
 
-> 脚手架类包（如 `simple-java-sso`）建议直接用 preset：`preset="embedded"` 自动选中全部 155 条模板并注入 `platformUi=embedded`，`preset="remote"` 只选 59 条启用模板；详见 3.6 节。
+> 脚手架类包（如 `simple-java-sso`）建议直接用 preset：`preset="embedded"` 自动选中全部 153 条模板并注入 `platformUi=embedded` 与 `loginMode=midplatform`，`preset="remote"` 只选 59 条启用模板；详见 3.6 节。
 
 ### 3.4 流D：模板维护
 
@@ -134,7 +134,7 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | preset | 模板数 | 产物规模（2 模块场景） | 结果 |
 | --- | --- | --- | --- |
 | `remote` | 59 | 约 77 文件 | 第一形态：无平台管理页，平台能力由授权中心承载 |
-| `embedded` | 155 | 约 173 文件 | 第二形态：含七类平台管理页，自动注入 `platformUi=embedded` |
+| `embedded` | 153 | 约 171 文件 | 第二形态：含六类独立平台管理页（字典数据经字典类型行内入口），自动注入 `platformUi=embedded` 与 `loginMode=midplatform` |
 
 兼容旧用法：`files` 仍可显式传模板清单（与 `preset` 二选一）。
 
