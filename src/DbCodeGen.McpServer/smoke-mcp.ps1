@@ -3,6 +3,9 @@
 # Package probes are dynamic: prefer package "simple", otherwise use the first available
 # package from list_template_packages. When no package exists, package probes are SKIPPED
 # (exit code 2, never reported as success).
+# preview_generation/generate probes write only into a fresh isolated workspace directory under
+# the smoke output directory, and assert the single-payload invariant (receipt lives only in
+# structuredContent; the text block is a summary without the duplicated payload JSON).
 param(
     [Parameter(Mandatory = $true)][string]$ExePath,
     [Parameter(Mandatory = $true)][string]$OutDir
@@ -251,15 +254,70 @@ if ($null -ne $templatePath) {
     $escapedPath = $templatePath.Replace('\', '\\').Replace('"', '\"')
     Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"read_template","arguments":{"package":"' + $pkg + '","path":"' + $escapedPath + '"}}}')
     Read-Responses -Process $p -Lines $lines -Ids @(23)
+
+    # Sharding probe: offset=0 enters sharded mode with maxChars as the per-piece cap
+    Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"read_template","arguments":{"package":"' + $pkg + '","path":"' + $escapedPath + '","offset":0,"maxChars":1000}}}')
+    Read-Responses -Process $p -Lines $lines -Ids @(27)
 }
 Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"read_template","arguments":{"package":"' + $pkg + '","path":"../../../App.xaml.cs"}}}')
 Read-Responses -Process $p -Lines $lines -Ids @(24)
 Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"check_type_mapping","arguments":{"datasource":"__nonexistent_datasource__","tables":["t1"],"package":"' + $pkg + '"}}}')
 Read-Responses -Process $p -Lines $lines -Ids @(25)
 
+# preview_generation / generate probes: resolve a generation target template by scope from the
+# all-templates listing (prefer table scope with one synthetic table, fall back to project scope).
+# generate writes only into a fresh isolated workspace under the smoke output directory.
+$genTemplatePath = $null
+$genScope = $null
+$genTemplatesPayload = Get-ToolPayload -Line $line21
+if ($null -ne $genTemplatesPayload -and $null -ne $genTemplatesPayload.templates) {
+    foreach ($preferredScope in @('table', 'project')) {
+        if ($null -ne $genTemplatePath) { break }
+        foreach ($template in $genTemplatesPayload.templates) {
+            $isEnabled = ($template.enabled -eq $true)
+            $isNotContract = ($template.isContract -ne $true)
+            $scopeMatches = ([string]$template.scope -eq $preferredScope)
+            if ($isEnabled -and $isNotContract -and $scopeMatches -and [string]$template.path -ne '') {
+                $genTemplatePath = [string]$template.path
+                $genScope = $preferredScope
+                break
+            }
+        }
+    }
+}
+
+$genWorkspace = $null
+if ($null -ne $genTemplatePath) {
+    $genWorkspace = Join-Path $OutDir ('smoke-workspace-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))
+    New-Item -ItemType Directory -Path $genWorkspace | Out-Null
+    $escapedGenPath = $genTemplatePath.Replace('\', '\\').Replace('"', '\"')
+    $escapedWorkspace = $genWorkspace.Replace('\', '\\').Replace('"', '\"')
+    $escapedCodeDir = 'src/main/java/com/example/smoke'
+    $tablesArgument = ''
+    if ($genScope -eq 'table') {
+        $tablesArgument = ',"tables":[{"name":"t_smoke_probe"}]'
+    }
+    $generationArguments = '{"package":"' + $pkg + '","workspaceRoot":"' + $escapedWorkspace + '","codeDirectory":"' + $escapedCodeDir + '","files":["' + $escapedGenPath + '"]' + $tablesArgument + '}'
+    Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"preview_generation","arguments":' + $generationArguments + '}}')
+    Read-Responses -Process $p -Lines $lines -Ids @(30)
+    Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"generate","arguments":' + $generationArguments + '}}')
+    Read-Responses -Process $p -Lines $lines -Ids @(31)
+    if ($genScope -eq 'table') {
+        # Negative probe: table-scope selection without tables must be a structured protocol error
+        $noTablesArguments = '{"package":"' + $pkg + '","workspaceRoot":"' + $escapedWorkspace + '","codeDirectory":"' + $escapedCodeDir + '","files":["' + $escapedGenPath + '"]}'
+        Send-Messages -Process $p -Messages @('{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"preview_generation","arguments":' + $noTablesArguments + '}}')
+        Read-Responses -Process $p -Lines $lines -Ids @(32)
+    }
+}
+
+$line30 = Get-ResponseLine -Lines $lines -Id 30
+$line31 = Get-ResponseLine -Lines $lines -Id 31
+$line32 = Get-ResponseLine -Lines $lines -Id 32
+
 $line23 = Get-ResponseLine -Lines $lines -Id 23
 $line24 = Get-ResponseLine -Lines $lines -Id 24
 $line25 = Get-ResponseLine -Lines $lines -Id 25
+$line27 = Get-ResponseLine -Lines $lines -Id 27
 
 $p.StandardInput.Close()
 if (-not $p.WaitForExit(5000)) { $p.Kill() }
@@ -270,6 +328,9 @@ $raw = Join-Path $OutDir 'smoke-responses.jsonl'
 Write-Output ('raw responses written: ' + $raw)
 Write-Output ('[process] exitCode=' + $p.ExitCode)
 
+# Probe expectations collector (declared before the evidence section so every check can append)
+$failures = New-Object System.Collections.Generic.List[string]
+
 # Probe evidence with explicit expectations
 Write-ProbeStatus -Id 20 -Name 'list_templates(java)' -Line $line20
 Write-ProbeStatus -Id 21 -Name 'list_templates(all)' -Line $line21
@@ -278,14 +339,57 @@ Write-ProbeStatus -Id 26 -Name 'list_templates(invalid language, expected error)
 if ($null -ne $templatePath) {
     Write-Output ('[template path] ' + $templatePath)
     Write-ProbeStatus -Id 23 -Name 'read_template(real)' -Line $line23
+    Write-ProbeStatus -Id 27 -Name 'read_template(sharded offset=0 maxChars=1000)' -Line $line27
+
+    # Single-payload invariant: body lives only in structuredContent; the text block must be a summary
+    # note and must not duplicate the payload JSON again
+    $dedupOk = $false
+    if ($null -ne $line27) {
+        $obj27 = $line27 | ConvertFrom-Json
+        if ($null -ne $obj27.result.structuredContent) {
+            $summaryText = [string]$obj27.result.content[0].text
+            $dedupOk = (-not $summaryText.Contains('"contentHash"')) -and $summaryText.Contains('structuredContent.content')
+        }
+    }
+    Write-Output ('[read_template dedup invariant] ' + $dedupOk)
+    if (-not $dedupOk) { $failures.Add('read_template single-payload invariant violated: text block must be a summary without duplicated payload') }
 } else {
     Write-Output 'SKIP: package exposes no template path; read_template positive probe was skipped.'
 }
 Write-ProbeStatus -Id 24 -Name 'read_template(path traversal, expected error)' -Line $line24
 Write-ProbeStatus -Id 25 -Name 'check_type_mapping(missing datasource, expected error)' -Line $line25
 
+# preview_generation / generate probe evidence, single-payload invariant, and skip accounting
+$generationProbesSkipped = $false
+if ($null -ne $genTemplatePath) {
+    Write-Output ('[generation target] template=' + $genTemplatePath + ' scope=' + $genScope + ' workspace=' + $genWorkspace)
+    Write-ProbeStatus -Id 30 -Name 'preview_generation(dry-run)' -Line $line30
+    Write-ProbeStatus -Id 31 -Name 'generate(write into isolated smoke workspace)' -Line $line31
+    if ($genScope -eq 'table') {
+        Write-ProbeStatus -Id 32 -Name 'preview_generation(no tables, expected error)' -Line $line32
+    }
+
+    # Single-payload invariant for preview_generation/generate: the full receipt lives only in
+    # structuredContent; the text block must be a summary note without the duplicated payload JSON
+    foreach ($dedupProbe in @(@{ Id = 30; ForbiddenKey = '"entries"' }, @{ Id = 31; ForbiddenKey = '"logs"' })) {
+        $dedupLine = Get-ResponseLine -Lines $lines -Id $dedupProbe.Id
+        $dedupOk = $false
+        if ($null -ne $dedupLine) {
+            $dedupObj = $dedupLine | ConvertFrom-Json
+            if ($null -ne $dedupObj.result.structuredContent) {
+                $dedupSummary = [string]$dedupObj.result.content[0].text
+                $dedupOk = $dedupSummary.Contains('structuredContent') -and (-not $dedupSummary.Contains($dedupProbe.ForbiddenKey))
+            }
+        }
+        Write-Output ('[generation single-payload invariant id=' + $dedupProbe.Id + '] ' + $dedupOk)
+        if (-not $dedupOk) { $failures.Add('tool id ' + $dedupProbe.Id + ' single-payload invariant violated: text block must be a summary without duplicated payload') }
+    }
+} else {
+    $generationProbesSkipped = $true
+    Write-Output 'SKIP: package exposes no table/project scope template; preview_generation/generate probes were skipped. This is NOT a success.'
+}
+
 # Expected outcomes: positive probes OK, negative probes ERROR
-$failures = New-Object System.Collections.Generic.List[string]
 $positiveProbes = @(
     @{ Id = 20; Name = 'list_templates(java)'; Line = $line20 },
     @{ Id = 21; Name = 'list_templates(all)'; Line = $line21 },
@@ -293,6 +397,11 @@ $positiveProbes = @(
 )
 if ($null -ne $templatePath) {
     $positiveProbes += @{ Id = 23; Name = 'read_template(real)'; Line = $line23 }
+    $positiveProbes += @{ Id = 27; Name = 'read_template(sharded)'; Line = $line27 }
+}
+if ($null -ne $genTemplatePath) {
+    $positiveProbes += @{ Id = 30; Name = 'preview_generation(dry-run)'; Line = $line30 }
+    $positiveProbes += @{ Id = 31; Name = 'generate(isolated workspace)'; Line = $line31 }
 }
 foreach ($probe in $positiveProbes) {
     $status = Get-ToolStatus -Line $probe.Line
@@ -303,6 +412,9 @@ $negativeProbes = @(
     @{ Id = 24; Name = 'read_template(path traversal)'; Line = $line24 },
     @{ Id = 25; Name = 'check_type_mapping(missing datasource)'; Line = $line25 }
 )
+if ($null -ne $genTemplatePath -and $genScope -eq 'table') {
+    $negativeProbes += @{ Id = 32; Name = 'preview_generation(no tables)'; Line = $line32 }
+}
 foreach ($probe in $negativeProbes) {
     $status = Get-ToolStatus -Line $probe.Line
     if (-not $status.StartsWith('ERROR')) { $failures.Add('probe ' + $probe.Id + ' ' + $probe.Name + ' expected ERROR, got: ' + $status) }
@@ -312,6 +424,11 @@ if ($failures.Count -gt 0) {
     Write-Output 'SMOKE FAILED'
     foreach ($failure in $failures) { Write-Output ('  - ' + $failure) }
     exit 1
+}
+
+if ($generationProbesSkipped) {
+    Write-Output 'SKIP: preview_generation/generate probes did not run (no table/project scope template in selected package). This is NOT a success.'
+    exit 2
 }
 
 Write-Output 'SMOKE OK'

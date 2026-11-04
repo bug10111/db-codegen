@@ -6,12 +6,15 @@ using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
 using DbCodeGen.McpServer.Tools;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
 
 namespace DbCodeGen.Core.Tests.Mcp;
 
 /// <summary>
 /// MCP 能力面单元测试：preview_generation/generate 的 duplicateStrategy 缺省 skip、webDirectory/includePlatformTables
-/// 入参贯通与非法值拒绝、请求组装透传，以及 list_template_packages/list_templates 的能力元数据与契约发现。
+/// 入参贯通与非法值拒绝、请求组装透传、单载荷回执形态（structuredContent 唯一载荷 + text 摘要说明）与协议错误通道，
+/// 以及 list_template_packages/list_templates 的能力元数据与契约发现。
 /// </summary>
 public sealed class McpCapabilitySurfaceTests : IDisposable
 {
@@ -82,7 +85,7 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
             NullLogger<CodeGenerator>.Instance);
         var tools = new GenerationTools(packageService, generator, NullLogger<GenerationTools>.Instance);
 
-        object response = await tools.GenerateAsync(
+        CallToolResult response = await tools.GenerateAsync(
             "generate-surface-pkg",
             workspaceRoot,
             "src/main/java/com/example",
@@ -99,7 +102,13 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
             includePlatformTables: false,
             cancellationToken: CancellationToken.None);
 
-        GenerateResult result = Assert.IsType<GenerateResult>(response);
+        // 单载荷去重不变量：text 块仅为摘要说明，不再重复输出载荷 JSON
+        TextContentBlock summary = Assert.IsType<TextContentBlock>(Assert.Single(response.Content));
+        Assert.Contains("structuredContent", summary.Text);
+        Assert.DoesNotContain("\"logs\"", summary.Text);
+        Assert.DoesNotContain("\"namingReport\"", summary.Text);
+
+        GenerateResult result = StructuredToolResponseReader.ReadStructured<GenerateResult>(response);
         Assert.Equal(1, result.Generated);
         PlatformTableExcludedItem exclusion = Assert.Single(result.PlatformTableExcluded);
         Assert.Equal("sys_user", exclusion.TableName);
@@ -107,6 +116,121 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         NamingReportEntry naming = Assert.Single(result.NamingReport);
         Assert.Equal("t_asset", naming.RawName);
         Assert.Contains(result.CoverageWarnings, warning => warning.Kind == CoverageWarningInfo.NoBackendView);
+    }
+
+    /// <summary>
+    /// preview_generation dry-run 回执为单载荷形态：文件计划承载于 structuredContent 一处，
+    /// text 块仅为摘要说明不重复载荷 JSON；条目分类、命名报告与覆盖告警结构不变。
+    /// </summary>
+    [Fact]
+    public async Task PreviewTools_PreviewGeneration_ReturnsSinglePayloadPlan()
+    {
+        TemplatePackageInfo package = await CreatePackageAsync(
+            """
+            {
+              "name": "preview-surface-pkg",
+              "description": "预览回执测试包",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "files": [{ "template": "entity.java.scriban", "output": "out/{{table.className}}.java", "enabled": true }]
+            }
+            """,
+            ("entity.java.scriban", "class {{table.className}} {}\n"));
+        var packageService = new FakeTemplatePackageService(package);
+
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"), "workspace");
+        _tempRoots.Add(Path.GetDirectoryName(workspaceRoot)!);
+        Directory.CreateDirectory(workspaceRoot);
+
+        var tools = new PreviewTools(
+            packageService,
+            new TemplateFileWriter(),
+            new TemplateEngine(),
+            new CodeGenerator(
+                new TemplateEngine(),
+                new TemplateFileWriter(),
+                new FileWriter(NullLogger<FileWriter>.Instance),
+                CreateConfigService(workspaceRoot),
+                NullLogger<CodeGenerator>.Instance),
+            NullLogger<PreviewTools>.Instance);
+
+        CallToolResult response = await tools.PreviewGenerationAsync(
+            "preview-surface-pkg",
+            workspaceRoot,
+            "src/main/java/com/example",
+            tables: new[] { new SyntheticTableInput { Name = "t_asset" } },
+            files: null,
+            duplicateStrategy: DuplicateFileStrategy.Skip,
+            variables: null,
+            modules: null,
+            webDirectory: null,
+            includePlatformTables: false,
+            cancellationToken: CancellationToken.None);
+
+        // 单载荷去重不变量：text 块仅为摘要说明，不再重复输出载荷 JSON
+        TextContentBlock summary = Assert.IsType<TextContentBlock>(Assert.Single(response.Content));
+        Assert.Contains("structuredContent", summary.Text);
+        Assert.DoesNotContain("\"entries\"", summary.Text);
+        Assert.DoesNotContain("\"namingReport\"", summary.Text);
+
+        PreviewGenerationResult result = StructuredToolResponseReader.ReadStructured<PreviewGenerationResult>(response);
+        PreviewFilePlan entry = Assert.Single(result.Entries);
+        Assert.Equal("t_asset", entry.Table);
+        Assert.Equal("new", entry.Action);
+        Assert.Equal(1, result.NewCount);
+        NamingReportEntry naming = Assert.Single(result.NamingReport);
+        Assert.Equal("t_asset", naming.RawName);
+        Assert.Contains(result.CoverageWarnings, warning => warning.Kind == CoverageWarningInfo.NoBackendView);
+    }
+
+    /// <summary>
+    /// preview_generation 所选模板含 table 作用域条目但未提供 tables：错误走协议 isError 通道（InvalidArgument 前缀）。
+    /// </summary>
+    [Fact]
+    public async Task PreviewTools_PreviewGeneration_TableScopeWithoutTables_ProtocolError()
+    {
+        TemplatePackageInfo package = await CreatePackageAsync(
+            """
+            {
+              "name": "preview-error-pkg",
+              "description": "预览错误通道测试包",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "files": [{ "template": "entity.java.scriban", "output": "out/{{table.className}}.java", "enabled": true }]
+            }
+            """,
+            ("entity.java.scriban", "class {{table.className}} {}\n"));
+        var packageService = new FakeTemplatePackageService(package);
+
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"), "workspace");
+        _tempRoots.Add(Path.GetDirectoryName(workspaceRoot)!);
+        Directory.CreateDirectory(workspaceRoot);
+
+        var tools = new PreviewTools(
+            packageService,
+            new TemplateFileWriter(),
+            new TemplateEngine(),
+            new CodeGenerator(
+                new TemplateEngine(),
+                new TemplateFileWriter(),
+                new FileWriter(NullLogger<FileWriter>.Instance),
+                CreateConfigService(workspaceRoot),
+                NullLogger<CodeGenerator>.Instance),
+            NullLogger<PreviewTools>.Instance);
+
+        McpException exception = await Assert.ThrowsAsync<McpException>(() => tools.PreviewGenerationAsync(
+            "preview-error-pkg",
+            workspaceRoot,
+            "src/main/java/com/example",
+            tables: null,
+            files: null,
+            duplicateStrategy: DuplicateFileStrategy.Skip,
+            variables: null,
+            modules: null,
+            webDirectory: null,
+            includePlatformTables: false,
+            cancellationToken: CancellationToken.None));
+        Assert.StartsWith("[InvalidArgument]", exception.Message);
     }
 
     /// <summary>
@@ -215,8 +339,9 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         Assert.False(contractEntry.Enabled);
         Assert.Empty(templates.Warnings);
 
-        object readResult = await tools.ReadTemplateAsync("simple", "docs/contract.md.scriban", CancellationToken.None);
-        ReadTemplateResult contract = Assert.IsType<ReadTemplateResult>(readResult);
+        CallToolResult readResult = await tools.ReadTemplateAsync(
+            "simple", "docs/contract.md.scriban", cancellationToken: CancellationToken.None);
+        ReadTemplateResult contract = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(readResult);
         Assert.Equal("docs/contract.md.scriban", contract.Path);
         Assert.Contains("命名策略", contract.Content);
         Assert.Equal("base", Assert.Single(contract.Presets).Name);

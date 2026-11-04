@@ -4,6 +4,7 @@ using DbCodeGen.Core.Generation;
 using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace DbCodeGen.McpServer.Tools;
@@ -54,7 +55,8 @@ public sealed class GenerationTools
     /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；必须为相对路径且不含 ..，非法即结构化参数错误。</param>
     /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false：命中模板包 platformTables 规则的表不写盘；true 时参与生成）。排除表规则不受本开关影响。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>写盘结果统计、生成日志与结构化诊断（命名报告、预检告警、覆盖告警、平台表排除记录）。</returns>
+    /// <returns>单载荷工具应答：structuredContent 承载写盘结果统计、生成日志与结构化诊断
+    /// （命名报告、预检告警、覆盖告警、平台表排除记录），text 块为摘要说明。</returns>
     [McpServerTool(Name = "generate", Title = "批量生成", Destructive = true,
         UseStructuredContent = true, OutputSchemaType = typeof(GenerateResult))]
     [Description("用途：执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。\n"
@@ -64,9 +66,10 @@ public sealed class GenerationTools
         + "basePackageOverride/duplicateStrategy(默认 skip)/variables/modules/webDirectory(默认 web)/includePlatformTables(默认 false) 可选，含义同 preview_generation。\n"
         + "返回：generated/overwritten/skipped/failed（写盘计数）、isCancelled、logs[]（timestamp/level/message，逐文件结果）；"
         + "namingReport[]、pathWarnings[]、coverageWarnings[]、platformTableExcluded[] 与 preview_generation 同源同结构。\n"
+        + "载荷口径：回执只承载于 structuredContent 一处，text 块仅为摘要说明（不重复输出载荷）。\n"
         + "常见错误（经协议 isError=true 返回，消息带 [错误分类] 前缀）：InvalidArgument（preset 未知或与 files 同传、tables 缺失、files 含包外路径、策略/路径参数非法、variables/modules 结构非法）；"
         + "TemplatePackageError（包不存在、渲染失败含行列、输出路径越界）；InternalError。")]
-    public async Task<object> GenerateAsync(
+    public async Task<CallToolResult> GenerateAsync(
         [Description("模板包包名（必填）：先用 list_template_packages 选包。")]
         string package,
         [Description("工作区根目录绝对路径（必填）：输出文件的根前缀，最终路径必须落在其内。")]
@@ -119,7 +122,7 @@ public sealed class GenerationTools
             _logger.LogInformation(
                 "generate 完成，包 {PackageName}，新增 {Generated} / 覆盖 {Overwritten} / 跳过 {Skipped} / 失败 {Failed}，取消 {IsCancelled}。",
                 package, result.Generated, result.Overwritten, result.Skipped, result.Failed, result.IsCancelled);
-            return new GenerateResult(
+            GenerateResult resultDto = new(
                 result.Generated,
                 result.Overwritten,
                 result.Skipped,
@@ -130,6 +133,14 @@ public sealed class GenerationTools
                 pathWarnings,
                 coverageWarnings,
                 platformTableExcluded);
+
+            // 单载荷应答组装：回执只承载于 structuredContent 一处——SDK 缺省会对对象返回同时输出序列化 JSON 文本与
+            // structuredContent 双份等价载荷，是大回执被宿主结果预算截断的根因；text 块降级为摘要说明
+            string summary = "generate 写盘回执承载于 structuredContent（本应答不重复输出载荷）；"
+                + $"generated={result.Generated}/overwritten={result.Overwritten}/skipped={result.Skipped}/failed={result.Failed}，"
+                + $"isCancelled={result.IsCancelled.ToString().ToLowerInvariant()}，logs={logs.Count} 条，"
+                + "namingReport/pathWarnings/coverageWarnings/platformTableExcluded 与 preview_generation 同源。";
+            return SinglePayloadToolResult.Create(resultDto, summary);
         }
         catch (Exception exception)
         {

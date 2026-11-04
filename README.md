@@ -40,7 +40,7 @@ MCP 服务端本身不做任何 LLM 调用——智能由 MCP 客户端侧的大
 | | `delete_datasource` | 按名删除连接 |
 | | `test_connection` | 测试连通性（10 秒超时）：传 `datasource` 按已保存连接测试，或传完整明文参数直测（不入库不留痕） |
 
-**协议可发现性**：服务端 `initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；全部 25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；9 个结构化输出工具（`list_template_packages` / `list_templates` / `read_template` / `preview_generation` / `generate` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `outputSchema`（模型可直接感知成功应答结构，失败统一走协议 `result.isError`）。
+**协议可发现性**：服务端 `initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；全部 25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；3 个结构化输出工具（`read_template` / `preview_generation` / `generate`）声明 `outputSchema`（模型可直接感知成功应答结构，失败统一走协议 `result.isError`；成功回执为单载荷形态——完整回执只承载于 `structuredContent` 一处，text 内容块仅为摘要说明），其余 6 个（`list_template_packages` / `list_templates` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `UseStructuredContent` 输出结构化内容。
 
 ### 命名预设（presets）
 

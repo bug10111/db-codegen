@@ -6,6 +6,7 @@ using DbCodeGen.Core.Model;
 using DbCodeGen.Core.Templates;
 using DbCodeGen.Core.Templates.Packages;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace DbCodeGen.McpServer.Tools;
@@ -209,7 +210,8 @@ public sealed class PreviewTools
     /// <param name="webDirectory">web 目录（相对 workspaceRoot，缺省 web），root=web 的模板输出以此为基准；必须为相对路径且不含 ..，非法即结构化参数错误。</param>
     /// <param name="includePlatformTables">是否显式允许生成平台表（缺省 false：命中模板包 platformTables 规则的表排除并列出；true 时参与生成但回执仍标注命中）。排除表规则不受本开关影响。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>文件计划条目、分类计数、未映射类型清单、预检告警清单、命名报告、覆盖告警与平台表排除清单。</returns>
+    /// <returns>单载荷工具应答：structuredContent 承载文件计划条目、分类计数、未映射类型清单、预检告警清单、
+    /// 命名报告、覆盖告警与平台表排除清单，text 块为摘要说明。</returns>
     [McpServerTool(Name = "preview_generation", Title = "预览生成", ReadOnly = true, Idempotent = true, Destructive = false,
         UseStructuredContent = true, OutputSchemaType = typeof(PreviewGenerationResult))]
     [Description("用途：批量生成 dry-run 预览（零写盘），返回文件计划与结构化诊断，是 generate 前的唯一把关点。\n"
@@ -226,9 +228,10 @@ public sealed class PreviewTools
         + "unmappedTypes[]（dbType/table/column/occurrences）；pathWarnings[]（kind/template/samplePath/occurrences/message，坏路径与命名类告警必须先修正再生成）；"
         + "namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey，逐表核对命名契约）；"
         + "coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）；platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）。\n"
+        + "载荷口径：回执只承载于 structuredContent 一处，text 块仅为摘要说明（不重复输出载荷）。\n"
         + "常见错误（经协议 isError=true 返回，消息带 [错误分类] 前缀）：InvalidArgument（preset 未知或与 files 同传、tables 缺失、files 含包外路径、duplicateStrategy/webDirectory 非法、variables/modules 结构非法）；"
         + "TemplatePackageError（包不存在、模板渲染失败含行列、输出路径越界）；InternalError。")]
-    public async Task<object> PreviewGenerationAsync(
+    public async Task<CallToolResult> PreviewGenerationAsync(
         [Description("模板包包名（必填）：先用 list_template_packages 选包。")]
         string package,
         [Description("工作区根目录绝对路径（必填）：输出文件的根前缀，最终路径必须落在其内。")]
@@ -291,7 +294,7 @@ public sealed class PreviewTools
                 "preview_generation 完成，包 {PackageName}，条目 {EntryCount}（new {NewCount}/overwrite {OverwriteCount}/skip {SkipCount}），路径告警 {PathWarningCount}，覆盖告警 {CoverageWarningCount}，平台表排除 {PlatformExcludedCount}。",
                 package, entries.Count, preview.NewCount, preview.OverwriteCount, preview.SkipCount, pathWarnings.Count,
                 coverageWarnings.Count, platformTableExcluded.Count(exclusion => exclusion.Excluded));
-            return new PreviewGenerationResult(
+            PreviewGenerationResult result = new(
                 entries,
                 preview.NewCount,
                 preview.OverwriteCount,
@@ -301,6 +304,14 @@ public sealed class PreviewTools
                 namingReport,
                 coverageWarnings,
                 platformTableExcluded);
+
+            // 单载荷应答组装：回执只承载于 structuredContent 一处——SDK 缺省会对对象返回同时输出序列化 JSON 文本与
+            // structuredContent 双份等价载荷，是大回执被宿主结果预算截断的根因；text 块降级为摘要说明
+            string summary = "preview_generation dry-run 文件计划与诊断承载于 structuredContent（本应答不重复输出载荷）；"
+                + $"entries={entries.Count}（new {preview.NewCount}/overwrite {preview.OverwriteCount}/skip {preview.SkipCount}），"
+                + $"unmappedTypes={unmappedTypes.Count}，pathWarnings={pathWarnings.Count}，namingReport={namingReport.Count}，"
+                + $"coverageWarnings={coverageWarnings.Count}，platformTableExcluded={platformTableExcluded.Count}。";
+            return SinglePayloadToolResult.Create(result, summary);
         }
         catch (Exception exception)
         {

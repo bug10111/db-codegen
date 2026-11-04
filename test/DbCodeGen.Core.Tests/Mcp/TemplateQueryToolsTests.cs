@@ -4,6 +4,7 @@ using DbCodeGen.Core.Templates.Packages;
 using DbCodeGen.McpServer.Tools;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
 
 namespace DbCodeGen.Core.Tests.Mcp;
 
@@ -31,7 +32,8 @@ public sealed class TemplateQueryToolsTests : IDisposable
 
     /// <summary>
     /// 包根 README 未在清单声明时 read_template 仍可读取：返回正文、contentHash 与文档型元数据
-    /// （output 空串、enabled=false、language=Plain），且大小写不敏感命中。
+    /// （output 空串、enabled=false、language=Plain），且大小写不敏感命中；
+    /// 缺省整读不截停（truncated=false、nextOffset=null），应答为单载荷形态（text 块不重复正文）。
     /// </summary>
     [Fact]
     public async Task ReadTemplateAsync_UndeclaredRootReadme_ReturnsDocumentMetadata()
@@ -39,9 +41,9 @@ public sealed class TemplateQueryToolsTests : IDisposable
         const string readmeContent = "# 传参契约\n\nmodules：业务模块清单。\n";
         TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
 
-        object result = await tools.ReadTemplateAsync("simple", "README.md.scriban", CancellationToken.None);
+        CallToolResult result = await tools.ReadTemplateAsync("simple", "README.md.scriban", cancellationToken: CancellationToken.None);
 
-        ReadTemplateResult dto = Assert.IsType<ReadTemplateResult>(result);
+        ReadTemplateResult dto = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(result);
         Assert.Equal("simple", dto.Package);
         Assert.Equal("README.md.scriban", dto.Path);
         Assert.Equal(string.Empty, dto.Output);
@@ -50,11 +52,114 @@ public sealed class TemplateQueryToolsTests : IDisposable
         Assert.Equal(readmeContent, dto.Content);
         Assert.Equal(TemplateContentHash.Compute(readmeContent), dto.ContentHash);
 
+        // 缺省整读不截停：全文返回，无剩余切片
+        Assert.Equal(readmeContent.Length, dto.CharCount);
+        Assert.Null(dto.NextOffset);
+        Assert.False(dto.Truncated);
+
+        // 单载荷去重不变量：text 块仅为摘要说明，不再重复输出正文 JSON
+        TextContentBlock summary = Assert.IsType<TextContentBlock>(Assert.Single(result.Content));
+        Assert.DoesNotContain(readmeContent, summary.Text);
+
         // 大小写不敏感：同一窄例外命中，返回规范化路径
-        object lowerCaseResult = await tools.ReadTemplateAsync("simple", "readme.MD.scriban", CancellationToken.None);
-        ReadTemplateResult lowerCaseDto = Assert.IsType<ReadTemplateResult>(lowerCaseResult);
+        CallToolResult lowerCaseResult = await tools.ReadTemplateAsync("simple", "readme.MD.scriban", cancellationToken: CancellationToken.None);
+        ReadTemplateResult lowerCaseDto = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(lowerCaseResult);
         Assert.Equal("README.md.scriban", lowerCaseDto.Path);
         Assert.Equal(readmeContent, lowerCaseDto.Content);
+    }
+
+    /// <summary>
+    /// 分片读全循环：offset=0 + maxChars 取首片（truncated=false、nextOffset 指向下一片、contentHash 为全文摘要），
+    /// 按 nextOffset 续读至 null 收敛，各片拼接与全文逐字一致。
+    /// </summary>
+    [Fact]
+    public async Task ReadTemplateAsync_ShardedReads_ConvergeToFullContent()
+    {
+        string fullContent = "HEAD" + new string('a', 2000) + "TAIL";
+        TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
+        await File.WriteAllTextAsync(Path.Combine(GetCurrentPackageRoot(), "entity.java.scriban"), fullContent);
+        string fullHash = TemplateContentHash.Compute(fullContent);
+
+        CallToolResult firstResult = await tools.ReadTemplateAsync(
+            "simple", "entity.java.scriban", offset: 0, maxChars: 1000, cancellationToken: CancellationToken.None);
+        ReadTemplateResult first = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(firstResult);
+        Assert.Equal(fullContent[..1000], first.Content);
+        Assert.Equal(1000, first.NextOffset);
+        Assert.False(first.Truncated);
+        Assert.Equal(fullContent.Length, first.CharCount);
+
+        // 分片模式 contentHash 恒为全文摘要：任意分片轮次均可作 save_template_edit 条件写期望值
+        Assert.Equal(fullHash, first.ContentHash);
+
+        CallToolResult secondResult = await tools.ReadTemplateAsync(
+            "simple", "entity.java.scriban", offset: first.NextOffset, maxChars: 1000, cancellationToken: CancellationToken.None);
+        ReadTemplateResult second = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(secondResult);
+        Assert.Equal(fullContent[1000..2000], second.Content);
+        Assert.Equal(2000, second.NextOffset);
+        Assert.False(second.Truncated);
+
+        CallToolResult tailResult = await tools.ReadTemplateAsync(
+            "simple", "entity.java.scriban", offset: second.NextOffset, maxChars: 1000, cancellationToken: CancellationToken.None);
+        ReadTemplateResult tail = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(tailResult);
+        Assert.Equal(fullContent[2000..], tail.Content);
+        Assert.Null(tail.NextOffset);
+        Assert.False(tail.Truncated);
+
+        Assert.Equal(fullContent, first.Content + second.Content + tail.Content);
+    }
+
+    /// <summary>
+    /// 整读模式 maxChars 截停：正文超限时 content 截停至该长度，truncated=true、nextOffset=截停点，
+    /// charCount 仍为全文长度，text 摘要块不包含正文。
+    /// </summary>
+    [Fact]
+    public async Task ReadTemplateAsync_WholeReadWithMaxChars_TruncatesAndMarksContinuation()
+    {
+        string fullContent = "HEAD" + new string('b', 2000) + "TAIL";
+        TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
+        await File.WriteAllTextAsync(Path.Combine(GetCurrentPackageRoot(), "entity.java.scriban"), fullContent);
+
+        CallToolResult result = await tools.ReadTemplateAsync(
+            "simple", "entity.java.scriban", maxChars: 1200, cancellationToken: CancellationToken.None);
+        ReadTemplateResult dto = StructuredToolResponseReader.ReadStructured<ReadTemplateResult>(result);
+        Assert.Equal(fullContent[..1200], dto.Content);
+        Assert.True(dto.Truncated);
+        Assert.Equal(1200, dto.NextOffset);
+        Assert.Equal(fullContent.Length, dto.CharCount);
+        Assert.Equal(TemplateContentHash.Compute(fullContent), dto.ContentHash);
+
+        TextContentBlock summary = Assert.IsType<TextContentBlock>(Assert.Single(result.Content));
+        Assert.DoesNotContain(fullContent, summary.Text);
+    }
+
+    /// <summary>
+    /// 分片入参护栏：offset 负值、offset 超出 charCount、maxChars 低于/高于护栏区间均结构化拒绝（InvalidArgument）。
+    /// </summary>
+    [Fact]
+    public async Task ReadTemplateAsync_InvalidSliceArguments_StructurallyRejected()
+    {
+        TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
+        const string templatePath = "entity.java.scriban";
+
+        // offset 负值
+        McpException negativeOffset = await Assert.ThrowsAsync<McpException>(
+            () => tools.ReadTemplateAsync("simple", templatePath, offset: -1, cancellationToken: CancellationToken.None));
+        Assert.StartsWith("[InvalidArgument]", negativeOffset.Message);
+
+        // offset 超出正文总长
+        McpException outOfRangeOffset = await Assert.ThrowsAsync<McpException>(
+            () => tools.ReadTemplateAsync("simple", templatePath, offset: 99, cancellationToken: CancellationToken.None));
+        Assert.StartsWith("[InvalidArgument]", outOfRangeOffset.Message);
+        Assert.Contains("超出正文范围", outOfRangeOffset.Message);
+
+        // maxChars 低于护栏下界与高于护栏上界
+        McpException belowGuardrail = await Assert.ThrowsAsync<McpException>(
+            () => tools.ReadTemplateAsync("simple", templatePath, maxChars: 999, cancellationToken: CancellationToken.None));
+        Assert.StartsWith("[InvalidArgument]", belowGuardrail.Message);
+
+        McpException aboveGuardrail = await Assert.ThrowsAsync<McpException>(
+            () => tools.ReadTemplateAsync("simple", templatePath, maxChars: 100001, cancellationToken: CancellationToken.None));
+        Assert.StartsWith("[InvalidArgument]", aboveGuardrail.Message);
     }
 
     /// <summary>
@@ -79,14 +184,14 @@ public sealed class TemplateQueryToolsTests : IDisposable
         foreach (string rejectedPath in rejectedPaths)
         {
             McpException error = await Assert.ThrowsAsync<McpException>(
-                () => tools.ReadTemplateAsync("simple", rejectedPath, CancellationToken.None));
+                () => tools.ReadTemplateAsync("simple", rejectedPath, cancellationToken: CancellationToken.None));
             Assert.StartsWith("[TemplatePackageError]", error.Message);
             Assert.Contains("模板文件不存在", error.Message);
         }
 
         TemplateQueryTools emptyReadmeTools = await CreateToolsAsync(withRootReadme: false);
         McpException missingError = await Assert.ThrowsAsync<McpException>(
-            () => emptyReadmeTools.ReadTemplateAsync("simple", "README.md.scriban", CancellationToken.None));
+            () => emptyReadmeTools.ReadTemplateAsync("simple", "README.md.scriban", cancellationToken: CancellationToken.None));
         Assert.StartsWith("[TemplatePackageError]", missingError.Message);
         Assert.Contains("模板文件不存在", missingError.Message);
     }
