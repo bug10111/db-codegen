@@ -200,7 +200,7 @@ public sealed class PreviewTools
     /// <param name="package">模板包包名。</param>
     /// <param name="workspaceRoot">工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建）。</param>
     /// <param name="codeDirectory">代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）；经源根标记拆分为相对输出根与基础包名，包间输出路径配方以包清单声明的输出路径形态为准。</param>
-    /// <param name="tables">合成表集合；所选模板含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构即可，无需连接数据库。</param>
+    /// <param name="tables">合成表集合；所选模板含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构即可，无需连接数据库；仅传表名缺 columns 时按表壳渲染，空迭代告警点名该表并在 text 摘要单列。</param>
     /// <param name="basePackageOverride">本次生成的基础包名覆盖值；为空时使用代码目录派生值。</param>
     /// <param name="files">模板过滤清单：传则仅预览清单内模板（包内不存在的路径直接拒绝），省略时默认选择包内全部启用条目。</param>
     /// <param name="preset">命名预设（manifest.presets）：与 files 互斥；服务端解析为模板清单并注入预设默认变量。</param>
@@ -219,13 +219,15 @@ public sealed class PreviewTools
         + "参数：package(string,必填)=模板包包名；workspaceRoot(string,必填)=输出根前缀绝对路径，最终路径必须落在其内；"
         + "codeDirectory(string,必填)=项目内完整相对路径含包名（如 src/main/java/com/example/demo），派生相对输出根与基础包名；"
         + "tables(array<object>,条件必填)=所选模板含 table 作用域条目时至少一张（元素 name 必填、columns[] 可选，可原样透传 get_table_detail 的列），纯 module/project 模板集合可省略；"
+        + "仅传表名缺 columns 时按表壳渲染（列循环模板零迭代），空迭代告警点名该表且 text 摘要单列该表；"
         + "basePackageOverride(string,可选,默认 null)=基础包名覆盖值；files(array<string>,可选,默认 null)=模板过滤清单，省略时取包内全部启用条目；"
         + "preset(string,可选,默认 null)=命名预设（见 list_template_packages/list_templates 的 presets），与 files 互斥，预设默认变量与调用方 variables 逐键合并（调用方优先）；"
         + "duplicateStrategy(string,可选,默认 skip)=overwrite/skip；variables(object,可选,默认 null)=注入 vars.*，命名契约键透传；"
         + "modules(array<object>,可选,默认 null)=module 作用域模板逐个渲染，元素 name 必填；webDirectory(string,可选,默认 web)=root=web 基准，相对且不含 ..；"
         + "includePlatformTables(boolean,可选,默认 false)=true 时平台表参与生成但回执仍标注命中。\n"
         + "返回：entries[]（table 来源上下文/relativePath 渲染后相对路径/absolutePath 目标绝对路径/action=new|overwrite|skip）、newCount/overwriteCount/skipCount；"
-        + "unmappedTypes[]（dbType/table/column/occurrences）；pathWarnings[]（kind/template/samplePath/occurrences/message，坏路径与命名类告警必须先修正再生成）；"
+        + "unmappedTypes[]（dbType/table/column/occurrences）；pathWarnings[]（kind/template/samplePath/occurrences/message，坏路径与命名类告警必须先修正再生成；"
+        + "缺列表壳渲染的空迭代告警 message 含表名与经 get_table_detail 取列元数据后重试的引导）；"
         + "namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey，逐表核对命名契约）；"
         + "coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）；platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）。\n"
         + "载荷口径：回执只承载于 structuredContent 一处，text 块仅为摘要说明（不重复输出载荷）。\n"
@@ -238,7 +240,7 @@ public sealed class PreviewTools
         string workspaceRoot,
         [Description("代码目录（项目内完整相对路径含包名，如 src/main/java/com/example/common）：按源根标记（java/kotlin/groovy/scala/src）拆分为相对输出根与基础包名，纯包名形态输出根固定 src/main/java；包间输出路径配方差异以包清单 files[].output 形态为准（经 list_templates 查看）。")]
         string codeDirectory,
-        [Description("合成表集合；所选模板（files/preset 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构（列元数据自带），无需连接数据库。")]
+        [Description("合成表集合；所选模板（files/preset 过滤后）含 table 作用域条目时必填非空（至少一张表），纯 module/project 作用域集合可省略；离线合成场景直接内联表结构（列元数据自带），无需连接数据库；仅传表名缺 columns 时按表壳渲染，空迭代告警点名该表。")]
         IReadOnlyList<SyntheticTableInput>? tables = null,
         [Description("基础包名覆盖值（可选，默认 null）：为空时使用代码目录派生值。")]
         string? basePackageOverride = null,
@@ -306,11 +308,14 @@ public sealed class PreviewTools
                 platformTableExcluded);
 
             // 单载荷应答组装：回执只承载于 structuredContent 一处——SDK 缺省会对对象返回同时输出序列化 JSON 文本与
-            // structuredContent 双份等价载荷，是大回执被宿主结果预算截断的根因；text 块降级为摘要说明
+            // structuredContent 双份等价载荷，是大回执被宿主结果预算截断的根因；text 块降级为摘要说明。
+            // 缺列表（表壳渲染）点名段：空迭代告警在案且调用方存在未提供 columns 的表时，摘要单列该批表名并引导补列
+            string shellTableNote = BuildShellTableNote(tables, preview.PathWarnings);
             string summary = "preview_generation dry-run 文件计划与诊断承载于 structuredContent（本应答不重复输出载荷）；"
                 + $"entries={entries.Count}（new {preview.NewCount}/overwrite {preview.OverwriteCount}/skip {preview.SkipCount}），"
                 + $"unmappedTypes={unmappedTypes.Count}，pathWarnings={pathWarnings.Count}，namingReport={namingReport.Count}，"
-                + $"coverageWarnings={coverageWarnings.Count}，platformTableExcluded={platformTableExcluded.Count}。";
+                + $"coverageWarnings={coverageWarnings.Count}，platformTableExcluded={platformTableExcluded.Count}"
+                + (shellTableNote.Length == 0 ? "。" : $"；{shellTableNote}");
             return SinglePayloadToolResult.Create(result, summary);
         }
         catch (Exception exception)
@@ -332,6 +337,53 @@ public sealed class PreviewTools
         string normalized = path.Trim().Replace('\\', '/');
         return package.Files.FirstOrDefault(
             file => string.Equals(file.RelativeTemplatePath, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 构建"缺列表点名"摘要段：预检产出空迭代告警（表壳渲染零迭代信号在案）且调用方存在未提供 columns 的表时，
+    /// 摘要单列该批表名并引导经 get_table_detail 取列元数据后重试；无空迭代告警或全部表已带列时返回空串（摘要不变）。
+    /// </summary>
+    /// <param name="tables">调用方传入的合成表集合，可为 null。</param>
+    /// <param name="pathWarnings">dry-run 预检告警清单。</param>
+    /// <returns>点名摘要段文本；无需点名时为空串。</returns>
+    private static string BuildShellTableNote(
+        IReadOnlyList<SyntheticTableInput>? tables,
+        IReadOnlyList<PathWarningInfo> pathWarnings)
+    {
+        bool hasEmptyIterationWarning = false;
+        foreach (PathWarningInfo warning in pathWarnings)
+        {
+            if (warning.Kind == PathWarningInfo.EmptyIteration)
+            {
+                hasEmptyIterationWarning = true;
+                break;
+            }
+        }
+
+        if (!hasEmptyIterationWarning || tables is null)
+        {
+            return string.Empty;
+        }
+
+        // 收集未提供列元数据的表名（去空白、去重），供摘要单列点名
+        var names = new List<string>();
+        foreach (SyntheticTableInput table in tables)
+        {
+            if (table is null || (table.Columns is not null && table.Columns.Count > 0))
+            {
+                continue;
+            }
+
+            string name = table.Name.Trim();
+            if (name.Length > 0 && !names.Contains(name))
+            {
+                names.Add(name);
+            }
+        }
+
+        return names.Count == 0
+            ? string.Empty
+            : $"缺列表（表壳渲染，未提供 columns）：{string.Join("、", names)}；请经 get_table_detail 取列元数据后重试。";
     }
 
     /// <summary>

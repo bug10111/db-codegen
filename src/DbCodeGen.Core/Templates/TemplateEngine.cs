@@ -71,7 +71,7 @@ public sealed class TemplateEngine
         // 组装渲染上下文：table / column? / package / tool（+ 可选作用域变量 vars / module / tables）
         ScriptObject root = BuildRootContext(table, column, packageContext, scopeContext);
 
-        return RenderCore(template, root, packageContext, cancellationToken, sourceName);
+        return RenderCore(template, root, packageContext, cancellationToken, sourceName, table);
     }
 
     /// <summary>
@@ -124,13 +124,15 @@ public sealed class TemplateEngine
     /// <param name="packageContext">package 侧渲染上下文，供共享函数文件定位。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <param name="sourceName">模板名，用于错误定位展示。</param>
+    /// <param name="tableContext">单表渲染上下文的当前表元数据，供空迭代告警做表壳点名判定；作用域渲染传 null。</param>
     /// <returns>渲染结果，成功时含真实代码，失败时含错误描述与行列。</returns>
     private PreviewResult RenderCore(
         Template template,
         ScriptObject root,
         TemplatePackageContext packageContext,
         CancellationToken cancellationToken,
-        string sourceName)
+        string sourceName,
+        TableInfo? tableContext = null)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -148,9 +150,9 @@ public sealed class TemplateEngine
                 stopwatch.ElapsedMilliseconds);
         }
 
-        // 渲染前空迭代分析：for 迭代源为空集合 / null 的零迭代收集为非阻断告警（守卫文案设计附带降噪指引），
-        // 随成功结果透出供三入口（render/preview/generate）回执可见
-        IReadOnlyList<EmptyIterationWarning> emptyIterations = EmptyIterationGuard.FindEmptyIterations(template, root);
+        // 渲染前空迭代分析：for 迭代源为空集合 / null 的零迭代收集为非阻断告警（守卫文案设计附带降噪指引，
+        // 表壳渲染场景升级为含表名与补列引导的点名文案），随成功结果透出供三入口（render/preview/generate）回执可见
+        IReadOnlyList<EmptyIterationWarning> emptyIterations = EmptyIterationGuard.FindEmptyIterations(template, root, tableContext);
 
         // 解析包内共享函数文件：约定文件不存在时为 null，渲染管线零改动，保证无共享文件包行为不变
         string? sharedFunctionsPath = ResolveSharedFunctionsPath(packageContext);

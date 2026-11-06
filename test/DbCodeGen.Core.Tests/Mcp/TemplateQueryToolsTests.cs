@@ -205,7 +205,8 @@ public sealed class TemplateQueryToolsTests : IDisposable
     {
         TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
 
-        ListTemplatesResult allResult = await tools.ListTemplatesAsync("simple", null, null, CancellationToken.None);
+        ListTemplatesResult allResult = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, null, cancellationToken: CancellationToken.None));
         TemplateEntry documentEntry = Assert.Single(allResult.Templates.Where(entry => entry.Path == "README.md.scriban"));
         Assert.Equal(string.Empty, documentEntry.Output);
         Assert.False(documentEntry.Enabled);
@@ -214,21 +215,70 @@ public sealed class TemplateQueryToolsTests : IDisposable
         Assert.Equal(2, allResult.Templates.Count);
 
         // 分组过滤非空时根级文档不命中（即使分组文本与文档路径全等）
-        ListTemplatesResult groupedResult = await tools.ListTemplatesAsync("simple", "README.md.scriban", null, CancellationToken.None);
+        ListTemplatesResult groupedResult = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", "README.md.scriban", null, cancellationToken: CancellationToken.None));
         Assert.DoesNotContain(groupedResult.Templates, entry => entry.Path == "README.md.scriban");
 
         // 语言过滤：plain 命中文档条目，java 不命中
-        ListTemplatesResult plainResult = await tools.ListTemplatesAsync("simple", null, "plain", CancellationToken.None);
+        ListTemplatesResult plainResult = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, "plain", cancellationToken: CancellationToken.None));
         Assert.Single(plainResult.Templates);
         Assert.Equal("README.md.scriban", plainResult.Templates[0].Path);
 
-        ListTemplatesResult javaResult = await tools.ListTemplatesAsync("simple", null, "java", CancellationToken.None);
+        ListTemplatesResult javaResult = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, "java", cancellationToken: CancellationToken.None));
         Assert.DoesNotContain(javaResult.Templates, entry => entry.Path == "README.md.scriban");
 
         // 文档条目不进包文件清单：fileCount 仍为清单声明数
         ListTemplatePackagesResult packagesResult = await tools.ListTemplatePackagesAsync(CancellationToken.None);
         TemplatePackageSummary summary = Assert.Single(packagesResult.Packages);
         Assert.Equal(1, summary.FileCount);
+    }
+
+    /// <summary>
+    /// list_templates compact=true 返回紧凑单载荷回执（package/isBuiltin/templateCount/templates[].{path,enabled}/presetCount）：
+    /// 命中条目与过滤口径和完整模式一致（含文档型条目）、体量显著小于完整回执，text 块为摘要说明；
+    /// compact=false 缺省返回完整回执（结构不变，text 块承载 DTO 全量 JSON 的既有形态）。
+    /// </summary>
+    [Fact]
+    public async Task ListTemplatesAsync_CompactMode_ReturnsMetadataOnlyAndSmallerPayload()
+    {
+        TemplateQueryTools tools = await CreateToolsAsync(withRootReadme: true);
+
+        // 缺省（compact=false）：完整回执不变
+        ListTemplatesResult full = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, null, cancellationToken: CancellationToken.None));
+        Assert.Equal(2, full.Templates.Count);
+        Assert.Equal("gen/Entity.java", full.Templates[0].Output);
+
+        // compact=true：仅元数据最小集，命中条目与完整模式一致，text 块为摘要说明
+        CallToolResult compactResponse = await tools.ListTemplatesAsync(
+            "simple", null, null, compact: true, cancellationToken: CancellationToken.None);
+        ListTemplatesCompactResult compact = StructuredToolResponseReader.ReadStructured<ListTemplatesCompactResult>(compactResponse);
+        Assert.Equal("simple", compact.Package);
+        Assert.False(compact.IsBuiltin);
+        Assert.Equal(2, compact.TemplateCount);
+        Assert.Equal(2, compact.Templates.Count);
+        Assert.Contains(compact.Templates, entry => entry.Path == "entity.java.scriban" && entry.Enabled);
+        Assert.Contains(compact.Templates, entry => entry.Path == "README.md.scriban" && !entry.Enabled);
+        Assert.Equal(0, compact.PresetCount);
+
+        // 单载荷去重不变量：text 块仅为摘要说明，不重复输出载荷 JSON
+        TextContentBlock compactSummary = Assert.IsType<TextContentBlock>(Assert.Single(compactResponse.Content));
+        Assert.DoesNotContain("\"templates\"", compactSummary.Text);
+        Assert.Contains("templateCount=2", compactSummary.Text);
+
+        // 过滤口径照常生效：java 只命中实体模板
+        ListTemplatesCompactResult javaCompact = StructuredToolResponseReader.ReadStructured<ListTemplatesCompactResult>(
+            await tools.ListTemplatesAsync("simple", null, "java", compact: true, cancellationToken: CancellationToken.None));
+        TemplateEntryCompact javaEntry = Assert.Single(javaCompact.Templates);
+        Assert.Equal("entity.java.scriban", javaEntry.Path);
+        Assert.Equal(1, javaCompact.TemplateCount);
+
+        // 体量显著缩小：紧凑回执序列化长度不足完整回执的一半
+        string fullJson = System.Text.Json.JsonSerializer.Serialize(full);
+        string compactJson = System.Text.Json.JsonSerializer.Serialize(compact);
+        Assert.True(compactJson.Length * 2 < fullJson.Length, $"compact={compactJson.Length}，full={fullJson.Length}");
     }
 
     /// <summary>

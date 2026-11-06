@@ -223,6 +223,7 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | `package` | string | 是 | — | 模板包包名 |
 | `group` | string | 否 | null | 分组前缀过滤：匹配模板相对路径的子目录前缀（目录边界对齐，`controller` 不会误命中 `controllerx/`）；多级子目录用正斜杠分隔；大小写不敏感 |
 | `type` | string | 否 | null | 语言段过滤，取值 `java` / `csharp`（或 `cs`）/ `xml` / `sql` / `json` / `plain`，大小写不敏感；非法取值被拒绝并列出合法值 |
+| `compact` | boolean | 否 | false | 紧凑模式：false=完整回执行为不变；true=条目仅含元数据 `{path, enabled}`，包级仅含 `{package, isBuiltin, templateCount, presetCount}`，不含 `output/language/scope/root/role/isContract/warnings/presets` 细节；`group`/`type` 过滤照常生效。**大包建议 `compact=true`**，避免完整回执超宿主单结果预算被截断 |
 
 **返回**：
 
@@ -244,6 +245,8 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | `presets` | array | 命名预设摘要（`name` / `description` / `fileCount`） |
 
 **包契约文档型条目**：当包根存在 `manifest.contractPath`（缺省 `README.md.scriban`）且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path` 为契约路径、`output` 为空串、`enabled=false`、`scope=project`、`isContract=true`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤按契约文件名的语言段判定。
+
+**compact=true 紧凑回执**：单载荷形态（完整回执只承载于 `structuredContent` 一处，text 内容块为摘要说明）。返回 `package` / `isBuiltin` / `templateCount`（过滤后命中条目数）/ `templates[]`（仅 `path` + `enabled`）/ `presetCount`（命名预设数量，预设细节经完整模式或 `read_template` 查看）。
 
 **错误态**：`TemplatePackageError`（包不存在）；`InvalidArgument`（`type` 非法）。
 
@@ -617,7 +620,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
 | `package` | string | 是 | — | 模板包包名 |
-| `tables` | array of object | 条件必填 | null | 合成表集合；所选模板（`files` 过滤后）含 table 作用域条目时必填非空（至少一张，结构见本章开头；需要完整列时先用 `get_table_detail` 取回后传入），纯 module/project 作用域集合可省略 |
+| `tables` | array of object | 条件必填 | null | 合成表集合；所选模板（`files` 过滤后）含 table 作用域条目时必填非空（至少一张，结构见本章开头；需要完整列时先用 `get_table_detail` 取回后传入），纯 module/project 作用域集合可省略；仅传表名缺 `columns` 时按表壳渲染（列循环模板零迭代），空迭代告警点名该表 |
 | `workspaceRoot` | string | 是 | — | 工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建） |
 | `codeDirectory` | string | 是 | — | 代码目录：项目内完整相对路径含包名（如 `src/main/java/com/example/demo`）；解析出基础包名与相对输出根，basePackage 末段即「模块」 |
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
@@ -647,7 +650,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `unmappedTypes[].column` | string | 出现该类型的列名 |
 | `unmappedTypes[].occurrences` | integer | 出现次数 |
 | `pathWarnings` | array | 输出路径告警清单（坏路径预检，**非阻断**、不改变文件计划，但生成前必须核对）；无告警时为空列表 |
-| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符）/ `EmptyIteration`（模板内 for 循环零迭代信号）/ `InvalidJavaPackageSegment`（Java 包段非法标识符）/ `DuplicatePackageSegment`（src/main/java 之后连续重复包段）/ `NonLowercasePackageSegment`（包段含大写字母）/ `TableNameRoundTripMismatch`（模板用 hump2/3Underline(table.className) 反推物理表名）/ `PermissionKeyMismatch`（显式权限模块与 modules[0].name kebab 形态不一致）/ `WorkspaceRootMayBeAggregate`（workspaceRoot 自身疑似 Maven 聚合根且 codeDirectory 未落入模块目录） |
+| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符）/ `EmptyIteration`（模板内 for 循环零迭代信号；表壳渲染导致的零迭代为表级点名——`message` 含物理表名与经 `get_table_detail` 取列元数据后重试的引导）/ `InvalidJavaPackageSegment`（Java 包段非法标识符）/ `DuplicatePackageSegment`（src/main/java 之后连续重复包段）/ `NonLowercasePackageSegment`（包段含大写字母）/ `TableNameRoundTripMismatch`（模板用 hump2/3Underline(table.className) 反推物理表名）/ `PermissionKeyMismatch`（显式权限模块与 modules[0].name kebab 形态不一致）/ `WorkspaceRootMayBeAggregate`（workspaceRoot 自身疑似 Maven 聚合根且 codeDirectory 未落入模块目录） |
 | `pathWarnings[].template` | string | 首次出现该告警的模板相对路径 |
 | `pathWarnings[].samplePath` | string | 首次出现的渲染后路径样例 |
 | `pathWarnings[].occurrences` | integer | 该告警在本次生成范围内的总出现次数（同模板同种类跨表归并） |

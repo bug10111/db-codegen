@@ -119,29 +119,38 @@ public sealed class TemplateQueryTools
     /// 列出指定模板包内的模板条目，可按分组（相对路径子目录前缀）与语言段过滤，
     /// 返回条目相对路径、输出路径模板、启用标记与推导语言；
     /// 包根存在且未在清单声明 README.md.scriban 时附带一条文档型条目（不进清单、不参与生成）。
+    /// compact=true 时切换为紧凑单载荷回执：条目仅含 path/enabled 元数据、presets 折叠为计数，供大包在宿主单结果预算内完整送达。
     /// </summary>
     /// <param name="package">模板包包名。</param>
     /// <param name="group">可选分组前缀，匹配模板相对路径的子目录前缀，如 "controller"、子目录多级用正斜杠分隔。</param>
     /// <param name="type">可选语言段过滤，取值 java / csharp / xml / sql / json / plain，对应模板文件名语言段约定。</param>
+    /// <param name="compact">可选紧凑模式；false（缺省）=完整回执行为不变，true=仅元数据最小集。</param>
     /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>模板条目列表（含过滤后总数；结构化内容，输出结构由 ListTemplatesResult 声明）。</returns>
+    /// <returns>compact=false 返回与既有 typed 返回逐字一致的完整回执（ListTemplatesResult），
+    /// compact=true 返回紧凑单载荷回执（ListTemplatesCompactResult）；均为结构化内容，结构由两个应答 DTO 分别声明。</returns>
     [McpServerTool(Name = "list_templates", Title = "列出模板文件", ReadOnly = true, Idempotent = true, Destructive = false, UseStructuredContent = true)]
     [Description("用途：列出指定模板包内的模板条目与命名预设，确定生成时的 files 候选或维护目标。\n"
-        + "何时用：生成前核对模板路径/作用域/输出路径；模板维护前定位文件；确认包提供哪些 preset。\n"
+        + "何时用：生成前核对模板路径/作用域/输出路径；模板维护前定位文件；确认包提供哪些 preset；大包完整回执超宿主结果预算被截断时改用 compact=true。\n"
         + "参数：package(string,必填)=模板包包名；group(string,可选,默认 null)=分组前缀过滤（相对路径子目录前缀，目录边界对齐，大小写不敏感）；"
-        + "type(string,可选,默认 null)=语言段过滤，取值 java/csharp(cs)/xml/sql/json/plain，非法取值拒绝并列出合法值。\n"
-        + "返回：package（包名）、isBuiltin（是否内置）、basePackage（基础包名，未配置为空串）、templates[]（path 相对路径/output 输出路径模板/enabled 是否默认参与生成/"
+        + "type(string,可选,默认 null)=语言段过滤，取值 java/csharp(cs)/xml/sql/json/plain，非法取值拒绝并列出合法值；"
+        + "compact(boolean,可选,默认 false)=紧凑模式：false=完整回执行为不变；true=条目仅含元数据 {path, enabled}，包级仅含 {package, isBuiltin, templateCount, presetCount}，"
+        + "不含 output/language/scope/root/role/isContract/warnings/presets 细节；大包建议 compact=true（否则回执可能被宿主预算截断）。\n"
+        + "返回（compact=false）：package（包名）、isBuiltin（是否内置）、basePackage（基础包名，未配置为空串）、templates[]（path 相对路径/output 输出路径模板/enabled 是否默认参与生成/"
         + "language/scope=table|module|project/root=legacy|output|workspace|web/role 产出角色/isContract 是否契约文档条目）、"
         + "warnings[]（MissingContract 等非阻断告警）、presets[]（name/description/fileCount）。\n"
-        + "文档型条目：包根存在 contractPath 且未在清单声明时附带一条（enabled=false、output 空串、scope=project、isContract=true），不计入 fileCount、不参与生成。\n"
+        + "返回（compact=true，单载荷形态：structuredContent 唯一载荷、text 为摘要说明）：package、isBuiltin、templateCount（过滤后命中条目数）、templates[]（path/enabled）、"
+        + "presetCount（命名预设数量）；group/type 过滤照常生效。\n"
+        + "文档型条目：包根存在 contractPath 且未在清单声明时附带一条（enabled=false、output 空串、scope=project、isContract=true），不计入 fileCount、不参与生成；compact=true 时同样返回（仅 path/enabled）。\n"
         + "常见错误：TemplatePackageError（包不存在）；InvalidArgument（type 取值非法）。")]
-    public async Task<ListTemplatesResult> ListTemplatesAsync(
+    public async Task<CallToolResult> ListTemplatesAsync(
         [Description("模板包包名（必填）。")]
         string package,
         [Description("分组前缀过滤（可选，默认 null）：匹配模板相对路径的子目录前缀，目录边界对齐（controller 不会误命中 controllerx/），多级用正斜杠分隔，大小写不敏感。")]
         string? group = null,
         [Description("语言段过滤（可选，默认 null）：取值 java / csharp（或 cs）/ xml / sql / json / plain，大小写不敏感；非法取值被拒绝并列出合法值。")]
         string? type = null,
+        [Description("紧凑模式（可选，默认 false）：false=完整回执行为不变；true=条目仅含 path/enabled、presets 折叠为 presetCount，大包建议 true 以免回执被宿主结果预算截断。")]
+        bool compact = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -210,16 +219,45 @@ public sealed class TemplateQueryTools
                 warnings.Add($"MissingContract：包 {packageInfo.Name} 未在包根找到契约文档 {packageInfo.ContractPath}；请补契约或经 manifest.contractPath 指向实际契约文件。");
             }
 
+            // 紧凑投影：仅保留定位 files 候选所需的最小元数据（path/enabled），presets 折叠为计数，
+            // 供大包回执在宿主单结果预算内完整送达；group/type 过滤口径与完整模式完全一致
+            if (compact)
+            {
+                var compactEntries = new List<TemplateEntryCompact>(entries.Count);
+                foreach (TemplateEntry entry in entries)
+                {
+                    compactEntries.Add(new TemplateEntryCompact(entry.Path, entry.Enabled));
+                }
+
+                _logger.LogInformation(
+                    "list_templates 完成（compact），包 {PackageName}，返回 {EntryCount} 条（清单声明文件 {TotalCount} 个）。",
+                    package, compactEntries.Count, packageInfo.Files.Count);
+                var compactResult = new ListTemplatesCompactResult(
+                    packageInfo.Name,
+                    packageInfo.IsBuiltin,
+                    compactEntries.Count,
+                    compactEntries,
+                    TemplatePresetResolver.GetSummaries(packageInfo).Count);
+                return SinglePayloadToolResult.Create(
+                    compactResult,
+                    "list_templates 紧凑回执承载于 structuredContent（本应答不重复输出载荷）；"
+                    + $"package={compactResult.Package}，templateCount={compactResult.TemplateCount}，presetCount={compactResult.PresetCount}，"
+                    + "完整条目细节请以 compact=false 或 read_template 查看。");
+            }
+
             _logger.LogInformation(
                 "list_templates 完成，包 {PackageName}，返回 {EntryCount} 条（清单声明文件 {TotalCount} 个）。",
                 package, entries.Count, packageInfo.Files.Count);
-            return new ListTemplatesResult(
+
+            // 缺省回执形态保持：显式 CallToolResult 逐字复刻 SDK typed-object 返回的缺省应答
+            // （text = DTO 全量 JSON + structuredContent = DTO 同口径序列化），保证 compact 缺省时回执逐字段不变
+            return SinglePayloadToolResult.CreateDefaultShaped(new ListTemplatesResult(
                 packageInfo.Name,
                 packageInfo.IsBuiltin,
                 packageInfo.BasePackage ?? string.Empty,
                 entries,
                 warnings,
-                TemplatePresetResolver.GetSummaries(packageInfo));
+                TemplatePresetResolver.GetSummaries(packageInfo)));
         }
         catch (Exception exception)
         {
@@ -587,6 +625,30 @@ public sealed record ListTemplatesResult(
     IReadOnlyList<TemplateEntry> Templates,
     IReadOnlyList<string> Warnings,
     IReadOnlyList<TemplatePresetSummary> Presets);
+
+/// <summary>
+/// list_templates 紧凑模式模板条目 DTO：仅保留定位 files 候选所需的最小元数据。
+/// </summary>
+/// <param name="Path">模板相对包根路径（可含分组目录）。</param>
+/// <param name="Enabled">是否默认参与生成。</param>
+public sealed record TemplateEntryCompact(
+    string Path,
+    bool Enabled);
+
+/// <summary>
+/// list_templates 紧凑模式应答 DTO：条目与预设折叠为最小元数据，供大包回执在宿主单结果预算内完整送达。
+/// </summary>
+/// <param name="Package">包名。</param>
+/// <param name="IsBuiltin">是否内置包。</param>
+/// <param name="TemplateCount">过滤后命中的模板条目数。</param>
+/// <param name="Templates">紧凑模板条目列表（path/enabled）。</param>
+/// <param name="PresetCount">命名预设数量；预设细节经完整模式或 read_template 查看。</param>
+public sealed record ListTemplatesCompactResult(
+    string Package,
+    bool IsBuiltin,
+    int TemplateCount,
+    IReadOnlyList<TemplateEntryCompact> Templates,
+    int PresetCount);
 
 /// <summary>
 /// read_template 应答 DTO（structuredContent 唯一载荷）。

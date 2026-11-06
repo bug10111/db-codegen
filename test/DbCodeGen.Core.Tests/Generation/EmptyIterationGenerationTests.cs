@@ -106,6 +106,44 @@ public sealed class EmptyIterationGenerationTests : IDisposable
     }
 
     /// <summary>
+    /// 表作用域模板循环 table.columns 而表未提供列元数据（表壳渲染）时，dry-run 空迭代告警升级为点名文案：
+    /// message 含物理表名与经 get_table_detail 取列元数据后重试的引导；同一模板在表已带列时不产出该告警。
+    /// </summary>
+    [Fact]
+    public async Task BuildPreviewAsync_ShellTableColumnLoop_ProducesNamedWarning()
+    {
+        (TemplatePackageInfo package, string workspaceRoot, TemplateFileSelection selection) =
+            await CreateTablePackageAsync(
+                "out/{{ table.className }}.java",
+                "class {{ table.className }} {\n{{ for c in table.columns }}    // {{ c.propertyName }}\n{{ end }}}\n");
+        var generator = CreateGenerator();
+
+        // 表壳：仅表名未传列
+        GenerationRequest shellRequest = new(
+            package, new[] { CreateSysUserTable() }, new[] { selection }, workspaceRoot, "gen");
+        GenerationPreview shellPreview = await generator.BuildPreviewAsync(shellRequest, null, CancellationToken.None);
+
+        PathWarningInfo warning = Assert.Single(shellPreview.PathWarnings);
+        Assert.Equal(PathWarningInfo.EmptyIteration, warning.Kind);
+        Assert.Contains("sys_user", warning.Message);
+        Assert.Contains("表壳渲染", warning.Message);
+        Assert.Contains("get_table_detail", warning.Message);
+        Assert.Contains("重试", warning.Message);
+
+        // 同模板 + 表已带列：列循环非空，不产出空迭代告警
+        TableInfo fullTable = CreateSysUserTable();
+        fullTable.SetColumns(new List<ColumnInfo>
+        {
+            new ColumnInfo { RawName = "id", PropertyName = "id", RawDbType = "bigint", IsPrimaryKey = true, IsNullable = false }
+        });
+        GenerationRequest fullRequest = new(
+            package, new[] { fullTable }, new[] { selection }, workspaceRoot, "gen");
+        GenerationPreview fullPreview = await generator.BuildPreviewAsync(fullRequest, null, CancellationToken.None);
+
+        Assert.DoesNotContain(fullPreview.PathWarnings, item => item.Kind == PathWarningInfo.EmptyIteration);
+    }
+
+    /// <summary>
     /// outputPath 模板含管道表达式（如 string.upcase 过滤器）时应放行渲染，产物路径按表达式求值结果落位。
     /// </summary>
     [Fact]

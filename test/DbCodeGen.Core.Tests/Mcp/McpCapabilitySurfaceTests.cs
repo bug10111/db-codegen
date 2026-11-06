@@ -184,6 +184,98 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
     }
 
     /// <summary>
+    /// preview_generation 仅传表名缺 columns（表壳渲染）时：空迭代告警 message 点名表名并含 get_table_detail 补列引导，
+    /// text 摘要单列该表；表已带列时无该告警且摘要不含点名段（缺 columns 场景之外摘要不变）。
+    /// </summary>
+    [Fact]
+    public async Task PreviewTools_PreviewGeneration_ShellTable_NamedWarningAndSummary()
+    {
+        TemplatePackageInfo package = await CreatePackageAsync(
+            """
+            {
+              "name": "shell-table-pkg",
+              "description": "表壳点名测试包",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "files": [{ "template": "entity.java.scriban", "output": "out/{{table.className}}.java", "enabled": true }]
+            }
+            """,
+            ("entity.java.scriban", "class {{table.className}} {\n{{ for c in table.columns }}    // {{ c.propertyName }}\n{{ end }}}\n"));
+        var packageService = new FakeTemplatePackageService(package);
+
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"), "workspace");
+        _tempRoots.Add(Path.GetDirectoryName(workspaceRoot)!);
+        Directory.CreateDirectory(workspaceRoot);
+
+        var tools = new PreviewTools(
+            packageService,
+            new TemplateFileWriter(),
+            new TemplateEngine(),
+            new CodeGenerator(
+                new TemplateEngine(),
+                new TemplateFileWriter(),
+                new FileWriter(NullLogger<FileWriter>.Instance),
+                CreateConfigService(workspaceRoot),
+                NullLogger<CodeGenerator>.Instance),
+            NullLogger<PreviewTools>.Instance);
+
+        // 表壳：仅表名未传列
+        CallToolResult shellResponse = await tools.PreviewGenerationAsync(
+            "shell-table-pkg",
+            workspaceRoot,
+            "src/main/java/com/example",
+            tables: new[] { new SyntheticTableInput { Name = "t_asset" } },
+            files: null,
+            duplicateStrategy: DuplicateFileStrategy.Skip,
+            variables: null,
+            modules: null,
+            webDirectory: null,
+            includePlatformTables: false,
+            cancellationToken: CancellationToken.None);
+
+        PreviewGenerationResult shellResult = StructuredToolResponseReader.ReadStructured<PreviewGenerationResult>(shellResponse);
+        PathWarningItem warning = Assert.Single(shellResult.PathWarnings);
+        Assert.Equal(PathWarningInfo.EmptyIteration, warning.Kind);
+        Assert.Contains("t_asset", warning.Message);
+        Assert.Contains("get_table_detail", warning.Message);
+
+        // text 摘要单列该表并给出补列引导
+        TextContentBlock shellSummary = Assert.IsType<TextContentBlock>(Assert.Single(shellResponse.Content));
+        Assert.Contains("t_asset", shellSummary.Text);
+        Assert.Contains("get_table_detail", shellSummary.Text);
+        Assert.Contains("表壳渲染", shellSummary.Text);
+
+        // 表已带列：无空迭代告警，摘要不含点名段
+        CallToolResult fullResponse = await tools.PreviewGenerationAsync(
+            "shell-table-pkg",
+            workspaceRoot,
+            "src/main/java/com/example",
+            tables: new[]
+            {
+                new SyntheticTableInput
+                {
+                    Name = "t_asset",
+                    Columns = new[]
+                    {
+                        new SyntheticColumnInput { Name = "id", RawDbType = "bigint", IsPrimaryKey = true, IsNullable = false }
+                    }
+                }
+            },
+            files: null,
+            duplicateStrategy: DuplicateFileStrategy.Skip,
+            variables: null,
+            modules: null,
+            webDirectory: null,
+            includePlatformTables: false,
+            cancellationToken: CancellationToken.None);
+
+        PreviewGenerationResult fullResult = StructuredToolResponseReader.ReadStructured<PreviewGenerationResult>(fullResponse);
+        Assert.DoesNotContain(fullResult.PathWarnings, item => item.Kind == PathWarningInfo.EmptyIteration);
+        TextContentBlock fullSummary = Assert.IsType<TextContentBlock>(Assert.Single(fullResponse.Content));
+        Assert.DoesNotContain("表壳渲染", fullSummary.Text);
+    }
+
+    /// <summary>
     /// preview_generation 所选模板含 table 作用域条目但未提供 tables：错误走协议 isError 通道（InvalidArgument 前缀）。
     /// </summary>
     [Fact]
@@ -331,7 +423,8 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         TemplatePresetSummary packagePreset = Assert.Single(summary.Presets);
         Assert.Equal(("base", 2), (packagePreset.Name, packagePreset.FileCount));
 
-        ListTemplatesResult templates = await tools.ListTemplatesAsync("simple", null, null, CancellationToken.None);
+        ListTemplatesResult templates = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, null, cancellationToken: CancellationToken.None));
         Assert.Equal(3, templates.Templates.Count);
         Assert.Equal("base", Assert.Single(templates.Presets).Name);
         TemplateEntry contractEntry = Assert.Single(templates.Templates, entry => entry.IsContract);
@@ -371,7 +464,8 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
         Assert.False(summary.HasContract);
         Assert.Contains(summary.Warnings, warning => warning.StartsWith("MissingContract", StringComparison.Ordinal));
 
-        ListTemplatesResult templates = await tools.ListTemplatesAsync("simple", null, null, CancellationToken.None);
+        ListTemplatesResult templates = StructuredToolResponseReader.ReadStructured<ListTemplatesResult>(
+            await tools.ListTemplatesAsync("simple", null, null, cancellationToken: CancellationToken.None));
         Assert.Contains(templates.Warnings, warning => warning.StartsWith("MissingContract", StringComparison.Ordinal));
     }
 

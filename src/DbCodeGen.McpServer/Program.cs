@@ -77,7 +77,7 @@ builder.Services.AddMcpServer(options =>
 | package | string | 是 | — | 模板包包名 |
 | workspaceRoot | string | 是 | — | 输出根前缀绝对路径；最终路径必须落在其内 |
 | codeDirectory | string | 是 | — | 项目内完整相对路径含包名（如 src/main/java/com/example/demo）；派生相对输出根与基础包名 |
-| tables | array<object> | 条件 | null | 所选模板含 table 作用域条目时必填非空；元素 name 必填、columns[] 可选；可原样透传 get_table_detail 的列 |
+| tables | array<object> | 条件 | null | 所选模板含 table 作用域条目时必填非空；元素 name 必填、columns[] 可选；可原样透传 get_table_detail 的列；仅传表名缺 columns 按表壳渲染，空迭代告警点名该表 |
 | files | array<string> | 否 | null | 模板过滤清单；与 preset 互斥；省略时取包内全部 enabled 条目 |
 | preset | string | 否 | null | manifest.presets 命名预设（如 simple-java-sso 的 remote/embedded）；与 files 互斥；preset 默认 variables 与调用方 variables 逐键合并（调用方优先） |
 | basePackageOverride | string | 否 | null | 基础包名覆盖值 |
@@ -92,7 +92,7 @@ builder.Services.AddMcpServer(options =>
 - preview_generation：entries[]（table 来源上下文/relativePath 渲染后相对路径/absolutePath 目标绝对路径/action=new|overwrite|skip）、newCount/overwriteCount/skipCount、unmappedTypes[]（dbType/table/column/occurrences）、pathWarnings[]（kind/template/samplePath/occurrences/message）、namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey）、coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）、platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）；载荷口径：回执只承载于 structuredContent 一处，text 块为摘要说明（不重复载荷）。
 - generate：generated/overwritten/skipped/failed（计数）、isCancelled、logs[]（timestamp/level/message）、namingReport/pathWarnings/coverageWarnings/platformTableExcluded（同 preview）；载荷口径：回执只承载于 structuredContent 一处，text 块为摘要说明（不重复载荷）。
 - list_template_packages：packages[]（name/description/engine/basePackage/isBuiltin/fileCount/modifiedTime/role/stack/scopes/hasBackendView/hasWebPage/contractPath/deployModes/hasContract/warnings/presets[]）。
-- list_templates / read_template：templates[]（path/output/enabled/language/scope/root/role/isContract）或正文 content+contentHash+charCount+nextOffset+truncated；两者均带 presets[]（name/description/fileCount）。read_template 正文只承载于 structuredContent（text 块为摘要说明，不重复正文）；大模板分片读全：offset（0 基字符偏移，传值含 0 进入分片模式，负值/超界拒绝）+ maxChars（单片上限，护栏 1000~100000，分片缺省 100000；整读模式为截停阈值），按 nextOffset 续读至 null 即读全；contentHash 分片模式下仍为全文摘要。
+- list_templates / read_template：templates[]（path/output/enabled/language/scope/root/role/isContract）或正文 content+contentHash+charCount+nextOffset+truncated；两者均带 presets[]（name/description/fileCount）。list_templates 支持 compact=true 紧凑模式（templates[] 仅 path/enabled + templateCount/presetCount，group/type 过滤照常生效；大包建议 compact=true 防回执超宿主结果预算被截断）。read_template 正文只承载于 structuredContent（text 块为摘要说明，不重复正文）；大模板分片读全：offset（0 基字符偏移，传值含 0 进入分片模式，负值/超界拒绝）+ maxChars（单片上限，护栏 1000~100000，分片缺省 100000；整读模式为截停阈值），按 nextOffset 续读至 null 即读全；contentHash 分片模式下仍为全文摘要。
 - 失败应答：9 个结构化输出工具（list_template_packages / list_templates / read_template / preview_generation / generate / list_datasources / list_tables / get_table_detail / get_type_map）错误经 McpException 走协议 isError 通道，消息带 [错误分类] 前缀（分类=InvalidArgument/TemplatePackageError/Timeout/Cancelled/InternalError）；其余工具（模板编辑/包管理/数据源管理）以正常结果内的 JSON {isError:true,errorType,message} 返回（errorType=InvalidArgument/TemplatePackageError/Timeout/Cancelled/InternalError/NameConflict/OriginalMissing/NotFound/SaveFailed）。
 
 【5. 硬约束】
