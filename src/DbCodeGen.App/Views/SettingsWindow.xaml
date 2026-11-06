@@ -37,7 +37,7 @@
                     </Grid>
                 </GroupBox>
 
-                <!-- 数据目录：统一存放 config.json 与 Templates，可指向百度网盘同步目录实现自动备份 -->
+                <!-- 数据目录：统一存放 config.json 与 Templates，默认位于 C:\data\DbCodeGen -->
                 <GroupBox Header="数据目录" Padding="8" Margin="0,0,0,12">
                     <StackPanel>
                         <Grid>
@@ -60,7 +60,7 @@
                                     Padding="14,4"
                                     Command="{Binding ApplyDataDirectoryCommand}" />
                         </Grid>
-                        <TextBlock Text="统一存放 config.json 与 Templates 等数据，可指向百度网盘同步目录实现自动备份；「应用」立即迁移并落盘，主「保存」会联动切换。"
+                        <TextBlock Text="统一存放 config.json 与 Templates 等数据，默认位于 C:\data\DbCodeGen；「应用」立即迁移并落盘，主「保存」会联动切换。"
                                    FontSize="11"
                                    Foreground="Gray"
                                    TextWrapping="Wrap"

@@ -84,7 +84,7 @@ public class AppConfig
     public string LastSelectedTemplateFile { get; set; } = string.Empty;
 
     /// <summary>
-    /// 统一数据目录，集中存放 config.json 与 Templates 等数据；为空表示未设置，回退 %AppData%\DbCodeGen。
+    /// 统一数据目录，集中存放 config.json 与 Templates 等数据；默认位于 C:\data\DbCodeGen。
     /// 由设置窗口数据目录功能切换，定位文件 config-location.json 引导配置所在地。
     /// </summary>
     public string DataDirectory { get; set; } = string.Empty;
