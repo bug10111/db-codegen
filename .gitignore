@@ -40,3 +40,6 @@ Desktop.ini
 
 # ===== 批次证据（构建/冒烟产物，不入库） =====
 artifacts/
+
+# ===== 本地 SDK 自举缓存（package.ps1 用，自举缓存与 zip 均不入 Git） =====
+.tools/

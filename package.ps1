@@ -28,6 +28,11 @@
 # 外部运行时依赖：缺省自包含打包，桌面端与 MCP 服务端均内嵌运行时，目标机免装
 #               .NET 8；传 -FrameworkDependent 切换为框架依赖（体积小，目标机需
 #               已安装 .NET 8 运行时）。
+#
+# .NET SDK 自举语义：
+#   打包需要 .NET 8 SDK（仅有运行时的 dotnet 无法执行 publish）。解析顺序 =
+#   PATH 已装 SDK → 仓库 .tools\dotnet-sdk 自举缓存 → .tools\dotnet-sdk-win-x64.zip
+#   官方缓存自动解压；三层全缺时报错并给出安装/放置指引。自举缓存与 zip 均不入 Git。
 # =============================================================================
 
 [CmdletBinding()]
@@ -53,14 +58,62 @@ function Write-Step {
     Write-Host "`n== $Text ==" -ForegroundColor Cyan
 }
 
+# 检测指定 dotnet.exe 是否携带 SDK（--list-sdks 退出码为 0 且有输出）
+function Test-DotNetSdk {
+    param([string]$DotNetPath)
+    if (-not (Test-Path $DotNetPath)) { return $false }
+    $sdkList = & $DotNetPath --list-sdks 2>$null
+    return ($LASTEXITCODE -eq 0 -and $sdkList)
+}
+
+# 解析可用于构建的 dotnet 宿主（发布需要 SDK，仅运行时不够）：
+#   ① PATH 已装 SDK → ② 仓库 .tools\dotnet-sdk 自举缓存 →
+#   ③ .tools\dotnet-sdk-win-x64.zip 官方缓存自动解压自举（一次性，之后走②）。
+# 返回 { Exe, Root }（Root 供 DOTNET_ROOT 使用，PATH 形态为 $null）；三层全缺时抛错并给指引。
+function Resolve-DotNetHost {
+    $toolsDir     = Join-Path $RepoRoot '.tools'
+    $bootstrapDir = Join-Path $toolsDir 'dotnet-sdk'
+    $bootstrapZip = Join-Path $toolsDir 'dotnet-sdk-win-x64.zip'
+
+    # 命中即可用的两种形态：PATH 安装、仓库自举缓存
+    $candidates = @(
+        @{ Exe = 'dotnet'; Root = $null },
+        @{ Exe = (Join-Path $bootstrapDir 'dotnet.exe'); Root = $bootstrapDir }
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-DotNetSdk -DotNetPath $candidate.Exe) {
+            return [PSCustomObject]@{ Exe = $candidate.Exe; Root = $candidate.Root }
+        }
+    }
+
+    # 自举：zip 缓存在位 → 解压为仓库本地 SDK 缓存（解压前清残留，保证幂等）
+    if (Test-Path $bootstrapZip) {
+        Write-Host "未发现已安装 SDK，正在从 zip 缓存自举：$bootstrapZip"
+        if (Test-Path $bootstrapDir) { Remove-Item -Path $bootstrapDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $bootstrapDir | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($bootstrapZip, $bootstrapDir)
+        $bootstrappedExe = Join-Path $bootstrapDir 'dotnet.exe'
+        if (Test-DotNetSdk -DotNetPath $bootstrappedExe) {
+            Write-Host "SDK 自举完成：$bootstrapDir"
+            return [PSCustomObject]@{ Exe = $bootstrappedExe; Root = $bootstrapDir }
+        }
+        throw "SDK 自举缓存解压后不可用：$bootstrapDir（zip 可能损坏，请重新获取官方 .NET 8 SDK zip 后重试。）"
+    }
+
+    throw (@"
+未找到 .NET SDK（当前 dotnet 仅有运行时，无法执行 publish）：
+  1. 安装 .NET 8 SDK（https://dotnet.microsoft.com/download/dotnet/8.0）后重试；或
+  2. 将官方 dotnet-sdk-win-x64.zip 放到 $bootstrapZip，本脚本将自动解压自举。
+"@)
+}
+
 # ---- 0/5 工具链检查 ----
 Write-Step '0/5 检查工具链'
-foreach ($tool in 'dotnet') {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-        throw "未找到 $tool 命令，请先安装后再运行打包脚本。"
-    }
-}
-Write-Host 'dotnet 就绪。'
+$dotnetHost = Resolve-DotNetHost
+# 便携 SDK 形态下为发布子进程固定运行时解析根（.NET 8 已取消多层查找，仅靠 PATH 命中运行时不可靠）
+if ($dotnetHost.Root) { $env:DOTNET_ROOT = $dotnetHost.Root }
+Write-Host ("dotnet 宿主：{0}（SDK {1}）" -f $dotnetHost.Exe, (& $dotnetHost.Exe --version 2>$null))
 
 # ---- 1/5 清理并重建输出目录（data\ 子目录兜底保全） ----
 Write-Step '1/5 清理输出目录（保留 data\ 兜底保全）'
@@ -87,7 +140,7 @@ Write-Step '2/5 发布桌面宿主 (DbCodeGen.App)'
 $ridArg = @()
 if ($SelfContained) { $ridArg = @('-r', 'win-x64', '--self-contained', 'true') }
 
-& dotnet publish $AppProject -c Release -o $OutputDir @ridArg
+& $dotnetHost.Exe publish $AppProject -c Release -o $OutputDir @ridArg
 if ($LASTEXITCODE -ne 0) { throw '桌面宿主发布失败。' }
 # 对外分发包禁止携带 pdb（调试符号不参与运行，剔除后不影响程序可用）
 $pdbs = @(Get-ChildItem -Path $OutputDir -Filter '*.pdb' -File)
@@ -99,7 +152,7 @@ Write-Host '桌面宿主发布完成。'
 
 # ---- 3/5 发布 MCP 服务端 ----
 Write-Step '3/5 发布 MCP 服务端 (DbCodeGen.McpServer)'
-& dotnet publish $McpProject -c Release -o $McpOutputDir @ridArg
+& $dotnetHost.Exe publish $McpProject -c Release -o $McpOutputDir @ridArg
 if ($LASTEXITCODE -ne 0) { throw 'MCP 服务端发布失败。' }
 # 对外分发包禁止携带 pdb（同桌面端整备口径）
 $mcpPdbs = @(Get-ChildItem -Path $McpOutputDir -Filter '*.pdb' -File)
