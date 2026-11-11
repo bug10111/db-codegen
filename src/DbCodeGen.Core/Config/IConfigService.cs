@@ -30,7 +30,7 @@ public interface IConfigService
     AppConfig Current { get; }
 
     /// <summary>
-    /// 配置文件绝对路径，默认 %AppData%\DbCodeGen\config.json；经数据目录切换后指向新目录下的 config.json。
+    /// 配置文件绝对路径，默认为默认数据目录 C:\data\DbCodeGen 下 config.json；经数据目录切换后指向新目录下的 config.json。
     /// </summary>
     string ConfigFilePath { get; }
 

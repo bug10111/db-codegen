@@ -120,7 +120,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private string? _selectedTemplateDirectory;
 
     /// <summary>
-    /// 统一数据目录，集中存放 config.json 与 Templates；为空表示未设置，回退 %AppData%\DbCodeGen。
+    /// 统一数据目录，集中存放 config.json 与 Templates；为空表示未设置，回退默认数据目录 C:\data\DbCodeGen。
     /// 「应用」立即切换并迁移，「保存」联动切换。
     /// </summary>
     [ObservableProperty]

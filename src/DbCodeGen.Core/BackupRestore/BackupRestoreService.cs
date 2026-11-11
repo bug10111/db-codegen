@@ -55,7 +55,7 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
     /// <param name="templatePackageService">模板包服务，用于备份时列出用户模板包。</param>
     /// <param name="logger">备份/恢复服务日志器，日志不得输出任何敏感字段。</param>
     /// <param name="restoreTempRootOverride">恢复临时目录根；为空时默认 %TEMP%\DbCodeGen\Restores。</param>
-    /// <param name="defaultTemplateDirectoryOverride">默认模板库目录；为空时默认 %AppData%\DbCodeGen\Templates。</param>
+    /// <param name="defaultTemplateDirectoryOverride">默认模板库目录；为空时默认 C:\data\DbCodeGen\Templates（与配置默认模板目录单点一致）。</param>
     /// <exception cref="ArgumentNullException">configService、templatePackageService 或 logger 为 null 时抛出。</exception>
     public BackupRestoreService(
         IConfigService configService,
@@ -71,10 +71,7 @@ public sealed class BackupRestoreService : IBackupRestoreService, IDisposable
         _templatePackageService = templatePackageService;
         _logger = logger;
         _restoreTempRoot = restoreTempRootOverride ?? Path.Combine(Path.GetTempPath(), "DbCodeGen", "Restores");
-        _defaultTemplateDirectory = Path.GetFullPath(defaultTemplateDirectoryOverride ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "DbCodeGen",
-            "Templates"));
+        _defaultTemplateDirectory = Path.GetFullPath(defaultTemplateDirectoryOverride ?? AppConfig.DefaultTemplatesDirectory);
         _gate = new PackageOperationGate(logger);
     }
 

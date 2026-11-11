@@ -39,19 +39,19 @@ public sealed class ConfigService : IConfigService, IDisposable
     };
 
     /// <summary>
-    /// 默认模板目录，数据目录切换时物理迁移的来源；测试可注入临时目录避免触碰真实 %AppData%。
+    /// 默认模板目录，数据目录切换时物理迁移的来源；测试可注入临时目录避免触碰真实默认模板目录。
     /// </summary>
     private readonly string _defaultTemplatesDirectory;
 
     /// <summary>
-    /// AppData 根目录，定位文件与默认配置路径的基准；测试可注入临时目录避免读写真实 %AppData%。
+    /// AppData 根目录，定位文件 config-location.json 的存放基准；测试可注入临时目录避免读写真实 %AppData%。
     /// </summary>
     private readonly string _appDataRoot;
 
     /// <summary>
     /// 使用指定凭据保护器与日志器创建配置服务实例。
     /// configFilePath 为空时按定位文件 config-location.json 解析数据目录：
-    /// 定位文件存在且 dataDirectory 有效时配置路径为数据目录下 config.json，否则回退 %AppData%\DbCodeGen\config.json。
+    /// 定位文件存在且 dataDirectory 有效时配置路径为数据目录下 config.json，否则回退默认数据目录 C:\data\DbCodeGen 下 config.json。
     /// </summary>
     /// <param name="credentialProtector">Windows DPAPI 凭据加解密器，用于 apiKey 的密文转换。</param>
     /// <param name="logger">配置服务日志器，日志不得输出明文密钥。</param>
@@ -72,8 +72,8 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// <param name="credentialProtector">Windows DPAPI 凭据加解密器，用于 apiKey 的密文转换。</param>
     /// <param name="logger">配置服务日志器，日志不得输出明文密钥。</param>
     /// <param name="configFilePath">配置文件绝对路径；为空时经定位文件解析或回退默认路径。</param>
-    /// <param name="defaultTemplatesDirectory">默认模板目录，为空时回退 AppData 根下 DbCodeGen\Templates。</param>
-    /// <param name="appDataRootOverride">AppData 根目录，为空时取系统 ApplicationData。</param>
+    /// <param name="defaultTemplatesDirectory">默认模板目录，为空时回退默认模板目录单点 C:\data\DbCodeGen\Templates。</param>
+    /// <param name="appDataRootOverride">AppData 根目录，定位文件 config-location.json 的存放基准，为空时取系统 ApplicationData。</param>
     /// <param name="crossProcessLockTimeout">跨进程配置锁等待超时，为空时取默认值；测试注入短超时验证互斥行为。</param>
     internal ConfigService(
         CredentialProtector credentialProtector,
@@ -88,7 +88,7 @@ public sealed class ConfigService : IConfigService, IDisposable
         _protector = credentialProtector;
         _logger = logger;
         _appDataRoot = appDataRootOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        _defaultTemplatesDirectory = defaultTemplatesDirectory ?? Path.Combine(_appDataRoot, "DbCodeGen", "Templates");
+        _defaultTemplatesDirectory = defaultTemplatesDirectory ?? AppConfig.DefaultTemplatesDirectory;
         ConfigFilePath = configFilePath is null
             ? ResolveEffectiveConfigPath(_appDataRoot)
             : configFilePath;
@@ -248,7 +248,7 @@ public sealed class ConfigService : IConfigService, IDisposable
         // 与当前生效数据目录相同则直接返回，避免重复迁移与无意义落盘
         string currentEffective = NormalizeDirForCompare(
             string.IsNullOrWhiteSpace(_current!.DataDirectory)
-                ? Path.Combine(_appDataRoot, "DbCodeGen")
+                ? AppConfig.DefaultDataDirectory
                 : _current.DataDirectory);
         if (string.Equals(NormalizeDirForCompare(normalizedNew), currentEffective, StringComparison.OrdinalIgnoreCase))
         {
@@ -399,14 +399,17 @@ public sealed class ConfigService : IConfigService, IDisposable
     }
 
     /// <summary>
-    /// 解析生效配置路径：读定位文件 config-location.json，dataDirectory 有效时使用数据目录下 config.json，否则回退默认路径。
+    /// 解析生效配置路径：读定位文件 config-location.json，dataDirectory 有效时使用数据目录下 config.json，
+    /// 否则回退默认数据目录 C:\data\DbCodeGen 下的 config.json。
     /// </summary>
-    /// <param name="appDataRoot">AppData 根目录，定位文件与默认配置路径的基准。</param>
+    /// <param name="appDataRoot">AppData 根目录，定位文件 config-location.json 的存放基准。</param>
     /// <returns>生效配置文件绝对路径。</returns>
     private static string ResolveEffectiveConfigPath(string appDataRoot)
     {
-        string defaultPath = Path.Combine(appDataRoot, "DbCodeGen", "config.json");
+        // 默认配置路径锚定默认数据目录 C:\data\DbCodeGen，源码运行与打包运行共用同一解析
+        string defaultPath = Path.Combine(AppConfig.DefaultDataDirectory, "config.json");
 
+        // 定位文件固定存放在 %AppData%\DbCodeGen 下，作为配置所在地的引导指针
         string locationFilePath = Path.Combine(appDataRoot, "DbCodeGen", "config-location.json");
         string? dataDirectory = TryReadLocationFile(locationFilePath);
         if (string.IsNullOrWhiteSpace(dataDirectory))
@@ -576,7 +579,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// </summary>
     private async Task<AppConfig> CreateDefaultAndPersistAsync()
     {
-        AppConfig defaults = BuildDefaultConfig(_appDataRoot);
+        AppConfig defaults = BuildDefaultConfig();
         try
         {
             await SaveToDiskAsync(defaults).ConfigureAwait(false);
@@ -595,7 +598,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     private async Task<AppConfig> RebuildFromCorruptAsync()
     {
         string backupPath = BackupCorruptFile();
-        AppConfig defaults = BuildDefaultConfig(_appDataRoot);
+        AppConfig defaults = BuildDefaultConfig();
         try
         {
             await SaveToDiskAsync(defaults).ConfigureAwait(false);
@@ -682,15 +685,11 @@ public sealed class ConfigService : IConfigService, IDisposable
 
     /// <summary>
     /// 构造首次启动的默认配置：默认 DashScope 兼容端点、qwen-plus 模型与默认模板搜索目录。
-    /// 模板搜索目录基于注入的 AppData 根，测试注入临时根时默认配置同样指向隔离目录。
+    /// 模板搜索目录取默认模板目录单点 C:\data\DbCodeGen\Templates，与迁移来源及备份还原目标保持一致。
     /// </summary>
-    /// <param name="appDataRoot">AppData 根目录，默认模板搜索目录的基准。</param>
-    private static AppConfig BuildDefaultConfig(string appDataRoot)
+    private static AppConfig BuildDefaultConfig()
     {
-        string templatesDirectory = Path.Combine(
-            appDataRoot,
-            "DbCodeGen",
-            "Templates");
+        string templatesDirectory = AppConfig.DefaultTemplatesDirectory;
 
         return new AppConfig
         {

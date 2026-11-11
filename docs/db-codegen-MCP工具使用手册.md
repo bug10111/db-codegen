@@ -10,7 +10,7 @@ DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 
 
 - **服务端本身不做任何 LLM 调用**：智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面（共 25 个工具）。
 - **协议可发现性**：`initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；9 个结构化输出工具（`list_template_packages` / `list_templates` / `read_template` / `preview_generation` / `generate` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `outputSchema`，失败统一走协议 `result.isError`。
-- **与桌面端共享数据**：与 WPF 桌面端共用同一份 `%AppData%\DbCodeGen\config.json` 与用户模板库（桌面端经 `config-location.json` 重定向数据目录时共用重定向后目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
+- **与桌面端共享数据**：与 WPF 桌面端共用同一份 `C:\data\DbCodeGen\config.json` 与用户模板库（桌面端经 `config-location.json` 重定向数据目录时共用重定向后目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
 - **同机同用户**：数据源密码经 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。
 - **零记忆态副作用**：MCP 调用一切参数显式传递（表、模板选择、覆盖策略、路径），服务端不读取桌面端的勾选态/最近目录等 UI 记忆，生成后也不回写 config。
 - 注册方法、构建发布命令见 README「MCP 服务端」章节与本文第 7 节速查。

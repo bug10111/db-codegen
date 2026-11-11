@@ -86,9 +86,8 @@ public sealed class ConfigServiceTests : IDisposable
         Assert.Equal("qwen-plus", config.Llm.Model);
         Assert.Equal(string.Empty, config.Llm.ApiKeyEncrypted);
         Assert.Equal(300, config.Llm.TimeoutSeconds);
-        string expectedTemplates = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DbCodeGen", "Templates");
-        Assert.Contains(expectedTemplates, config.TemplateSearchDirectories);
+        // 默认模板搜索目录应为默认模板目录单点 C:\data\DbCodeGen\Templates（纯字符串断言，不触碰该目录）
+        Assert.Contains(AppConfig.DefaultTemplatesDirectory, config.TemplateSearchDirectories);
         Assert.Empty(config.DataSources);
         Assert.NotEmpty(config.TypeMappings);
         Assert.Contains(config.TypeMappings, entry => entry.DbType == "bigint" && entry.TargetType == "Long");
@@ -756,11 +755,11 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
-    /// 在指定配置路径与 AppData 根上创建配置服务并登记到清理列表，供数据目录测试隔离真实 %AppData%。
+    /// 在指定配置路径与 AppData 根上创建配置服务并登记到清理列表，供定位文件解析测试隔离真实 %AppData%。
     /// </summary>
     /// <param name="configPath">配置文件绝对路径，可为空走定位解析。</param>
-    /// <param name="defaultTemplatesDirectory">默认模板目录，可为空回退 AppData 根下 DbCodeGen\Templates。</param>
-    /// <param name="appDataRootOverride">AppData 根目录，可为空取系统 ApplicationData。</param>
+    /// <param name="defaultTemplatesDirectory">默认模板目录，可为空回退默认模板目录单点 C:\data\DbCodeGen\Templates。</param>
+    /// <param name="appDataRootOverride">AppData 根目录，定位文件存放基准，可为空取系统 ApplicationData。</param>
     /// <returns>配置服务实例。</returns>
     private ConfigService CreateServiceWithOverrides(string? configPath, string? defaultTemplatesDirectory, string? appDataRootOverride)
     {
@@ -816,13 +815,15 @@ public sealed class ConfigServiceTests : IDisposable
 
     /// <summary>
     /// 数据目录切换后写入定位文件，新建的空路径服务应经定位解析到新数据目录并加载到迁移后的配置。
+    /// 默认模板目录必须注入临时路径：切换会物理迁移默认模板目录，空注入会回落真实 C:\data\DbCodeGen\Templates 导致迁移用户活数据。
     /// </summary>
     [Fact]
     public void ChangeDataDirectory_ThenNewServiceResolvesFromLocationFile()
     {
         string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        string defaultTemplates = Path.Combine(appDataRoot, "DbCodeGen", "Templates");
         string oldConfigPath = Path.Combine(_tempRoot, "old", "config.json");
-        ConfigService service = CreateServiceWithOverrides(oldConfigPath, null, appDataRoot);
+        ConfigService service = CreateServiceWithOverrides(oldConfigPath, defaultTemplates, appDataRoot);
         service.Load();
 
         string newDataDir = Path.Combine(_tempRoot, "newdata");
@@ -942,7 +943,22 @@ public sealed class ConfigServiceTests : IDisposable
     }
 
     /// <summary>
-    /// 定位文件指向已存在文件（非法数据目录）时，空路径构造的配置服务应回退默认 AppData 配置路径。
+    /// 无定位文件时，空路径构造的配置服务应直接使用默认数据目录 C:\data\DbCodeGen 下的 config.json；
+    /// 注入临时 AppData 根保证不读取真实 %AppData% 下的定位文件，断言只比对路径字符串不落盘。
+    /// </summary>
+    [Fact]
+    public void Constructor_WithoutLocationFile_UsesDefaultDataDirectory()
+    {
+        string appDataRoot = Path.Combine(_tempRoot, "appdata");
+        Directory.CreateDirectory(Path.Combine(appDataRoot, "DbCodeGen"));
+
+        ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
+
+        Assert.Equal(Path.Combine(AppConfig.DefaultDataDirectory, "config.json"), service.ConfigFilePath);
+    }
+
+    /// <summary>
+    /// 定位文件指向已存在文件（非法数据目录）时，空路径构造的配置服务应回退默认数据目录配置路径。
     /// </summary>
     [Fact]
     public void Constructor_WithLocationFilePointingToFile_FallsBackToDefaultPath()
@@ -957,11 +973,11 @@ public sealed class ConfigServiceTests : IDisposable
 
         ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
 
-        Assert.Equal(Path.Combine(appDataRoot, "DbCodeGen", "config.json"), service.ConfigFilePath);
+        Assert.Equal(Path.Combine(AppConfig.DefaultDataDirectory, "config.json"), service.ConfigFilePath);
     }
 
     /// <summary>
-    /// 定位文件 JSON 结构损坏时，空路径构造的配置服务应回退默认 AppData 配置路径，不崩溃。
+    /// 定位文件 JSON 结构损坏时，空路径构造的配置服务应回退默认数据目录配置路径，不崩溃。
     /// </summary>
     [Fact]
     public void Constructor_WithCorruptLocationFile_FallsBackToDefaultPath()
@@ -973,7 +989,7 @@ public sealed class ConfigServiceTests : IDisposable
 
         ConfigService service = CreateServiceWithOverrides(null, null, appDataRoot);
 
-        Assert.Equal(Path.Combine(appDataRoot, "DbCodeGen", "config.json"), service.ConfigFilePath);
+        Assert.Equal(Path.Combine(AppConfig.DefaultDataDirectory, "config.json"), service.ConfigFilePath);
     }
 
     /// <summary>

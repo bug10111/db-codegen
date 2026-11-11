@@ -1,3 +1,4 @@
+using System.IO;
 using DbCodeGen.Core.Model;
 
 namespace DbCodeGen.Core.Config;
@@ -8,6 +9,18 @@ namespace DbCodeGen.Core.Config;
 /// </summary>
 public class AppConfig
 {
+    /// <summary>
+    /// 默认数据目录，源码运行与打包运行统一锚定 C:\data\DbCodeGen（C:\data\{项目名} 约定）；
+    /// 定位文件 config-location.json 指针有效时以指针目录为准，经设置页迁移数据目录后以迁移后目录为准。
+    /// </summary>
+    public const string DefaultDataDirectory = @"C:\data\DbCodeGen";
+
+    /// <summary>
+    /// 默认模板目录，即默认数据目录下 Templates；配置首启默认值、数据目录迁移来源、
+    /// 备份还原目标与还原冲突检测统一取该单点，禁止各自重复拼接。
+    /// </summary>
+    public static readonly string DefaultTemplatesDirectory = Path.Combine(DefaultDataDirectory, "Templates");
+
     /// <summary>
     /// 配置结构版本号，当前版本 3；低于当前版本的文件加载时经 ConfigService 迁移并按库重灌默认映射，同时升到 3。
     /// 初始值 1 用于反序列化无版本字段的旧文件时触发迁移。
@@ -40,7 +53,7 @@ public class AppConfig
     public AiReferenceFileLimits AiReferenceFileLimits { get; set; } = new();
 
     /// <summary>
-    /// 模板搜索目录列表，默认包含 %AppData%\DbCodeGen\Templates，供模板包管理扫描用户级模板包。
+    /// 模板搜索目录列表，默认包含默认模板目录（C:\data\DbCodeGen\Templates），供模板包管理扫描用户级模板包。
     /// </summary>
     public List<string> TemplateSearchDirectories { get; set; } = new();
 
@@ -84,7 +97,7 @@ public class AppConfig
     public string LastSelectedTemplateFile { get; set; } = string.Empty;
 
     /// <summary>
-    /// 统一数据目录，集中存放 config.json 与 Templates 等数据；为空表示未设置，回退 %AppData%\DbCodeGen。
+    /// 统一数据目录，集中存放 config.json 与 Templates 等数据；为空表示未设置，回退默认数据目录 C:\data\DbCodeGen。
     /// 由设置窗口数据目录功能切换，定位文件 config-location.json 引导配置所在地。
     /// </summary>
     public string DataDirectory { get; set; } = string.Empty;

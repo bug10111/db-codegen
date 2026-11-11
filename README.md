@@ -98,7 +98,7 @@ C:\path\to\DbCodeGen.McpServer.exe
 ### 运行约束与双开注意事项
 
 - **同机同用户**：数据源密码与 AI Key 均以 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。换机 / 换用户复制配置无法解密，需重新录入。
-- **与桌面端共享数据**：与桌面端共用同一份 `%AppData%\DbCodeGen\config.json` 与用户模板库（若桌面端已通过 `config-location.json` 重定向数据目录，则共用重定向后的目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
+- **与桌面端共享数据**：与桌面端共用同一份 `C:\data\DbCodeGen\config.json` 与用户模板库（若桌面端已通过 `config-location.json` 重定向数据目录，则共用重定向后的目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
 - **模板变更感知**：桌面端不监听模板文件变更（无 FileSystemWatcher）。模板内容被 MCP 修改后，桌面端需重新加载包（重新打开「模板包管理」窗口，或重启应用）才能看到最新内容。
 - **内置模板包已移除**：当前发布不含任何内置模板包，模板包全部来自用户模板库；内置包只读机制保留（部署侧自行放入 `Templates\Builtin` 的包仍按只读处理，MCP 编辑类工具对其一律拒绝）。
 - **日志**：MCP 服务端日志固定落 `C:\simple\DbCodeGen.McpServer\logs\`（按天滚动、保留 7 天、单文件 20MB 上限，多实例共享写）。

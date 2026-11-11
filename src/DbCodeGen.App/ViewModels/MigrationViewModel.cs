@@ -649,7 +649,8 @@ public sealed partial class MigrationViewModel : ObservableObject
     /// <returns>已存在同名目录的包名清单。</returns>
     private static IReadOnlyList<string> FindPackageConflicts(IReadOnlyList<string> packageNames)
     {
-        string defaultTemplateDirectory = GetDefaultTemplateDirectory();
+        // 默认模板库目录取配置单点，与 Core 备份服务的还原目标天然一致
+        string defaultTemplateDirectory = AppConfig.DefaultTemplatesDirectory;
         var conflicts = new List<string>();
         foreach (string packageName in packageNames ?? new List<string>())
         {
@@ -665,18 +666,6 @@ public sealed partial class MigrationViewModel : ObservableObject
         }
 
         return conflicts;
-    }
-
-    /// <summary>
-    /// 取默认模板库目录，与 Core 备份服务还原目标保持一致。
-    /// </summary>
-    /// <returns>默认模板库目录绝对路径。</returns>
-    private static string GetDefaultTemplateDirectory()
-    {
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "DbCodeGen",
-            "Templates");
     }
 
     /// <summary>

@@ -23,7 +23,7 @@
 #             （部署侧自行放入 Templates/Builtin 的包按只读处理），打包不复制任何内置包。
 #
 # data 保全语义：输出目录已存在时保留其 data\ 子目录（用户数据兜底保全，仅重建
-#               程序文件）；正常形态数据目录在 %AppData%\DbCodeGen（或经
+#               程序文件）；正常形态数据目录在 C:\data\DbCodeGen（或经
 #               config-location.json 重定向后的目录），输出目录内通常无 data\。
 # 外部运行时依赖：缺省自包含打包，桌面端与 MCP 服务端均内嵌运行时，目标机免装
 #               .NET 8；传 -FrameworkDependent 切换为框架依赖（体积小，目标机需
