@@ -38,6 +38,11 @@ public sealed class TemplatePackageContext
     public string PermissionModule { get; }
 
     /// <summary>
+    /// 可选 Java 业务域包段，供模板放在职责层与实体包段之间；与权限模块无关。
+    /// </summary>
+    public string JavaDomainPackage { get; }
+
+    /// <summary>
     /// 生效命名策略，供 tool.packagePath 与模板内 package.naming.* 消费。
     /// </summary>
     public ResolvedNamingPolicy Naming { get; }
@@ -61,6 +66,7 @@ public sealed class TemplatePackageContext
         string dir,
         IReadOnlyList<string> segments,
         string permissionModule,
+        string javaDomainPackage,
         ResolvedNamingPolicy naming,
         string? rootPath,
         IReadOnlyDictionary<string, string> typeMap)
@@ -70,6 +76,7 @@ public sealed class TemplatePackageContext
         Dir = dir;
         Segments = segments;
         PermissionModule = permissionModule;
+        JavaDomainPackage = javaDomainPackage;
         Naming = naming;
         RootPath = rootPath;
         TypeMap = typeMap;
@@ -86,7 +93,7 @@ public sealed class TemplatePackageContext
     /// <param name="modules">本次请求的模块清单，可为空；非空时权限模块自动取首模块名 kebab 形态（与脚手架权限点清单同源）。</param>
     /// <returns>package 侧渲染上下文。</returns>
     /// <exception cref="ArgumentNullException">package 为 null 时抛出。</exception>
-    /// <exception cref="GenerationException">packageSegmentCase 取值非法时抛出。</exception>
+    /// <exception cref="GenerationException">包段大小写策略或 Java 业务域包段非法时抛出。</exception>
     public static TemplatePackageContext From(
         TemplatePackageInfo package,
         string? basePackageOverride = null,
@@ -99,6 +106,7 @@ public sealed class TemplatePackageContext
         ResolvedNamingPolicy naming = ResolvedNamingPolicy.Resolve(package.Naming, variables);
         IReadOnlyList<string> segments = PackagePathBuilder.NormalizeBaseSegments(basePackage, naming.PackageSegmentCase);
         string permissionModule = PermissionModuleResolver.Resolve(basePackage, package.PermissionModule, variables, modules);
+        string javaDomainPackage = ResolveJavaDomainPackage(variables);
         var typeMapSnapshot = new Dictionary<string, string>(package.TypeMap ?? new Dictionary<string, string>());
         return new TemplatePackageContext(
             package.Name,
@@ -106,8 +114,29 @@ public sealed class TemplatePackageContext
             PackagePathBuilder.ToDirectoryPath(segments),
             segments,
             permissionModule,
+            javaDomainPackage,
             naming,
             package.RootPath,
             typeMapSnapshot);
+    }
+
+    private static string ResolveJavaDomainPackage(IReadOnlyDictionary<string, object?>? variables)
+    {
+        string? segment = PolicyValueReader.GetString(variables, "javaDomainPackage");
+
+        // 没有业务域的项目继续使用原有层级。
+        if (segment is null)
+        {
+            return string.Empty;
+        }
+
+        // 业务域只占一个包段，防止目录分隔符或其他非法字符改变职责层级。
+        if (segment.Length > 63 || !char.IsAsciiLetterLower(segment[0]) ||
+            segment.Any(character => !char.IsAsciiLetterLower(character) && !char.IsAsciiDigit(character)))
+        {
+            throw new GenerationException("javaDomainPackage 必须为 1 至 63 位小写英文字母或数字，且以字母开头。");
+        }
+
+        return segment;
     }
 }

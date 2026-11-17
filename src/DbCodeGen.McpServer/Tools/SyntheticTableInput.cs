@@ -29,6 +29,12 @@ public sealed class SyntheticTableInput
     public string? Comment { get; set; }
 
     /// <summary>
+    /// 表所属数据库类型。离线生成时应显式传入，供数据库专属类型映射使用。
+    /// </summary>
+    [Description("数据库类型（MySql/PostgreSql）；可从 get_table_detail.databaseType 原样透传")]
+    public DataSourceType? DatabaseType { get; set; }
+
+    /// <summary>
     /// 列元数据集合，可省略：省略时表按"仅表壳无列"参与渲染（实体类等按列循环的模板将输出空列清单）；
     /// 需要完整列时建议先用 get_table_detail 从真实数据源取回后传入。
     /// </summary>
@@ -63,6 +69,7 @@ internal static class SyntheticTableMapper
             RawName = rawName,
             SchemaName = string.IsNullOrWhiteSpace(input.SchemaName) ? null : input.SchemaName.Trim(),
             Comment = string.IsNullOrWhiteSpace(input.Comment) ? null : input.Comment.Trim(),
+            DatabaseType = input.DatabaseType,
             ClassName = TableInfo.ToPascalCase(rawName),
             VariableName = TableInfo.ToCamelCase(rawName)
         };

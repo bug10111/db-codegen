@@ -266,6 +266,96 @@ public sealed class NamingContractTests : IDisposable
     }
 
     /// <summary>
+    /// 业务域在职责之后，同时影响路径、Java 包声明与 XML 命名空间；权限模块保持独立。
+    /// </summary>
+    /// <param name="domain">本次指定的业务域，缺省保持旧布局。</param>
+    /// <param name="domainPath">预期的业务域目录片段。</param>
+    /// <param name="domainNamespace">预期的业务域包片段。</param>
+    [Theory]
+    [InlineData(null, "", "")]
+    [InlineData("session", "session/", "session.")]
+    public async Task BuildPreviewAsync_UsesIndependentJavaDomainForPathAndContent(
+        string? domain, string domainPath, string domainNamespace)
+    {
+        const string repositoryPath =
+            "{{tool.packagePath(\"repository\", package.javaDomainPackage, table.variableName)}}/{{table.entityName}}Repository.java";
+        const string repositoryPackage =
+            "{{tool.packageSegments(\"repository\", package.javaDomainPackage, table.variableName) | array.join \".\"}}";
+        const string javaTemplate = "repository.java.scriban";
+        const string xmlTemplate = "mapper.xml.scriban";
+        TemplatePackageInfo package = await CreatePackageAsync(new TemplateManifest
+        {
+            Name = "domain-pkg",
+            Engine = "scriban",
+            BasePackage = "com.simple.ai",
+            Files = new List<TemplateFileEntry>
+            {
+                new() { Template = javaTemplate, Output = repositoryPath, Enabled = true },
+                new() { Template = xmlTemplate, Output = "../resources/mapper/SessionInfoRepository.xml", Enabled = true }
+            }
+        });
+        await File.WriteAllTextAsync(Path.Combine(package.RootPath!, javaTemplate), $"package {repositoryPackage};");
+        await File.WriteAllTextAsync(Path.Combine(package.RootPath!, xmlTemplate), $"<mapper namespace=\"{repositoryPackage}.SessionInfoRepository\" />");
+        (string workspaceRoot, _) = CreateWorkspace();
+        var files = new[]
+        {
+            new TemplateFileSelection(javaTemplate, repositoryPath, true),
+            new TemplateFileSelection(xmlTemplate, "../resources/mapper/SessionInfoRepository.xml", true)
+        };
+        var variables = new Dictionary<string, object?> { ["permissionModule"] = "workbench" };
+
+        // 未传业务域的调用与显式启用分包的调用使用同一套模板。
+        if (domain is not null)
+        {
+            variables["javaDomainPackage"] = domain;
+        }
+
+        GenerationPreview preview = await CreateGenerator().BuildPreviewAsync(
+            new GenerationRequest(package, new[] { CreateTable("session_info") }, files, workspaceRoot,
+                "src/main/java", variables: variables),
+            null,
+            CancellationToken.None);
+
+        string repositoryNamespace = $"com.simple.ai.repository.{domainNamespace}sessioninfo";
+        Assert.Collection(preview.Entries,
+            java =>
+            {
+                Assert.Equal($"com/simple/ai/repository/{domainPath}sessioninfo/SessionInfoRepository.java", java.RelativePath);
+                Assert.Equal($"package {repositoryNamespace};", java.Content);
+            },
+            xml =>
+            {
+                Assert.Equal("../resources/mapper/SessionInfoRepository.xml", xml.RelativePath);
+                Assert.Equal($"<mapper namespace=\"{repositoryNamespace}.SessionInfoRepository\" />", xml.Content);
+            });
+        Assert.Equal("workbench", Assert.Single(preview.NamingReport).PermissionKey);
+    }
+
+    /// <summary>
+    /// 拒绝会破坏职责层次的多段、路径或非法域名。
+    /// </summary>
+    /// <param name="domain">非法的业务域包段。</param>
+    [Theory]
+    [InlineData("../session")]
+    [InlineData("work-bench")]
+    [InlineData("1session")]
+    public async Task JavaDomainPackage_RejectsInvalidSegment(string domain)
+    {
+        TemplatePackageInfo package = await CreatePackageAsync(new TemplateManifest
+        {
+            Name = "domain-validation-pkg",
+            Engine = "scriban",
+            BasePackage = "com.simple.ai",
+            Files = new List<TemplateFileEntry>()
+        });
+
+        var variables = new Dictionary<string, object?> { ["javaDomainPackage"] = domain };
+        GenerationException exception = Assert.Throws<GenerationException>(
+            () => TemplatePackageContext.From(package, variables: variables));
+        Assert.Contains("javaDomainPackage", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// 在临时目录创建测试模板包并加载。
     /// </summary>
     /// <param name="manifest">清单模型。</param>

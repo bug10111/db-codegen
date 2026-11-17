@@ -184,6 +184,68 @@ public sealed class McpCapabilitySurfaceTests : IDisposable
     }
 
     /// <summary>
+    /// PostgreSQL 表的 bytea 列从离线预览到实际生成均保持字节数组类型；缺少库类型时保留未映射告警。
+    /// </summary>
+    [Fact]
+    public async Task PreviewAndGenerate_PostgreSqlBytea_UsesDatabaseSpecificMapping()
+    {
+        TemplatePackageInfo package = await CreatePackageAsync(
+            """
+            {
+              "name": "bytea-pkg",
+              "description": "二进制列类型映射测试包",
+              "engine": "scriban",
+              "basePackage": "com.example",
+              "files": [{ "template": "entity.java.scriban", "output": "out/{{table.className}}.java", "enabled": true }]
+            }
+            """,
+            ("entity.java.scriban", "{{ for column in table.columns }}{{ tool.type(column.rawDbType) }} {{ column.propertyName }};{{ end }}"));
+        var packageService = new FakeTemplatePackageService(package);
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "DbCodeGenTests", Guid.NewGuid().ToString("N"), "workspace");
+        _tempRoots.Add(Path.GetDirectoryName(workspaceRoot)!);
+        Directory.CreateDirectory(workspaceRoot);
+
+        StubConfigService config = CreateConfigService(workspaceRoot);
+        config.Current.TypeMappings = TypeMappingDefaults.BuildDefault().ToList();
+        var mapping = new TypeMappingService(config, NullLogger<TypeMappingService>.Instance);
+        var engine = new TemplateEngine(mapping);
+        var generator = new CodeGenerator(engine, new TemplateFileWriter(),
+            new FileWriter(NullLogger<FileWriter>.Instance), config,
+            NullLogger<CodeGenerator>.Instance, mapping);
+        var previewTools = new PreviewTools(packageService, new TemplateFileWriter(), engine,
+            generator, NullLogger<PreviewTools>.Instance);
+        var generationTools = new GenerationTools(packageService, generator,
+            NullLogger<GenerationTools>.Instance);
+
+        var table = new SyntheticTableInput
+        {
+            Name = "gen_product_blob",
+            DatabaseType = DataSourceType.PostgreSql,
+            Columns = new[] { new SyntheticColumnInput { Name = "content", RawDbType = "bytea" } }
+        };
+        CallToolResult previewResponse = await previewTools.PreviewGenerationAsync(
+            "bytea-pkg", workspaceRoot, "src/main/java/com/example", tables: new[] { table },
+            cancellationToken: CancellationToken.None);
+        PreviewGenerationResult preview = StructuredToolResponseReader.ReadStructured<PreviewGenerationResult>(previewResponse);
+        Assert.Empty(preview.UnmappedTypes);
+        PreviewFilePlan plan = Assert.Single(preview.Entries);
+
+        CallToolResult generationResponse = await generationTools.GenerateAsync(
+            "bytea-pkg", workspaceRoot, "src/main/java/com/example", tables: new[] { table },
+            cancellationToken: CancellationToken.None);
+        GenerateResult generated = StructuredToolResponseReader.ReadStructured<GenerateResult>(generationResponse);
+        Assert.Equal(1, generated.Generated);
+        Assert.Equal("byte[] content;", await File.ReadAllTextAsync(plan.AbsolutePath));
+
+        table.DatabaseType = null;
+        CallToolResult unknownResponse = await previewTools.PreviewGenerationAsync(
+            "bytea-pkg", workspaceRoot, "src/main/java/com/example", tables: new[] { table },
+            cancellationToken: CancellationToken.None);
+        PreviewGenerationResult unknown = StructuredToolResponseReader.ReadStructured<PreviewGenerationResult>(unknownResponse);
+        Assert.Equal("bytea", Assert.Single(unknown.UnmappedTypes).DbType);
+    }
+
+    /// <summary>
     /// preview_generation 仅传表名缺 columns（表壳渲染）时：空迭代告警 message 点名表名并含 get_table_detail 补列引导，
     /// text 摘要单列该表；表已带列时无该告警且摘要不含点名段（缺 columns 场景之外摘要不变）。
     /// </summary>

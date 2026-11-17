@@ -218,7 +218,7 @@ public sealed class PreviewTools
         + "何时用：generate 之前必须调用；调整 preset/files/variables/modules 后重跑核对，确认 entries 与各项告警后再写盘。\n"
         + "参数：package(string,必填)=模板包包名；workspaceRoot(string,必填)=输出根前缀绝对路径，最终路径必须落在其内；"
         + "codeDirectory(string,必填)=项目内完整相对路径含包名（如 src/main/java/com/example/demo），派生相对输出根与基础包名；"
-        + "tables(array<object>,条件必填)=所选模板含 table 作用域条目时至少一张（元素 name 必填、columns[] 可选，可原样透传 get_table_detail 的列），纯 module/project 模板集合可省略；"
+        + "tables(array<object>,条件必填)=所选模板含 table 作用域条目时至少一张（元素 name 必填、databaseType 可从 get_table_detail 透传以命中库专属类型映射、columns[] 可选），纯 module/project 模板集合可省略；"
         + "仅传表名缺 columns 时按表壳渲染（列循环模板零迭代），空迭代告警点名该表且 text 摘要单列该表；"
         + "basePackageOverride(string,可选,默认 null)=基础包名覆盖值；files(array<string>,可选,默认 null)=模板过滤清单，省略时取包内全部启用条目；"
         + "preset(string,可选,默认 null)=命名预设（见 list_template_packages/list_templates 的 presets），与 files 互斥，预设默认变量与调用方 variables 逐键合并（调用方优先）；"

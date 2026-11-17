@@ -66,6 +66,26 @@ public sealed class TypeMappingServiceTests
     }
 
     /// <summary>
+    /// bytea 仅在 PostgreSQL 表类型随离线请求传入时命中内置字节数组映射。
+    /// </summary>
+    [Fact]
+    public void Resolve_Bytea_WithPostgreSqlType_MapsToByteArray()
+    {
+        var config = new StubConfigService
+        {
+            Current = new AppConfig { TypeMappings = TypeMappingDefaults.BuildDefault().ToList() }
+        };
+        TypeMappingService service = CreateService(config);
+
+        TypeMappingResult postgreSql = service.Resolve("bytea", DataSourceType.PostgreSql, null);
+        TypeMappingResult unknown = service.Resolve("bytea", null, null);
+
+        Assert.True(postgreSql.Found);
+        Assert.Equal("byte[]", postgreSql.TypeName);
+        Assert.False(unknown.Found);
+    }
+
+    /// <summary>
     /// 包 typeMap 最优先：包级条目压过全局通用条目（含导包），包级命中即返回且无导包。
     /// </summary>
     [Fact]

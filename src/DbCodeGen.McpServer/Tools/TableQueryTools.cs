@@ -94,7 +94,7 @@ public sealed class TableQueryTools
     [Description("用途：读取指定表的完整列元数据，是生成入参 tables[] 的权威来源。\n"
         + "何时用：生成前取列元数据；配合 check_type_mapping 预检类型映射。\n"
         + "参数：datasource(string,必填)=已保存连接名；table(string,必填)=目标表名（与 list_tables 返回的 name 一致）。\n"
-        + "返回：datasource、name（原始表名）、schema（未提供为空串）、className、variableName、comment（无注释为空串）、"
+        + "返回：datasource、databaseType（MySql/PostgreSql，可透传至生成入参 tables[].databaseType）、name（原始表名）、schema（未提供为空串）、className、variableName、comment（无注释为空串）、"
         + "columns[]——name（原始列名）、propertyName（服务端派生驼峰）、rawDbType（不含长度修饰，与生成入参同口径）、comment（无注释为空串）、"
         + "isPrimaryKey、autoIncrement、isNullable、length/precision/scale（无该语义时为 null，属性恒在场）、primaryKeyColumns[]（主键列名清单）。\n"
         + "常见错误：InvalidArgument（数据源不存在；表不存在）；Timeout；InternalError。")]
@@ -137,6 +137,7 @@ public sealed class TableQueryTools
                 datasource, table, columns.Count);
             return new GetTableDetailResult(
                 datasource,
+                config.Type,
                 detail.RawName,
                 detail.SchemaName ?? string.Empty,
                 detail.ClassName,
@@ -229,6 +230,7 @@ public sealed record ColumnDetail(
 /// get_table_detail 应答 DTO。
 /// </summary>
 /// <param name="Datasource">数据源连接名。</param>
+/// <param name="DatabaseType">表所属数据库类型；离线生成时须透传至 tables[].databaseType。</param>
 /// <param name="Name">原始表名。</param>
 /// <param name="Schema">所属 schema/库名，数据库未提供时为空串。</param>
 /// <param name="ClassName">类名。</param>
@@ -238,6 +240,7 @@ public sealed record ColumnDetail(
 /// <param name="PrimaryKeyColumns">主键列名清单。</param>
 public sealed record GetTableDetailResult(
     string Datasource,
+    DataSourceType DatabaseType,
     string Name,
     string Schema,
     string ClassName,

@@ -665,6 +665,7 @@ public sealed class TemplateEngine
 
         packageObject.SetValue("segments", segmentsArray, true);
         packageObject.SetValue("permissionModule", packageContext.PermissionModule, true);
+        packageObject.SetValue("javaDomainPackage", packageContext.JavaDomainPackage, true);
 
         // 生效命名策略整体透出，供模板按 package.naming.* 组装路径段（如 layerPrefix）与实体后缀
         var namingObject = new ScriptObject();

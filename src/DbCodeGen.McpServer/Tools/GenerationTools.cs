@@ -61,7 +61,7 @@ public sealed class GenerationTools
         UseStructuredContent = true, OutputSchemaType = typeof(GenerateResult))]
     [Description("用途：执行批量代码生成并写盘（先重算 dry-run 再写盘，无确认弹窗）。\n"
         + "何时用：先 preview_generation 确认文件计划与诊断后调用；全参数显式，不读不写配置记忆。\n"
-        + "参数：与 preview_generation 同口径——package/workspaceRoot/codeDirectory 必填；tables 条件必填（所选模板含 table 作用域条目时至少一张）；"
+        + "参数：与 preview_generation 同口径——package/workspaceRoot/codeDirectory 必填；tables 条件必填（所选模板含 table 作用域条目时至少一张，databaseType 可从 get_table_detail 透传）；"
         + "files(array<string>,可选,默认 null)=模板过滤清单；preset(string,可选,默认 null)=命名预设，与 files 互斥，预设默认变量与调用方 variables 逐键合并（调用方优先）；"
         + "basePackageOverride/duplicateStrategy(默认 skip)/variables/modules/webDirectory(默认 web)/includePlatformTables(默认 false) 可选，含义同 preview_generation。\n"
         + "返回：generated/overwritten/skipped/failed（写盘计数）、isCancelled、logs[]（timestamp/level/message，逐文件结果）；"
