@@ -140,7 +140,12 @@ public sealed class GenerationRequestFactoryTests : IDisposable
         var packageService = new FakeTemplatePackageService(package);
         var tables = new List<SyntheticTableInput>
         {
-            new() { Name = "t_user_info" }
+            new()
+            {
+                Name = "t_user_info",
+                DatabaseType = DataSourceType.PostgreSql,
+                Columns = new[] { new SyntheticColumnInput { Name = "content", RawDbType = "bytea" } }
+            }
         };
 
         GenerationRequest request = await GenerationRequestFactory.CreateAsync(
@@ -151,6 +156,48 @@ public sealed class GenerationRequestFactoryTests : IDisposable
         TableInfo mapped = Assert.Single(request.Tables);
         Assert.Equal("t_user_info", mapped.RawName);
         Assert.Equal("TUserInfo", mapped.ClassName);
+        Assert.Equal(DataSourceType.PostgreSql, mapped.DatabaseType);
+        Assert.Equal("bytea", Assert.Single(mapped.Columns).RawDbType);
+    }
+
+    /// <summary>
+    /// MCP JSON 入参中的数据库类型应保留到合成表模型，供 PostgreSQL 专属 bytea 映射使用。
+    /// </summary>
+    [Fact]
+    public void SyntheticTableInput_JsonDatabaseType_Deserializes()
+    {
+        SyntheticTableInput? input = System.Text.Json.JsonSerializer.Deserialize<SyntheticTableInput>(
+            """{"name":"gen_product_blob","databaseType":"PostgreSql","columns":[{"name":"content","rawDbType":"bytea"}]}""",
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.NotNull(input);
+        Assert.Equal(DataSourceType.PostgreSql, input.DatabaseType);
+        Assert.Equal("bytea", Assert.Single(input.Columns!).RawDbType);
+    }
+
+    /// <summary>
+    /// 查询表详情应答的数据库类型能够由调用方直接传入离线生成表元数据。
+    /// </summary>
+    [Fact]
+    public void GetTableDetailResult_DatabaseType_RoundTripsToSyntheticInput()
+    {
+        var detail = new GetTableDetailResult(
+            "隔离开发库", DataSourceType.PostgreSql, "gen_product_blob", "public",
+            "GenProductBlob", "genProductBlob", "生成文件二进制内容",
+            new[] { new ColumnDetail("content", "content", "bytea", "文件内容", false, false, false, null, null, null) },
+            Array.Empty<string>());
+        var options = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true
+        };
+
+        string json = System.Text.Json.JsonSerializer.Serialize(detail, options);
+        SyntheticTableInput? input = System.Text.Json.JsonSerializer.Deserialize<SyntheticTableInput>(json, options);
+
+        Assert.NotNull(input);
+        Assert.Equal(DataSourceType.PostgreSql, input.DatabaseType);
+        Assert.Equal("bytea", Assert.Single(input.Columns!).RawDbType);
     }
 
     /// <summary>

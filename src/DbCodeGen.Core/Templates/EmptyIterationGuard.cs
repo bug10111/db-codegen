@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
+using DbCodeGen.Core.Model;
 using Scriban;
 using Scriban.Runtime;
 using Scriban.Syntax;
@@ -12,6 +13,8 @@ namespace DbCodeGen.Core.Templates;
 /// 误报控制：迭代源变量被同变量条件守卫包裹（祖先 #if 条件引用同一根变量，如「守卫文案 + for」的模板设计）时，
 /// 告警文案切换为守卫伴随变体并注明可忽略，供调用方按模板设计意图降噪。分析对象与 CollectionIterationGuard 同族
 /// （该守卫负责标量误迭代的结构化拒绝，本分析器负责可迭代空值的零迭代告警），共用渲染前 AST 分析入口。
+/// 表壳渲染点名：单表渲染上下文传入 tableContext 且该表未提供列元数据时，table.* 迭代源的零迭代由表壳渲染导致，
+/// 告警文案升级为点名变体（含物理表名与经 get_table_detail 补列后重试的引导）。
 /// </summary>
 internal static class EmptyIterationGuard
 {
@@ -20,8 +23,9 @@ internal static class EmptyIterationGuard
     /// </summary>
     /// <param name="template">已解析成功的模板。</param>
     /// <param name="root">已组装的渲染根上下文，用于解析迭代源实际值。</param>
+    /// <param name="tableContext">单表渲染上下文的当前表元数据；作用域片段渲染（无单表）传 null。</param>
     /// <returns>告警条目列表（含行列、迭代源路径与完整文案），无空迭代时为空列表。</returns>
-    public static IReadOnlyList<EmptyIterationWarning> FindEmptyIterations(Template template, ScriptObject root)
+    public static IReadOnlyList<EmptyIterationWarning> FindEmptyIterations(Template template, ScriptObject root, TableInfo? tableContext = null)
     {
         ArgumentNullException.ThrowIfNull(template);
         ArgumentNullException.ThrowIfNull(root);
@@ -32,7 +36,7 @@ internal static class EmptyIterationGuard
             return warnings;
         }
 
-        Walk(template.Page, root, new List<ScriptIfStatement>(), warnings);
+        Walk(template.Page, root, tableContext, new List<ScriptIfStatement>(), warnings);
         return warnings;
     }
 
@@ -43,11 +47,13 @@ internal static class EmptyIterationGuard
     /// </summary>
     /// <param name="node">当前语法树节点。</param>
     /// <param name="root">渲染根上下文。</param>
+    /// <param name="tableContext">单表渲染上下文的当前表元数据，供表壳零迭代点名判定；无单表时为 null。</param>
     /// <param name="ifAncestors">当前遍历路径上的 #if 祖先栈。</param>
     /// <param name="warnings">告警收集列表。</param>
     private static void Walk(
         ScriptNode node,
         ScriptObject root,
+        TableInfo? tableContext,
         List<ScriptIfStatement> ifAncestors,
         List<EmptyIterationWarning> warnings)
     {
@@ -60,12 +66,12 @@ internal static class EmptyIterationGuard
 
         if (node is ScriptForStatement forStatement)
         {
-            TryCollectWarning(forStatement, root, ifAncestors, warnings);
+            TryCollectWarning(forStatement, root, tableContext, ifAncestors, warnings);
         }
 
         foreach (ScriptNode child in node.Children)
         {
-            Walk(child, root, ifAncestors, warnings);
+            Walk(child, root, tableContext, ifAncestors, warnings);
         }
 
         if (pushedIf)
@@ -80,11 +86,13 @@ internal static class EmptyIterationGuard
     /// </summary>
     /// <param name="forStatement">for 语句节点。</param>
     /// <param name="root">渲染根上下文。</param>
+    /// <param name="tableContext">单表渲染上下文的当前表元数据，供表壳零迭代点名判定；无单表时为 null。</param>
     /// <param name="ifAncestors">祖先 #if 栈，供守卫伴随判定。</param>
     /// <param name="warnings">告警收集列表。</param>
     private static void TryCollectWarning(
         ScriptForStatement forStatement,
         ScriptObject root,
+        TableInfo? tableContext,
         List<ScriptIfStatement> ifAncestors,
         List<EmptyIterationWarning> warnings)
     {
@@ -101,13 +109,17 @@ internal static class EmptyIterationGuard
         // 行列取迭代表达式位置，与 CollectionIterationGuard 的定位口径一致（Scriban 0 基转 1 基）
         Scriban.Parsing.SourceSpan span = forStatement.Iterator?.Span ?? forStatement.Span;
         bool guardedBySameVariable = IsGuardedBySameVariable(ifAncestors, sourcePath);
+
+        // 表壳零迭代点名：仅传表名缺 columns 的表按表壳渲染时，table.* 迭代源的零迭代由缺列导致，
+        // 告警升级为含表名与补列引导的点名文案；其余来源维持通用文案
+        string? shellTableName = ResolveShellTableName(sourcePath, tableContext);
         warnings.Add(new EmptyIterationWarning(
             sourcePath,
             emptyReason,
             span.Start.Line + 1,
             span.Start.Column + 1,
             guardedBySameVariable,
-            FormatMessage(sourcePath, emptyReason, guardedBySameVariable)));
+            FormatMessage(sourcePath, emptyReason, guardedBySameVariable, shellTableName)));
     }
 
     /// <summary>
@@ -269,14 +281,27 @@ internal static class EmptyIterationGuard
     }
 
     /// <summary>
-    /// 组装告警消息：包含迭代源路径、空值原因与守卫模式降噪指引，供回执直接展示。
+    /// 组装告警消息：包含迭代源路径、空值原因与守卫模式降噪指引，供回执直接展示；
+    /// 表壳渲染导致的零迭代切换为点名变体（含表名与经 get_table_detail 补列后重试的引导）。
     /// </summary>
     /// <param name="sourcePath">迭代源点分路径。</param>
     /// <param name="emptyReason">空迭代原因。</param>
     /// <param name="guardedBySameVariable">是否被同变量条件守卫包裹。</param>
+    /// <param name="shellTableName">表壳渲染点名表名；非表壳场景为 null 维持通用文案。</param>
     /// <returns>告警消息文本。</returns>
-    private static string FormatMessage(string sourcePath, string emptyReason, bool guardedBySameVariable)
+    private static string FormatMessage(string sourcePath, string emptyReason, bool guardedBySameVariable, string? shellTableName)
     {
+        if (shellTableName is not null)
+        {
+            // 表壳渲染点名文案：零迭代根因是调用方未提供列元数据，指引取列后重试而非核对键名
+            return guardedBySameVariable
+                ? $"表 {shellTableName} 未提供列元数据（columns 为空，按表壳渲染），模板 for 循环迭代源 {sourcePath} 当前{emptyReason}，"
+                + "循环体零迭代（该循环由同变量条件守卫包裹）；若为守卫文案设计（空集合时产物含说明文字属预期），本告警可忽略，"
+                + "否则请经 get_table_detail 取该表列元数据后重试。"
+                : $"表 {shellTableName} 未提供列元数据（columns 为空，按表壳渲染），模板 for 循环迭代源 {sourcePath} 当前{emptyReason}，"
+                + "循环体零迭代，渲染产物中该段为空；请经 get_table_detail 取该表列元数据后重试。";
+        }
+
         if (guardedBySameVariable)
         {
             return $"for 循环迭代源 {sourcePath} 当前{emptyReason}，循环体零迭代（该循环由同变量条件守卫包裹）；"
@@ -285,6 +310,24 @@ internal static class EmptyIterationGuard
 
         return $"for 循环迭代源 {sourcePath} 当前{emptyReason}，循环体零迭代，渲染产物中该段为空；"
             + "请核对变量是否漏传或键名是否正确。若模板为守卫文案设计（空集合时产物含说明文字属预期），本告警可忽略。";
+    }
+
+    /// <summary>
+    /// 判定零迭代是否由表壳渲染导致并给出点名表名：渲染上下文为单表、该表未提供列元数据（columns 为 0）
+    /// 且迭代源根变量为 table 时成立（columns/primaryKeys 等 table.* 集合均为空的同源根因）；其余场景返回 null。
+    /// </summary>
+    /// <param name="sourcePath">迭代源点分路径（根变量名起始）。</param>
+    /// <param name="tableContext">单表渲染上下文的当前表元数据；无单表时为 null。</param>
+    /// <returns>表壳渲染点名表名；非表壳场景为 null。</returns>
+    private static string? ResolveShellTableName(string sourcePath, TableInfo? tableContext)
+    {
+        if (tableContext is null || tableContext.Columns.Count > 0)
+        {
+            return null;
+        }
+
+        string rootVariableName = sourcePath.Split('.')[0];
+        return string.Equals(rootVariableName, "table", StringComparison.Ordinal) ? tableContext.RawName : null;
     }
 }
 

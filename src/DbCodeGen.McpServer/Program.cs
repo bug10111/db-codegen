@@ -66,34 +66,34 @@ builder.Services.AddMcpServer(options =>
 【2. 标准工作流】
 1) 选包：list_template_packages（按 role/stack/hasBackendView/hasWebPage 与 presets 判断用途）。
 2) 查契约/模板：list_templates / read_template（manifest.contractPath 为包传参契约唯一权威；presets 摘要同时可见）。
-3) 查表：在线 list_tables → get_table_detail；离线合成直接内联 tables[].columns（无需连接数据库）。
+3) 查表：在线 list_tables → get_table_detail；将返回的 databaseType 与 columns 一并传入 tables[]，使库专属类型映射生效。离线合成遇库专属类型时显式提供 tables[].databaseType 与 columns（无需连接数据库）。
 4) 类型预检：check_type_mapping（与生成同 datasource/tables/package）。
-5) 预览：preview_generation（核对 entries + namingReport + pathWarnings + coverageWarnings + platformTableExcluded；坏路径/命名类告警必须先修正参数或模板再生成）。
+5) 预览：preview_generation（核对 entries + namingReport + pathWarnings + coverageWarnings + platformTableExcluded；坏路径/命名类告警必须先修正参数或模板再生成；namingReport.packagePath 是逐表通用包路径摘要，须结合 entries 核对各模板实际文件路径）。
 6) 生成：generate（内部重算 dry-run 后写盘，无确认弹窗）。
-7) 验证：回执 generated/failed + logs；生成物逐文件核对设计契约，禁止把生成物直接当设计达成。
+7) 验证：回执 generated/failed + logs；按 preview_generation 回执的 entries、模板 output 与技术基线逐文件核对实际生成物的输出目录和文件名，Java 核对 package 声明与目录、公开类名与文件名，.NET 核对命名空间、目录、公开类型与文件名，并核对设计契约；任一不符须修参数或模板、处置错误生成物后重生成，禁止把生成物直接当设计达成。
 
 【3. 核心参数表】（preview_generation / generate 共用）
 | 参数 | 类型 | 必填 | 默认 | 含义与约束 |
 | package | string | 是 | — | 模板包包名 |
 | workspaceRoot | string | 是 | — | 输出根前缀绝对路径；最终路径必须落在其内 |
 | codeDirectory | string | 是 | — | 项目内完整相对路径含包名（如 src/main/java/com/example/demo）；派生相对输出根与基础包名 |
-| tables | array<object> | 条件 | null | 所选模板含 table 作用域条目时必填非空；元素 name 必填、columns[] 可选；可原样透传 get_table_detail 的列 |
+| tables | array<object> | 条件 | null | 所选模板含 table 作用域条目时必填非空；元素 name 必填、databaseType 可选但库专属映射必须提供、columns[] 可选；可透传 get_table_detail 的 databaseType 与列；仅传表名缺 columns 按表壳渲染，空迭代告警点名该表 |
 | files | array<string> | 否 | null | 模板过滤清单；与 preset 互斥；省略时取包内全部 enabled 条目 |
 | preset | string | 否 | null | manifest.presets 命名预设（如 simple-java-sso 的 remote/embedded）；与 files 互斥；preset 默认 variables 与调用方 variables 逐键合并（调用方优先） |
 | basePackageOverride | string | 否 | null | 基础包名覆盖值 |
 | duplicateStrategy | string | 否 | skip | overwrite / skip；skip 对含手写代码目录不覆盖 |
-| variables | object | 否 | null | 注入 vars.*；命名契约键 tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule 透传，优先级高于 manifest.naming |
+| variables | object | 否 | null | 注入 vars.*；命名契约键 tablePrefixes/stripTablePrefix/singularize/entitySuffix/packageSegmentCase/layerPrefix/permissionModule 透传，优先级高于 manifest.naming；可选 javaDomainPackage 提供独立 Java 业务域包段，通过 package.javaDomainPackage 同时供表正文和输出路径使用，缺省为空，不改变权限模块 |
 | modules | array<object> | 否 | null | module 作用域模板逐个渲染；元素 name 必填且不得重复；省略但选中 module 模板时报错 |
 | webDirectory | string | 否 | web | root=web 模板基准；相对且不含 .. |
 | includePlatformTables | boolean | 否 | false | true 时平台表参与生成但回执仍标注命中；排除表规则不受影响 |
 形态参数经 variables 传递：deployMode（standalone 缺省 / cloud）、platformUi（remote 缺省 / embedded；simple-java-sso 的 preset=embedded 会自动注入）。
 
 【4. 返回结构总览】
-- preview_generation：entries[]（table 来源上下文/relativePath 渲染后相对路径/absolutePath 目标绝对路径/action=new|overwrite|skip）、newCount/overwriteCount/skipCount、unmappedTypes[]（dbType/table/column/occurrences）、pathWarnings[]（kind/template/samplePath/occurrences/message）、namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey）、coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）、platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）。
-- generate：generated/overwritten/skipped/failed（计数）、isCancelled、logs[]（timestamp/level/message）、namingReport/pathWarnings/coverageWarnings/platformTableExcluded（同 preview）。
+- preview_generation：entries[]（table 来源上下文/relativePath 渲染后相对路径/absolutePath 目标绝对路径/action=new|overwrite|skip）、newCount/overwriteCount/skipCount、unmappedTypes[]（dbType/table/column/occurrences）、pathWarnings[]（kind/template/samplePath/occurrences/message）、namingReport[]（rawName/entityName/variableName/packagePath/tableNameInCode/permissionKey）、coverageWarnings[]（kind=NoBackendView|NoWebPage|OnlyBackendGenerated/message）、platformTableExcluded[]（tableName/rule/excluded，excluded=false 表示经 includePlatformTables 放行）；载荷口径：回执只承载于 structuredContent 一处，text 块为摘要说明（不重复载荷）。
+- generate：generated/overwritten/skipped/failed（计数）、isCancelled、logs[]（timestamp/level/message）、namingReport/pathWarnings/coverageWarnings/platformTableExcluded（同 preview）；载荷口径：回执只承载于 structuredContent 一处，text 块为摘要说明（不重复载荷）。
 - list_template_packages：packages[]（name/description/engine/basePackage/isBuiltin/fileCount/modifiedTime/role/stack/scopes/hasBackendView/hasWebPage/contractPath/deployModes/hasContract/warnings/presets[]）。
-- list_templates / read_template：templates[]（path/output/enabled/language/scope/root/role/isContract）或正文 content+contentHash；两者均带 presets[]（name/description/fileCount）。
-- 失败应答：可预期领域错误以正常结果内的 JSON {isError:true,errorType,message} 返回（errorType=InvalidArgument/TemplatePackageError/Timeout/Cancelled/InternalError/NameConflict/OriginalMissing/NotFound/SaveFailed）；声明 outputSchema 的 9 个结构化输出工具错误走协议 isError 通道。
+- list_templates / read_template：templates[]（path/output/enabled/language/scope/root/role/isContract）或正文 content+contentHash+charCount+nextOffset+truncated；两者均带 presets[]（name/description/fileCount）。list_templates 支持 compact=true 紧凑模式（templates[] 仅 path/enabled + templateCount/presetCount，group/type 过滤照常生效；大包建议 compact=true 防回执超宿主结果预算被截断）。read_template 正文只承载于 structuredContent（text 块为摘要说明，不重复正文）；大模板分片读全：offset（0 基字符偏移，传值含 0 进入分片模式，负值/超界拒绝）+ maxChars（单片上限，护栏 1000~100000，分片缺省 100000；整读模式为截停阈值），按 nextOffset 续读至 null 即读全；contentHash 分片模式下仍为全文摘要。
+- 失败应答：9 个结构化输出工具（list_template_packages / list_templates / read_template / preview_generation / generate / list_datasources / list_tables / get_table_detail / get_type_map）错误经 McpException 走协议 isError 通道，消息带 [错误分类] 前缀（分类=InvalidArgument/TemplatePackageError/Timeout/Cancelled/InternalError）；其余工具（模板编辑/包管理/数据源管理）以正常结果内的 JSON {isError:true,errorType,message} 返回（errorType=InvalidArgument/TemplatePackageError/Timeout/Cancelled/InternalError/NameConflict/OriginalMissing/NotFound/SaveFailed）。
 
 【5. 硬约束】
 - 平台表（manifest.platformTables 声明的 sys_* 等）禁止生成 CRUD：默认排除并列入 platformTableExcluded；确需生成须显式 includePlatformTables=true（回执仍标注命中）；排除表规则一律生效。

@@ -9,7 +9,7 @@
 DbCodeGen MCP 服务端（`src/DbCodeGen.McpServer`，.NET 8 控制台，官方 SDK ModelContextProtocol 2.2.0）是一个**本地 stdio MCP 服务端**：AI 客户端以子进程方式拉起它，即可用自然语言驱动全部代码生成能力——查表结构、管数据源、改模板、预览渲染、批量生成。
 
 - **服务端本身不做任何 LLM 调用**：智能由 MCP 客户端侧的大模型承担，服务端只暴露工具面（共 25 个工具）。
-- **协议可发现性**：`initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；9 个结构化输出工具（`list_template_packages` / `list_templates` / `read_template` / `preview_generation` / `generate` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `outputSchema`，失败统一走协议 `result.isError`。
+- **协议可发现性**：`initialize` 返回结构化 `ServerInstructions`（能力总览 / 标准工作流 / 核心参数表 / 返回结构总览 / 硬约束五节）；25 个工具的 description 均写明用途、何时用、参数（类型/必填/默认/含义/约束）、返回字段与常见错误；3 个结构化输出工具（`read_template` / `preview_generation` / `generate`）声明 `outputSchema`，失败统一走协议 `result.isError`，成功回执为单载荷形态（完整回执只承载于 `structuredContent` 一处，text 内容块仅为摘要说明）；其余 6 个（`list_template_packages` / `list_templates` / `list_datasources` / `list_tables` / `get_table_detail` / `get_type_map`）声明 `UseStructuredContent` 输出结构化内容。
 - **与桌面端共享数据**：与 WPF 桌面端共用同一份 `C:\data\DbCodeGen\config.json` 与用户模板库（桌面端经 `config-location.json` 重定向数据目录时共用重定向后目录）。config 读写与模板包操作均经跨进程命名 Mutex 串行化，双开不会互相写坏文件。
 - **同机同用户**：数据源密码经 Windows DPAPI（CurrentUser 作用域）加密保存，仅同机同 Windows 用户可解密；stdio 子进程形态天然同机，不提供远程形态。
 - **零记忆态副作用**：MCP 调用一切参数显式传递（表、模板选择、覆盖策略、路径），服务端不读取桌面端的勾选态/最近目录等 UI 记忆，生成后也不回写 config。
@@ -77,7 +77,7 @@ get_table_detail → check_type_mapping → list_templates → read_template
 → render_template → preview_generation → generate
 ```
 
-1. `list_datasources` / `list_tables` / `get_table_detail`：取得表列元数据。`get_table_detail` 返回的列条目可直接映射为生成入参的合成列（`name/comment/isPrimaryKey/autoIncrement/isNullable/length/precision/scale` 同名直传；`dbType` 改名 `rawDbType`；`propertyName` 是服务端派生字段，不传）。
+1. `list_datasources` / `list_tables` / `get_table_detail`：取得表列元数据。`get_table_detail.databaseType` 可原样传给 `tables[].databaseType`；返回的列条目可直接映射为生成入参的合成列（`name/comment/isPrimaryKey/autoIncrement/isNullable/length/precision/scale` 同名直传；`dbType` 改名 `rawDbType`；`propertyName` 是服务端派生字段，不传）。
 2. `check_type_mapping`：**生成前预检**。对同样的 `datasource + tables + package` 组合按生效映射链（数据库专属条目 > 通用条目 > 包 typeMap）检查未映射类型。`allMapped=false` 时返回的 `unmapped` 清单给出每种未映射类型的首次出现位置与总次数。
    - **跳过的后果**：未映射类型的列生成时回落为兜底类型 `String`（见 `get_type_map` 的 `defaultType`），产出代码里该列字段不是期望类型（如该 `Long` 的列变 `String`），只能返工重生成。
    - 预检与生成必须用**同一个包**（包级 typeMap 口径一致）。
@@ -157,6 +157,7 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | --- | --- | --- | --- |
 | `name` | string | 是（运行时校验非空） | 原始表名，与数据库一致（如 `t_user_info`）；类名/变量名由服务端按原始名自动派生 |
 | `schemaName` | string | 否 | 所属 schema/库名，跨库场景使用 |
+| `databaseType` | string | 否；库专属类型映射时必传 | 数据库类型 `MySql` / `PostgreSql`；可原样透传 `get_table_detail.databaseType`，离线合成按实际库显式提供 |
 | `comment` | string | 否 | 表注释 |
 | `columns` | array | 否 | 列元数据集合；**省略时表按「仅表壳无列」参与渲染**（实体类等按列循环的模板将输出空列清单）；需要完整列时建议先用 `get_table_detail` 取回后传入 |
 
@@ -223,6 +224,7 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | `package` | string | 是 | — | 模板包包名 |
 | `group` | string | 否 | null | 分组前缀过滤：匹配模板相对路径的子目录前缀（目录边界对齐，`controller` 不会误命中 `controllerx/`）；多级子目录用正斜杠分隔；大小写不敏感 |
 | `type` | string | 否 | null | 语言段过滤，取值 `java` / `csharp`（或 `cs`）/ `xml` / `sql` / `json` / `plain`，大小写不敏感；非法取值被拒绝并列出合法值 |
+| `compact` | boolean | 否 | false | 紧凑模式：false=完整回执行为不变；true=条目仅含元数据 `{path, enabled}`，包级仅含 `{package, isBuiltin, templateCount, presetCount}`，不含 `output/language/scope/root/role/isContract/warnings/presets` 细节；`group`/`type` 过滤照常生效。**大包建议 `compact=true`**，避免完整回执超宿主单结果预算被截断 |
 
 **返回**：
 
@@ -245,6 +247,8 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 
 **包契约文档型条目**：当包根存在 `manifest.contractPath`（缺省 `README.md.scriban`）且未在 `template.json files[]` 声明时，`templates` 末尾附带一条合成条目（`path` 为契约路径、`output` 为空串、`enabled=false`、`scope=project`、`isContract=true`）。该条目不在清单中、不计入 `fileCount`、不参与生成；`group` 非空时不返回，`type` 过滤按契约文件名的语言段判定。
 
+**compact=true 紧凑回执**：单载荷形态（完整回执只承载于 `structuredContent` 一处，text 内容块为摘要说明）。返回 `package` / `isBuiltin` / `templateCount`（过滤后命中条目数）/ `templates[]`（仅 `path` + `enabled`）/ `presetCount`（命名预设数量，预设细节经完整模式或 `read_template` 查看）。
+
 **错误态**：`TemplatePackageError`（包不存在）；`InvalidArgument`（`type` 非法）。
 
 **调用示例**：
@@ -255,12 +259,14 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 
 ### 4.3 `read_template`
 
-**用途与使用时机**：读取模板文件正文全文（Scriban 源文本），改模板前取当前内容、评估模板风格时使用。
+**用途与使用时机**：读取模板文件正文（Scriban 源文本），改模板前取当前内容、评估模板风格时使用；大模板支持分片读取，正文被宿主结果预算截断时按 `nextOffset` 分片续读取全。应答为单载荷形态：正文只承载于 `structuredContent.content` 一处，text 内容块仅为摘要说明（不重复输出正文 JSON）。
 
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
 | `package` | string | 是 | — | 模板包包名 |
 | `path` | string | 是 | — | 模板相对包根路径（`list_templates` 返回的 `path`；反斜杠会规范化为正斜杠比对） |
+| `offset` | integer | 否 | null | 分片续读起点（0 基字符偏移）：传值含 0 即进入分片模式；不传=整读行为不变；负值或超出 `charCount` 拒绝为 `InvalidArgument` |
+| `maxChars` | integer | 否 | null | 单片字符上限，护栏 `[1000, 100000]`（越界拒绝为 `InvalidArgument`）：分片模式=本片长度上限（缺省 100000）；整读模式=截停阈值（正文超限时 `content` 截停至该长度并置 `truncated=true`、`nextOffset=该值`）；不传且整读=全文不截停 |
 
 **返回**：
 
@@ -271,18 +277,31 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | `output` | string | 输出相对路径模板 |
 | `enabled` | boolean | 是否默认参与生成 |
 | `language` | string | 目标语言 |
-| `content` | string | 模板正文全文（UTF-8 去 BOM 解码） |
-| `contentHash` | string | 正文内容摘要（SHA256 前 16 位 hex 小写），供 `save_template_edit` 条件写期望值 |
+| `content` | string | 模板正文全文（整读缺省）或当前分片切片（UTF-8 去 BOM 解码） |
+| `contentHash` | string | 正文全文内容摘要（SHA256 前 16 位 hex 小写），供 `save_template_edit` 条件写期望值；分片模式下仍为全文摘要 |
+| `charCount` | integer | 正文总字符数（整读与分片模式同值，作 `offset` 续读上界） |
+| `nextOffset` | integer \| null | 下一分片 0 基字符偏移；`null`=已读全；整读截停时为截停点 |
+| `truncated` | boolean | `content` 是否为截停片段：整读截停=`true`；分片模式恒 `false`（切片恒完整，剩余由 `nextOffset` 表达） |
 | `presets` | array | 命名预设摘要（`name` / `description` / `fileCount`） |
+
+**截断与分片续读**：缺省调用（不传 `offset`/`maxChars`）= 整读全文，与既有行为一致；宿主结果预算截断大文件时，按 `offset=上一回执 nextOffset` 循环续读直至 `nextOffset=null` 即读全（各片拼接与全文逐字一致）；`contentHash` 任意分片轮次均为全文摘要，`save_template_edit` 条件写不受分片影响。
 
 **包契约文档窄例外**：`manifest.contractPath`（缺省包根 `README.md.scriban`）即使未在 `template.json files[]` 声明也可读取；返回文档型元数据（`output` 为空串、`enabled=false`），读取仍经防目录穿越校验。契约路径之外的子目录形态、父级跳转形态、绝对路径/盘符形态与其它未声明文件一律拒绝；契约缺失时回执 `MissingContract` 告警（非阻断）。
 
-**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件或 `manifest.contractPath` 窄例外，杜绝任意文件读取；契约文件不存在同样报此错误）。
+**错误态**：`TemplatePackageError`（包不存在；`path` 未在包清单声明——只允许读清单内模板文件或 `manifest.contractPath` 窄例外，杜绝任意文件读取；契约文件不存在同样报此错误）；`InvalidArgument`（`offset` 负值或超界；`maxChars` 超出护栏区间）。
 
 **调用示例**：
 
 ```json
 { "package": "my-package", "path": "entity.java.scriban" }
+```
+
+```json
+{ "package": "my-package", "path": "README.md.scriban", "offset": 0, "maxChars": 50000 }
+```
+
+```json
+{ "package": "my-package", "path": "README.md.scriban", "offset": 50000 }
 ```
 
 ### 4.4 `list_datasources`
@@ -357,6 +376,7 @@ list_templates → read_template → 编辑（五选一）→ render_template �
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `datasource` | string | 数据源连接名 |
+| `databaseType` | string | 数据库类型 `MySql` / `PostgreSql`；可原样传为 `tables[].databaseType` |
 | `name` | string | 原始表名 |
 | `schema` | string \| 省略 | 所属 schema/库名 |
 | `className` | string | 类名 |
@@ -597,12 +617,12 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ### 4.14 `preview_generation`
 
-**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回文件计划、未映射类型清单与结构化诊断（`namingReport` / `pathWarnings` / `coverageWarnings` / `platformTableExcluded`），是 `generate` 前的唯一把关点，必须在生成前调用。文件计划按模板作用域三路展开：`table`（缺省）按表 × 模板笛卡尔积；`module` 按调用方 `modules` 清单逐个；`project` 整次渲染一次——三种作用域同次调用可混跑。
+**用途与使用时机**：批量生成 dry-run 预览，**零写盘**。返回文件计划、未映射类型清单与结构化诊断（`namingReport` / `pathWarnings` / `coverageWarnings` / `platformTableExcluded`），是 `generate` 前的唯一把关点，必须在生成前调用。文件计划按模板作用域三路展开：`table`（缺省）按表 × 模板笛卡尔积；`module` 按调用方 `modules` 清单逐个；`project` 整次渲染一次——三种作用域同次调用可混跑。应答为单载荷形态：完整回执只承载于 `structuredContent` 一处，text 内容块仅为摘要说明（不重复输出载荷 JSON）。
 
 | 参数 | 类型 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- | --- |
 | `package` | string | 是 | — | 模板包包名 |
-| `tables` | array of object | 条件必填 | null | 合成表集合；所选模板（`files` 过滤后）含 table 作用域条目时必填非空（至少一张，结构见本章开头；需要完整列时先用 `get_table_detail` 取回后传入），纯 module/project 作用域集合可省略 |
+| `tables` | array of object | 条件必填 | null | 合成表集合；所选模板（`files` 过滤后）含 table 作用域条目时必填非空（至少一张，结构见本章开头；需要完整列时先用 `get_table_detail` 取回后传入），纯 module/project 作用域集合可省略；仅传表名缺 `columns` 时按表壳渲染（列循环模板零迭代），空迭代告警点名该表 |
 | `workspaceRoot` | string | 是 | — | 工作区根目录绝对路径（输出文件的根前缀，须已存在或可创建） |
 | `codeDirectory` | string | 是 | — | 代码目录：项目内完整相对路径含包名（如 `src/main/java/com/example/demo`）；解析出基础包名与相对输出根，basePackage 末段即「模块」 |
 | `basePackageOverride` | string | 否 | null | 基础包名覆盖值；缺省用代码目录派生值 |
@@ -632,7 +652,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 | `unmappedTypes[].column` | string | 出现该类型的列名 |
 | `unmappedTypes[].occurrences` | integer | 出现次数 |
 | `pathWarnings` | array | 输出路径告警清单（坏路径预检，**非阻断**、不改变文件计划，但生成前必须核对）；无告警时为空列表 |
-| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符）/ `EmptyIteration`（模板内 for 循环零迭代信号）/ `InvalidJavaPackageSegment`（Java 包段非法标识符）/ `DuplicatePackageSegment`（src/main/java 之后连续重复包段）/ `NonLowercasePackageSegment`（包段含大写字母）/ `TableNameRoundTripMismatch`（模板用 hump2/3Underline(table.className) 反推物理表名）/ `PermissionKeyMismatch`（显式权限模块与 modules[0].name kebab 形态不一致）/ `WorkspaceRootMayBeAggregate`（workspaceRoot 自身疑似 Maven 聚合根且 codeDirectory 未落入模块目录） |
+| `pathWarnings[].kind` | string | 告警种类：`EmptyPackageDir`（输出路径引用 `package.dir` 占位但包段解析为空）/ `ConsecutiveSeparators`（渲染后路径含连续分隔符）/ `EmptyIteration`（模板内 for 循环零迭代信号；表壳渲染导致的零迭代为表级点名——`message` 含物理表名与经 `get_table_detail` 取列元数据后重试的引导）/ `InvalidJavaPackageSegment`（Java 包段非法标识符）/ `DuplicatePackageSegment`（src/main/java 之后连续重复包段）/ `NonLowercasePackageSegment`（包段含大写字母）/ `TableNameRoundTripMismatch`（模板用 hump2/3Underline(table.className) 反推物理表名）/ `PermissionKeyMismatch`（显式权限模块与 modules[0].name kebab 形态不一致）/ `WorkspaceRootMayBeAggregate`（workspaceRoot 自身疑似 Maven 聚合根且 codeDirectory 未落入模块目录） |
 | `pathWarnings[].template` | string | 首次出现该告警的模板相对路径 |
 | `pathWarnings[].samplePath` | string | 首次出现的渲染后路径样例 |
 | `pathWarnings[].occurrences` | integer | 该告警在本次生成范围内的总出现次数（同模板同种类跨表归并） |
@@ -676,7 +696,7 @@ module 作用域片段渲染示例（模板引用 `{{module.name}}` 与 `{{vars.
 
 ### 4.15 `generate`
 
-**用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。
+**用途与使用时机**：执行批量生成并写盘。内部**强制先重算 dry-run** 再逐文件写盘，**无确认弹窗**——务必先 `preview_generation` 确认文件计划。全参数显式：不读配置记忆态，生成后不回写 config.json 的最近路径。应答为单载荷形态：完整回执只承载于 `structuredContent` 一处，text 内容块仅为摘要说明（不重复输出载荷 JSON）。
 
 参数与 `preview_generation` 完全一致（`package` / `workspaceRoot` / `codeDirectory` 必填；`tables` 条件必填——所选模板含 table 作用域条目时非空，纯 module/project 作用域集合可省略；`basePackageOverride` / `files` / `preset`（与 files 互斥）/ `duplicateStrategy`（缺省 `skip`）/ `variables` / `modules` / `webDirectory` / `includePlatformTables` 可选，含义同 4.14），两个阶段共用同一渲染管线与入参口径。
 

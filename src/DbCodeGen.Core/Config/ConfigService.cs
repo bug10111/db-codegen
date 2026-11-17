@@ -47,6 +47,8 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// AppData 根目录，定位文件 config-location.json 的存放基准；测试可注入临时目录避免读写真实 %AppData%。
     /// </summary>
     private readonly string _appDataRoot;
+    // 显式传入的配置路径用于测试或独立调用，保持原有迁移语义。
+    private readonly bool _usesDefaultConfigPath;
 
     /// <summary>
     /// 使用指定凭据保护器与日志器创建配置服务实例。
@@ -72,7 +74,7 @@ public sealed class ConfigService : IConfigService, IDisposable
     /// <param name="credentialProtector">Windows DPAPI 凭据加解密器，用于 apiKey 的密文转换。</param>
     /// <param name="logger">配置服务日志器，日志不得输出明文密钥。</param>
     /// <param name="configFilePath">配置文件绝对路径；为空时经定位文件解析或回退默认路径。</param>
-    /// <param name="defaultTemplatesDirectory">默认模板目录，为空时回退默认模板目录单点 C:\data\DbCodeGen\Templates。</param>
+    /// <param name="defaultTemplatesDirectory">默认模板目录；为空时默认配置路径跟随生效数据目录，显式配置路径使用默认模板目录单点。</param>
     /// <param name="appDataRootOverride">AppData 根目录，定位文件 config-location.json 的存放基准，为空时取系统 ApplicationData。</param>
     /// <param name="crossProcessLockTimeout">跨进程配置锁等待超时，为空时取默认值；测试注入短超时验证互斥行为。</param>
     internal ConfigService(
@@ -88,10 +90,14 @@ public sealed class ConfigService : IConfigService, IDisposable
         _protector = credentialProtector;
         _logger = logger;
         _appDataRoot = appDataRootOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        _defaultTemplatesDirectory = defaultTemplatesDirectory ?? AppConfig.DefaultTemplatesDirectory;
+        _usesDefaultConfigPath = configFilePath is null;
         ConfigFilePath = configFilePath is null
             ? ResolveEffectiveConfigPath(_appDataRoot)
             : configFilePath;
+        // 默认启动时模板跟随配置所在目录；显式路径保留原有默认模板目录语义。
+        _defaultTemplatesDirectory = defaultTemplatesDirectory ?? (configFilePath is null
+            ? Path.Combine(Path.GetDirectoryName(ConfigFilePath)!, "Templates")
+            : AppConfig.DefaultTemplatesDirectory);
         _crossProcessLockTimeout = crossProcessLockTimeout ?? TimeSpan.FromMilliseconds(DefaultCrossProcessLockTimeoutMilliseconds);
     }
 
@@ -685,16 +691,17 @@ public sealed class ConfigService : IConfigService, IDisposable
 
     /// <summary>
     /// 构造首次启动的默认配置：默认 DashScope 兼容端点、qwen-plus 模型与默认模板搜索目录。
-    /// 模板搜索目录取默认模板目录单点 C:\data\DbCodeGen\Templates，与迁移来源及备份还原目标保持一致。
+    /// 模板目录与当前配置目录一致；测试注入的模板目录保持隔离。
     /// </summary>
-    private static AppConfig BuildDefaultConfig()
+    private AppConfig BuildDefaultConfig()
     {
-        string templatesDirectory = AppConfig.DefaultTemplatesDirectory;
+        string templatesDirectory = _defaultTemplatesDirectory;
 
         return new AppConfig
         {
             Version = 3,
             WorkspaceRoot = string.Empty,
+            DataDirectory = _usesDefaultConfigPath ? Path.GetDirectoryName(ConfigFilePath)! : string.Empty,
             LastRelativeOutputRoot = string.Empty,
             Llm = new LlmConfig
             {
